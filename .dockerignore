@@ -1,0 +1,49 @@
+# Keep the build context lean -- only source + go.mod/go.sum get sent to the
+# Docker daemon. Smaller context = faster builds + smaller chance of stray
+# files affecting layer cache keys.
+
+# git
+.git/
+.gitignore
+
+# local-only history archive (gitignored, never built into images)
+.archive/
+
+# build artifacts
+sfu
+sfu.exe
+sfs
+sfs.exe
+bin/
+dist/
+plans/
+
+# runtime output / temp dirs
+done/
+deduplicated.txt
+sfu_*.txt
+sfu_*.txt.zst
+shard_*.bin
+.sfu-tmp-*/
+sfu-debug-*.log
+sfu-rejected-*.txt
+sfu_dedup_idx/
+sfu_search_idx/
+*.sfsidx.json
+*.sfsidx.json.tmp
+sfs-debug-*.log
+*.idx
+*.write.*.tmp
+
+# editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# repo metadata Docker doesn't need
+README.md
+LICENSE
+.dockerignore
+Dockerfile

@@ -1,0 +1,24 @@
+# build artifacts
+/sfu
+/sfu.exe
+/sfs
+/sfs.exe
+/bin/
+/dist/
+
+# default output and shard temp files when running from repo root
+/deduplicated.txt
+/sfu_*.txt
+/sfu_*.txt.zst
+/shard_*.bin
+/done/
+/.sfu-tmp-*/
+/sfu-debug-*.log
+/sfu-rejected-*.txt
+/sfu_dedup_idx/
+/sfu_search_idx/
+*.sfsidx.json
+*.sfsidx.json.tmp
+/sfs-debug-*.log
+*.idx
+*.write.*.tmp
