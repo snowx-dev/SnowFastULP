@@ -20,8 +20,8 @@ import (
 const (
 	benchFrameBytes  = 8 << 20
 	benchFrameCount  = 8
-	benchRarePattern = "ZZZZ-NEEDLE-RARE-COOKIE"  // 24 bytes
-	benchDensePat    = "user@xyz" // 8 bytes, in every line
+	benchRarePattern = "ZZZZ-NEEDLE-RARE-COOKIE" // 24 bytes
+	benchDensePat    = "user@xyz"                // 8 bytes, in every line
 )
 
 func buildBenchCorpus(b *testing.B) string {
@@ -204,4 +204,3 @@ func BenchmarkSearch_DenseW4(b *testing.B) {
 		_ = n
 	}
 }
-

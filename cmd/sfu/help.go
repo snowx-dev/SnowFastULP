@@ -6,11 +6,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/snowx-dev/SnowFastULP/internal/cliargs"
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 	"golang.org/x/term"
 )
 
