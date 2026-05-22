@@ -48,17 +48,17 @@ It ships with two small commands:
 - [Install](#install)
 - [Build from source](#build-from-source)
 - [FAQ](#faq)
+- [Shoutouts](#shoutouts)
 
 ## Why it exists
 
-- Simple defaults first
+- Simple and powerful defaults
 - Predictable output
 - Low memory use thanks to a divid and conquer approach
 - Many ULP cleaners out there, and many laced with a surprise stealer. I wanted a clean, auditable cleaner that does what it says on the tin
-- Enough extra flags for bigger workflows, but not in your face
 - Cross platform
 
-Start with one clean output folder. If you keep using it, `-od` is there to turn that folder into a reusable archive later. I only use `-od`.
+💡 Start with one clean output folder. If you keep using it, `-od` is there to turn that folder into a reusable & searchable archive later. I only use `-od`.
 
 ## Quick start
 
@@ -73,7 +73,7 @@ chmod +x ./sfu ./sfs
 ./sfu ./ulp-public-cloud.txt -o ./cleaned/
 ```
 
-That's it :)
+🔥 That's it :)
 
 ---
 
@@ -83,9 +83,8 @@ Clean a whole folder the same way:
 ./sfu ./folder-full-of-dumps/ -o ./cleaned/
 ```
 
-Your input files are not changed. Each run writes a new cleaned output file.
 
-Search plain text output or raw text dumps with `sfs`:
+🔍 Search plain text output or raw text dumps with `sfs`:
 
 ```bash
 ./sfs -txt ./cleaned/ "facebook.com:"
@@ -100,13 +99,14 @@ Prefer building it yourself? See [Build from source](#build-from-source).
 
 
 
-If you start cleaning dumps often, try the library workflow:
+➡️ If you start cleaning dumps often, try the library workflow:
 
 ```bash
 ./sfu ./weekly-dump/ -od ./library/
 ```
 
-That one folder becomes a compressed archive library. Later runs using the same folder skip lines that are already there, and `sfs` can search it without `-txt`:
+That one folder becomes a compressed archive library.  
+Later runs using the same folder skips lines that are already there, and `sfs` can search it without `-txt`:
 
 ```bash
 ./sfs ./library "facebook.com:"
@@ -116,13 +116,13 @@ That is enough for the first try. Use `sfu -h` and `sfs -h` when you want the fu
 
 ## What you get
 
-- One clean output archive per `sfu` run.
-- Recursive folder scans for `.txt` input.
-- Deduplication inside the current run.
-- Plain `.txt` output by default when you use `-o`.
-- Optional compressed library output when you use `-od`.
-- `sfs` search for both `.txt` dumps and `.zst` archives.
-- A live terminal view by default, with plain output available for scripts.
+- One clean output archive per `sfu` run
+- Recursive folder scans for `.txt` input
+- Deduplication inside the current run
+- Plain `.txt` output by default when you use `-o`
+- Optional compressed library output when you use `-od`
+- `sfs` search for both `.txt` dumps and `.zst` archives
+- Nice TUI by default, with plain output available for scripts
 
 ## Common flags
 
@@ -135,9 +135,8 @@ Most runs only need one or two of these:
 | `-zst`     | You want compressed output without using library mode.                                         |
 | `-no-uri`  | You want shorter `host:login:password` lines instead of full URLs.                             |
 | `-no-tui`  | You prefer plain progress output, usually for scripts or narrow terminals.                     |
-| `-del`     | You want input `.txt` files deleted after a successful run. Be careful: this cannot be undone. |
+| `-del`     | You want input `.txt` files deleted after a successful run. Deletes *only* when run is done and successful. |
 
-There are more tuning and debug flags, but they are intentionally not front-page material. Run `sfu -h` or `sfs -h` when you need them.
 
 ## Library mode
 
@@ -147,7 +146,11 @@ There are more tuning and debug flags, but they are intentionally not front-page
 ./sfu ./new-stuff/ -od ./library/
 ```
 
-The first run creates compressed `sfu_*.txt.zst` output in `./library/`. Later runs compare new lines against the older archives in that same folder and skip duplicates. You now have a production grade ULP library 🎉
+The first run creates compressed `sfu_*.txt.zst` output in `./library/`. Later runs compare new lines against the older archives in that same folder and skip duplicates.  
+    
+You now have a production grade ULP library 🎉
+
+---
 
 `sfu` keeps small helper indexes next to the library:
 
@@ -183,7 +186,7 @@ Write hits to a file:
 ./sfs ./library -o hits.txt "facebook.com:"
 ```
 
-Patterns are literal strings, not regular expressions. Each hit is printed as one matching ULP line.
+Patterns are literal strings, not regular expressions. Each hit is printed as one matching ULP line. You can use `rg` for regex search.  
 
 ## Configuration
 
@@ -199,17 +202,8 @@ Both `sfu` and `sfs` can read a TOML config from:
 
 If the default file is missing, the tools start normally.
 
-Copy [`config.toml.example`](config.toml.example) as a starting point:
-
-```toml
-[sfu]
-od = "./library/"
-zst = true
-
-[sfs]
-dir = "./library"
-```
-
+Copy [`config.toml.example`](config.toml.example) as a starting point.
+  
 Relative paths in the config file are resolved from the config file's directory. A leading `~/` expands to your home directory.
 
 ## Install
