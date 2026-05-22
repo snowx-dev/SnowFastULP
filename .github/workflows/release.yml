@@ -1,0 +1,88 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to embed (eg 0.2)'
+        required: true
+        default: '0.0-dev'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${{ github.event.inputs.version }}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building version: $v"
+
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Build release artifacts (pass 1)
+        run: make release-assets VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Snapshot SHA256SUMS (pass 1)
+        run: cp dist/SHA256SUMS /tmp/SHA256SUMS.pass1
+
+      - name: Rebuild (pass 2, reproducibility check)
+        run: make release-assets VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Verify reproducibility
+        run: |
+          if ! diff -u /tmp/SHA256SUMS.pass1 dist/SHA256SUMS; then
+            echo "::error::reproducibility check failed, two builds produced different hashes"
+            exit 1
+          fi
+          echo "reproducibility ok, both builds matched"
+
+      - name: Draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          body: |
+            ## SnowFastULP ${{ steps.ver.outputs.version }}
+
+            Cross-platform binaries built reproducibly via GitHub Actions. Each release is built twice and verified to produce identical SHA256 hashes before publishing.
+
+            ### Verifying
+
+            ```bash
+            sha256sum -c SHA256SUMS
+            ```
+
+            ### Platform notes
+
+            - **Linux**: `chmod +x` and run
+            - **macOS**: `chmod +x` then first run may require System Settings, Privacy and Security, "Allow anyway". Binaries are unsigned.
+            - **Windows**: SmartScreen may warn, click "More info" then "Run anyway". Binaries are unsigned.
+          files: |
+            dist/SnowFastULP-${{ steps.ver.outputs.version }}-linux-amd64
+            dist/SnowFastULP-${{ steps.ver.outputs.version }}-macos-arm64
+            dist/SnowFastULP-${{ steps.ver.outputs.version }}-windows-amd64.exe
+            dist/SnowFastSearch-${{ steps.ver.outputs.version }}-linux-amd64
+            dist/SnowFastSearch-${{ steps.ver.outputs.version }}-macos-arm64
+            dist/SnowFastSearch-${{ steps.ver.outputs.version }}-windows-amd64.exe
+            dist/SnowFastULP-${{ steps.ver.outputs.version }}-binaries.zip
+            dist/SHA256SUMS
