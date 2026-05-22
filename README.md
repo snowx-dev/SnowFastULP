@@ -73,7 +73,7 @@ chmod +x ./sfu ./sfs
 ./sfu ./ulp-public-cloud.txt -o ./cleaned/
 ```
 
-🔥 That's it :)
+🔥 That's it 🔥
 
 ---
 
@@ -149,15 +149,6 @@ Most runs only need one or two of these:
 The first run creates compressed `sfu_*.txt.zst` output in `./library/`. Later runs compare new lines against the older archives in that same folder and skip duplicates.  
     
 You now have a production grade ULP library 🎉
-
----
-
-`sfu` keeps small helper indexes next to the library:
-
-- `sfu_dedup_idx/` helps `sfu` tell whether a line already exists in older output using hashes. These hashes are loaded into memory during cleaning, so when you start the deduping process, things go fast.
-- `sfu_search_idx/` helps `sfs` search compressed archives faster. Based on Prequel's [Zindex](https://github.com/Pre-quel/Zindex) implem.
-
-These sidecar folders are safe to leave alone. If you delete them, the tools rebuild what they need on the next run.
 
 **Rule of thumb:**
 
@@ -255,7 +246,16 @@ Big inputs are processed in two stages: first a fast pass sorts lines into bucke
 
 You usually do not need to tune anything. `sfu` picks sensible settings from your machine unless you override them.
 
-With `-od`, `sfu` also loads or rebuilds small index files beside older archives so new lines can be compared against the whole library without fully re-reading every old file.
+With `-od`, `sfu` also loads or rebuilds small index files beside older archives so new lines can be compared against the whole library without fully re-reading every old file.  
+
+  
+`sfu` keeps small helper indexes next to the library when using `-od` library mode:
+
+- `sfu_dedup_idx/` helps `sfu` tell whether a line already exists in older output using hashes. These hashes are loaded into memory during cleaning, so when you start the deduping process, things go fast.
+- `sfu_search_idx/` helps `sfs` search compressed archives faster. Based on Prequel's [Zindex](https://github.com/Pre-quel/Zindex) implem.
+
+These sidecar folders are safe to leave alone. If you delete them, the tools rebuild what they need on the next run.
+
 
 ## FAQ
 
