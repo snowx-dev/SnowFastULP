@@ -106,7 +106,7 @@ Prefer building it yourself? See [Build from source](#build-from-source).
 ```
 
 That one folder becomes a compressed archive library.  
-Later runs using the same folder skips lines that are already there, and `sfs` can search it without `-txt`:
+Later runs using **the same folder** skips lines that are already there, and `sfs` can search it without `-txt`:
 
 ```bash
 ./sfs ./library "facebook.com:"
