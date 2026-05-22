@@ -20,7 +20,8 @@ It ships with two small commands:
 - `sfs` searches plain `.txt` files or compressed `.zst` archives.
 
 ➡️ **Basically**: download `sfu`, point it at a file or folder, and keep the cleaned result somewhere useful. If you want to search, grab `sfs` too.  
-✍️ `sfu` stands for **S**now**F**ast**U**LP, `sfs` stands for **S**now**F**ast**S**earch.  
+  
+💡 `sfu` stands for **S**now**F**ast**U**LP, `sfs` stands for **S**now**F**ast**S**earch.  
 
 
 ---
