@@ -1,18 +1,40 @@
-# SnowFastULP
+
+<p align="center">
+  <img src="https://i.ibb.co/MDLkCcrf/snowfast-v9-snowflake-white-darffk.jpg" alt="Description" width="500" />
+</p>
+
+<h1 align="center">SnowFastULP</h1>   
+
+
 
 [![GitHub](https://img.shields.io/badge/GitHub-snowx--dev%2FSnowFastULP-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/snowx-dev/SnowFastULP)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/)
 [![Platforms](https://img.shields.io/badge/Platforms-linux%20%7C%20macos%20%7C%20windows-2ea043?style=for-the-badge)](#install)
 [![Docker](https://img.shields.io/badge/Docker-supported-2496ED?style=for-the-badge&logo=docker&logoColor=white)](#build-from-source)
 
-SnowFastULP is a small toolkit I built for my ULP cleanup workflow. It cleans large text dumps without babysitting huge files or filling RAM.
+SnowFastULP cleans large text dumps without babysitting huge files or filling RAM.
 
 It ships with two small commands:
 
 - `sfu` cleans ULP/LPU `.txt` files, removes duplicates, and writes clean output.
 - `sfs` searches plain `.txt` files or compressed `.zst` archives.
 
-Basically: download `sfu`, point it at a file or folder, and keep the cleaned result somewhere useful. If you want to search, grab `sfs` too.
+➡️ **Basically**: download `sfu`, point it at a file or folder, and keep the cleaned result somewhere useful. If you want to search, grab `sfs` too.  
+✍️ `sfu` stands for **S**now**F**ast**U**LP, `sfs` stands for **S**now**F**ast**S**earch.  
+
+
+---
+
+<p align="center">
+  <img src="https://i.ibb.co/F4gJWc4K/screenshot-rocks3.png" alt="sfu dedup phase" width="700" />
+</p>
+<p align="center">sfu dedup phase</p>   
+
+<p align="center">
+  <img src="https://i.ibb.co/tTPj502K/screenshot-rocks.png" alt="sfu job summary" width="700" />
+</p>
+<p align="center">sfu job summary</p>   
+
 
 ## Contents
 
@@ -50,7 +72,9 @@ chmod +x ./sfu ./sfs
 ./sfu ./ulp-public-cloud.txt -o ./cleaned/
 ```
 
-The `-o` flag points at an output directory. If the directory does not exist yet, end it with `/` and `sfu` will create it.
+That's it :)
+
+---
 
 Clean a whole folder the same way:
 
@@ -229,15 +253,6 @@ Docker targets:
 | `make docker-run-sfs ARGS='...'` | Run `sfs` in the same image.                             |
 | `make docker-build-all`          | Build release binaries via Docker, no local Go required. |
 
-## Screenshots
-
-| ![](https://i.ibb.co/F4gJWc4K/screenshot-rocks3.png) |
-|:----------------------------------------------------:|
-| `sfu` deduplication phase                            |
-
-| ![](https://i.ibb.co/tTPj502K/screenshot-rocks.png) |
-|:---------------------------------------------------:|
-| `sfu` job summary                                   |
 
 ## Under the hood
 
