@@ -14,19 +14,35 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/snowx-dev/SnowFastULP/ci.yml?branch=main&label=CI&style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/snowx-dev/SnowFastULP/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/snowx-dev/SnowFastULP?display_name=tag&sort=date&style=for-the-badge&logo=github&logoColor=white)](https://github.com/snowx-dev/SnowFastULP/releases/latest)
 
-SnowFastULP cleans large text dumps without babysitting huge files or filling RAM.
+**SnowFastULP cleans small to huge ULP txt dumps fast, without filling up your RAM.**  
 
-It ships with two small commands:
+  
+It ships with two small commands:  
 
 - `sfu` cleans ULP/LPU `.txt` files, removes duplicates, and writes clean output.
 - `sfs` searches plain `.txt` files or compressed `.zst` archives.
-
+  
 ➡️ **Basically**: download `sfu`, point it at a file or folder, and keep the cleaned result somewhere useful. If you want to search, grab `sfs` too.  
   
 💡 `sfu` stands for **S**now**F**ast**U**LP, `sfs` stands for **S**now**F**ast**S**earch.  
 
 
 ---
+
+
+## Contents
+
+- [Quick start](#-quick-start)
+- [Common flags](#common-flags)
+- [Library mode](#library-mode)
+- [Searching with `sfs`](#searching-with-sfs)
+- [Configuration](#configuration)
+- [Install](#install)
+- [Build from source](#build-from-source)
+- [FAQ](#faq)
+- [Shoutouts](#-shoutouts)
+
+  ---
 
 <p align="center">
   <img src="https://i.ibb.co/F4gJWc4K/screenshot-rocks3.png" alt="sfu dedup phase" width="700" />
@@ -39,30 +55,7 @@ It ships with two small commands:
 <p align="center">sfu job summary</p>   
 
 
-## Contents
-
-- [Why it exists](#why-it-exists)
-- [Quick start](#quick-start)
-- [Common flags](#common-flags)
-- [Library mode](#library-mode)
-- [Searching with `sfs`](#searching-with-sfs)
-- [Configuration](#configuration)
-- [Install](#install)
-- [Build from source](#build-from-source)
-- [FAQ](#faq)
-- [Shoutouts](#shoutouts)
-
-## Why it exists
-
-- Simple and powerful defaults
-- Predictable output
-- Low memory use thanks to a divid and conquer approach
-- Many ULP cleaners out there, and many laced with a surprise stealer. I wanted a clean, auditable cleaner that does what it says on the tin
-- Cross platform
-
-💡 Start with one clean output folder. If you keep using it, `-od` is there to turn that folder into a reusable & searchable archive later. I only use `-od`.
-
-## Quick start
+## 🌱 Quick start
 
 Download the binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest). Each release is built reproducibly via GitHub Actions and ships a `SHA256SUMS` file you can verify against.
 
@@ -114,11 +107,13 @@ Later runs using **the same folder** skips lines that are already there, and `sf
 
 That is enough for the first try. Use `sfu -h` and `sfs -h` when you want the full flag list.
 
+
+
 ## What you get
 
 - One clean output archive per `sfu` run
 - Recursive folder scans for `.txt` input
-- Deduplication inside the current run
+- Deduplication
 - Plain `.txt` output by default when you use `-o`
 - Optional compressed library output when you use `-od`
 - `sfs` search for both `.txt` dumps and `.zst` archives
@@ -191,7 +186,6 @@ Both `sfu` and `sfs` can read a TOML config from:
 | `SNOWFAST_CONFIG` | Explicit config file from the environment. Must exist.                                        |
 | Default path      | `~/.config/snowfast/config.toml` on Linux/macOS, `%AppData%\snowfast\config.toml` on Windows. |
 
-If the default file is missing, the tools start normally.
 
 Copy [`config.toml.example`](config.toml.example) as a starting point.
   
@@ -261,7 +255,7 @@ These sidecar folders are safe to leave alone. If you delete them, the tools reb
 
 ## FAQ
 
-### How do I search compressed outputs?
+### 🔷 How do I search compressed outputs?
 
 Use `sfs`:
 
@@ -277,23 +271,23 @@ Best results come from a library built with `sfu -od`.
 rg -z -s --text --no-filename -N "PATTERN-HERE" ./library/
 ```
 
-### Should I use `-o` or `-od`?
+### 🔷 Should I use `-o` or `-od`?
 
 Use `-o` for one-off output. You get a fresh `sfu_...` file each run, and new output is not compared to older runs.
 
 Use `-od` when you keep adding dumps to the same library folder and want new lines deduped against everything already there. Compression is always on in library mode.
 
-### Will `sfu` overwrite my inputs or old outputs?
+### 🔷 Will `sfu` overwrite my inputs or old outputs?
 
 No, unless you ask it to. Inputs are not touched by default, and each run writes a new output file.
 
 The exception is `-del`, which removes input `.txt` files after a successful run. Do not use it until you are comfortable with the workflow.
 
-### What can I point `sfu` at?
+### 🔷 What can I point `sfu` at?
 
 A single `.txt` file or a folder. Folders are scanned recursively for `.txt` files. Other extensions are ignored.
 
-### Why did `-o` reject my path?
+### 🔷 Why did `-o` reject my path?
 
 `-o` expects a directory, not a filename. Use an existing folder or end a new folder path with `/` so `sfu` knows it should create a directory:
 
@@ -301,23 +295,23 @@ A single `.txt` file or a folder. Folders are scanned recursively for `.txt` fil
 ./sfu ./data/ -o ./cleaned/
 ```
 
-### What are the sidecar index folders?
+### 🔷 What are the sidecar index folders?
 
 `sfu_dedup_idx/` helps `sfu` dedup against older library archives. `sfu_search_idx/` helps `sfs` search compressed archives faster.
 
 They are safe to keep. They are also safe to delete; the next relevant run rebuilds them.
 
-### I stopped a run halfway. Is anything broken?
+### 🔷 I stopped a run halfway. Is anything broken?
 
 Usually no. Pressing Ctrl+C once asks `sfu` to clean up temp folders and unfinished output from that run. Your input files are left alone.
 
 Pressing Ctrl+C twice force-exits. Cleanup may be skipped, and `sfu` prints any paths you may want to remove manually.
 
-### Lines are missing or rejected
+### 🔷 Lines are missing or rejected
 
 The default parser is strict on purpose. For messier dumps, try `-loose`. To inspect dropped lines, use `-debug-reject`.
 
-### macOS says the binary cannot be opened
+### 🔷 macOS says the binary cannot be opened
 
 The release binary is unsigned. If you downloaded it from a trusted source, run these commands in the folder where the binary lives:
 
@@ -332,9 +326,9 @@ Then run:
 ./sfu --help
 ```
 
-## Shoutouts
+## 💞 Shoutouts
 
-- vulnerose // Parser inspo
+- [vulnerose](t.me/aeryals) // Parser inspo
 - [Prequel](https://eternally.blue) // Search inspo
 - [lateralmovement](https://guns.lol/lateralmovement) // Cleaner inspo + data golbin
 - Duckyhax // Beta testing
