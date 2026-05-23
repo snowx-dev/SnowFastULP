@@ -328,7 +328,7 @@ Then run:
 
 ## 💞 Shoutouts
 
-- [vulnerose](t.me/aeryals) // Parser inspo
+- [vulnerose](https://t.me/aeryals) // Parser inspo
 - [Prequel](https://eternally.blue) // Search inspo
 - [lateralmovement](https://guns.lol/lateralmovement) // Cleaner inspo + data golbin
 - Duckyhax // Beta testing
