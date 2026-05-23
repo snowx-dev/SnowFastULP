@@ -98,7 +98,7 @@ Prefer building it yourself? See [Build from source](#build-from-source).
 ./sfu ./weekly-dump/ -od ./library/
 ```
 
-That one folder becomes a compressed archive library, whislt still being searchable. It's awesome 🔥    
+That one folder becomes a compressed archive library, but still being searchable. It's awesome 🔥    
 Later runs using **the same folder** skips lines that are already there, and `sfs` can search it (without `-txt`):
 
 ```bash
