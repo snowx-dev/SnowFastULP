@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os"
+	"sync/atomic"
 
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
@@ -51,16 +52,16 @@ func sniffEncoding(path string) (enc fileEncoding, bomBytes int, err error) {
 	return encUTF8, 0, nil
 }
 
-// counts raw bytes from underlying reader. used so utf-16 progress
-// reports against on-disk size not decoded size. not thread-safe.
+// counts raw bytes from underlying reader, atomic b/c zstd bg goroutine
+// writes while progress reader reads
 type countingReader struct {
 	r io.Reader
-	n int64
+	n atomic.Int64
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	c.n += int64(n)
+	c.n.Add(int64(n))
 	return n, err
 }
 

@@ -398,7 +398,7 @@ func scanChunk(ws *shardWorkState, job chunkJob, writers []*bucketWriter, usePow
 		lineStart := currentOffset
 		var rawBefore int64
 		if counter != nil {
-			rawBefore = counter.n
+			rawBefore = counter.n.Load()
 		}
 		line, consumed, tooLong, rerr := readBoundedLine(reader, maxInputLineBytes)
 		if consumed > 0 {
@@ -407,7 +407,7 @@ func scanChunk(ws *shardWorkState, job chunkJob, writers []*bucketWriter, usePow
 			// totals over the file are exact
 			rawConsumed := consumed
 			if counter != nil {
-				rawConsumed = counter.n - rawBefore
+				rawConsumed = counter.n.Load() - rawBefore
 			}
 			if m != nil {
 				m.bytesRead.Add(rawConsumed)

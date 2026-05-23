@@ -541,13 +541,13 @@ func fastPathFile(path string, seen map[uint64]struct{}, sink lineSink, br *bufi
 	for {
 		var rawBefore int64
 		if counter != nil {
-			rawBefore = counter.n
+			rawBefore = counter.n.Load()
 		}
 		line, consumed, tooLong, rerr := readBoundedLine(br, maxInputLineBytes)
 		if consumed > 0 {
 			if m != nil {
 				if counter != nil {
-					m.bytesRead.Add(counter.n - rawBefore)
+					m.bytesRead.Add(counter.n.Load() - rawBefore)
 				} else {
 					m.bytesRead.Add(consumed)
 				}
