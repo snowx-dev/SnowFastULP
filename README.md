@@ -11,6 +11,8 @@
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/)
 [![Platforms](https://img.shields.io/badge/Platforms-linux%20%7C%20macos%20%7C%20windows-2ea043?style=for-the-badge)](#install)
 [![Docker](https://img.shields.io/badge/Docker-supported-2496ED?style=for-the-badge&logo=docker&logoColor=white)](#build-from-source)
+[![CI](https://github.com/snowx-dev/SnowFastULP/actions/workflows/ci.yml/badge.svg)](https://github.com/snowx-dev/SnowFastULP/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/snowx-dev/SnowFastULP?display_name=tag&sort=semver)](https://github.com/snowx-dev/SnowFastULP/releases/latest)
 
 SnowFastULP cleans large text dumps without babysitting huge files or filling RAM.
 
@@ -62,9 +64,7 @@ It ships with two small commands:
 
 ## Quick start
 
-Download the binaries for your platform from [`release-bins`](https://github.com/snowx-dev/SnowFastULP/tree/main/release-bins).
-
-Soon, CI-built binaries will also be published from GitHub Releases.
+Download the binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest). Each release is built reproducibly via GitHub Actions and ships a `SHA256SUMS` file you can verify against.
 
 Put the binary somewhere convenient, or run it from the download folder:
 
@@ -201,11 +201,13 @@ Relative paths in the config file are resolved from the config file's directory.
 
 ### Download executables
 
-Binaries for Linux, macOS, and Windows are available in [`release-bins`](https://github.com/snowx-dev/SnowFastULP/tree/main/release-bins).
+Binaries for Linux, macOS, and Windows are published on the [Releases page](https://github.com/snowx-dev/SnowFastULP/releases). Each release ships a `SHA256SUMS` file so you can verify downloads:
 
-Soon: GitHub Releases once CI is wired up.
+```bash
+sha256sum -c SHA256SUMS
+```
 
-Each release includes `SHA256SUMS` so you can verify downloads.
+Builds are reproducible via GitHub Actions, every release is built twice and verified to produce identical hashes before publishing.
 
 ### Install with Go
 
