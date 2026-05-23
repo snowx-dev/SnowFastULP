@@ -941,14 +941,15 @@ func streamArchiveLines(ctx context.Context, path string, decoderConcurrency int
 			}
 		}
 		// counter delta is bursty (bufio refills in 4 MiB jumps) but totals exact
-		if delta := counter.n - lastReportedRaw; delta > 0 {
+		rawNow := counter.n.Load()
+		if delta := rawNow - lastReportedRaw; delta > 0 {
 			if m != nil {
 				m.regenBytesRead.Add(delta)
 			}
 			if ws != nil {
-				ws.bytesDone.Store(counter.n)
+				ws.bytesDone.Store(rawNow)
 			}
-			lastReportedRaw = counter.n
+			lastReportedRaw = rawNow
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
