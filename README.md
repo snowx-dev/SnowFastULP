@@ -92,14 +92,14 @@ Prefer building it yourself? See [Build from source](#build-from-source).
 
 
 
-➡️ If you start cleaning dumps often, try the library workflow:
+➡️ If you start cleaning dumps often, try the [library workflow](#library-mode):
 
 ```bash
 ./sfu ./weekly-dump/ -od ./library/
 ```
 
-That one folder becomes a compressed archive library.  
-Later runs using **the same folder** skips lines that are already there, and `sfs` can search it without `-txt`:
+That one folder becomes a compressed archive library, whislt still being searchable. It's awesome 🔥    
+Later runs using **the same folder** skips lines that are already there, and `sfs` can search it (without `-txt`):
 
 ```bash
 ./sfs ./library "facebook.com:"
