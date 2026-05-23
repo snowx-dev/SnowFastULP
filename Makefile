@@ -92,14 +92,23 @@ release-assets: release
 	@cp "$(BIN_DIR)/darwin/arm64/sfs" "$(DIST_DIR)/SnowFastSearch-$(VERSION)-macos-arm64"
 	@cp "$(BIN_DIR)/windows/amd64/sfs.exe" "$(DIST_DIR)/SnowFastSearch-$(VERSION)-windows-amd64.exe"
 	@cp "$(BIN_DIR)/$(RELEASE_ZIP)" "$(DIST_DIR)/$(RELEASE_ZIP)"
-	@cd "$(DIST_DIR)" && sha256sum SnowFastULP-* SnowFastSearch-* "$(RELEASE_ZIP)" > SHA256SUMS
+	@cd "$(DIST_DIR)" && sha256sum \
+		SnowFastULP-$(VERSION)-linux-amd64 \
+		SnowFastULP-$(VERSION)-macos-arm64 \
+		SnowFastULP-$(VERSION)-windows-amd64.exe \
+		SnowFastSearch-$(VERSION)-linux-amd64 \
+		SnowFastSearch-$(VERSION)-macos-arm64 \
+		SnowFastSearch-$(VERSION)-windows-amd64.exe \
+		"$(RELEASE_ZIP)" > SHA256SUMS
 	@cat "$(DIST_DIR)/SHA256SUMS"
 	@echo "Release downloads: ./$(DIST_DIR)/"
 
 release-zip:
 	@command -v zip >/dev/null 2>&1 || { echo "zip is required to package release artifacts" >&2; exit 1; }
 	@rm -f "$(BIN_DIR)/$(RELEASE_ZIP)"
-	@cd "$(BIN_DIR)" && zip -qr "$(RELEASE_ZIP)" linux darwin windows SHA256SUMS
+	@find "$(BIN_DIR)/linux" "$(BIN_DIR)/darwin" "$(BIN_DIR)/windows" "$(BIN_DIR)/SHA256SUMS" \
+		-exec touch -d "1970-01-01 00:00:00 UTC" {} +
+	@cd "$(BIN_DIR)" && zip -qrX "$(RELEASE_ZIP)" linux darwin windows SHA256SUMS
 	@echo "Release binaries: ./$(BIN_DIR)/"
 	@echo "Release zip: ./$(BIN_DIR)/$(RELEASE_ZIP)"
 
