@@ -57,7 +57,7 @@ It ships with two small commands:
 
 ## 🌱 Quick start
 
-Download the binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest). Each release is built reproducibly via GitHub Actions and ships a `SHA256SUMS` file you can verify against.
+Download the `SnowFastUlP` and `SnowFastSearch` binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest) + rename them to `sfu` and `sfs`, or [download the binary pack](https://github.com/snowx-dev/SnowFastULP/releases/download/v0.1/SnowFastULP-0.1-binaries.zip) and extract the ones for you. Each release is built reproducibly via GitHub Actions and ships a `SHA256SUMS` file you can verify against.
 
 Put the binary somewhere convenient, or run it from the download folder:
 
