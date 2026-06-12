@@ -745,3 +745,29 @@ func TestTermWidthCapsAt80(t *testing.T) {
 		t.Errorf("termWidth() = %d; expected (0, %d]", w, tuiDisplayWidth)
 	}
 }
+
+// -od dedup frame shows the brief "reading index" indicator (library keys
+// pulled from the sorted sidecars), replacing the old routing phase.
+func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
+	m := &metrics{}
+	r := &resolved{totalInputs: 1, workers: 1, dedupWorkers: 1, bucketCount: 4}
+	r.cfg.DestDedup = true
+	r.odMetrics = &odMetrics{}
+	r.odMetrics.keysTotalEstimate.Store(1000)
+	r.odMetrics.keysLoaded.Store(250)
+
+	out := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n")
+	if !strings.Contains(out, "Library") || !strings.Contains(out, "read") {
+		t.Fatalf("dedup frame missing library read indicator:\n%s", out)
+	}
+	if !strings.Contains(out, "250") || !strings.Contains(out, "1,000") {
+		t.Fatalf("dedup frame missing read counts:\n%s", out)
+	}
+
+	// non-od dedup must NOT show the library row
+	plain := strings.Join(renderDedupLines(time.Now(), time.Second, m,
+		&resolved{totalInputs: 1, workers: 1, dedupWorkers: 1, bucketCount: 4}, 0, 0, 0, 0, 86), "\n")
+	if strings.Contains(plain, "Library") {
+		t.Fatalf("non-od dedup should not show Library row:\n%s", plain)
+	}
+}

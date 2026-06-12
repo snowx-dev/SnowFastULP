@@ -276,28 +276,12 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 	stopDbg := startDebugProgress(ctx, r.cfg.Debug, m, r.odMetrics)
 	defer stopDbg()
 
-	// phase 0 (-od): discover prior archives, regen stale sidecars,
-	// route dest hashes into per-bucket files. phase 2 preloads each
-	// bucket's dest set and skips known hashes
-	var destBucketPaths []string
-	// deferred library-load channel. nil w/o -od or w/o archives.
-	// phase 2 blocks on this, phase 1 runs concurrently w/ load
-	var odLoadCh <-chan odLoadResult
-	var odLoadCancel context.CancelFunc
-	odLoadDrained := false
-	defer func() {
-		if odLoadCancel == nil {
-			return
-		}
-		odLoadCancel()
-		if odLoadCh != nil && !odLoadDrained {
-			<-odLoadCh
-		}
-	}()
+	// phase 0 (-od): discover prior archives, regen missing/stale sidecars, and
+	// upgrade legacy v2 sidecars to sorted v3. dedup reads each bucket's library
+	// keys directly from these sidecars (no per-run routing into scratch).
+	var destSidecars []string
 	if r.cfg.DestDedup {
-		odCtx, cancel := context.WithCancel(ctx)
-		odLoadCancel = cancel
-		odRes, loadCh, err := runODScan(odCtx, odConfig{
+		odRes, err := runODScan(ctx, odConfig{
 			Dest:            r.cfg.DestDedupDir,
 			CurrentRunStamp: r.cfg.RunStamp,
 			Buckets:         r.bucketCount,
@@ -308,13 +292,8 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 			return fmt.Errorf("od-scan: %w", err)
 		}
 		r.odResult = odRes
-		odLoadCh = loadCh
-		// sync-empty load (no archives) means bucket paths are final
-		if loadCh == nil {
-			destBucketPaths = odRes.DestKeyBucketPaths
-		}
-		// promote TUI to shard frame, OD frame stays stacked below
-		// until load goroutine flips odPhaseDone
+		destSidecars = odRes.DestSidecarPaths
+		// promote TUI to shard frame; OD frame stays stacked below
 		m.phase.Store(phaseShard)
 	}
 
@@ -339,23 +318,6 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 	}
 	if r.cfg.Debug != nil {
 		r.cfg.Debug.printfPhase("PHASE shard END", time.Since(tShard))
-	}
-
-	// wait for background -od load before dedup. usually instant on
-	// fresh-sidecar libraries (ran concurrent w/ shard)
-	if odLoadCh != nil {
-		lr := <-odLoadCh
-		odLoadDrained = true
-		if lr.Err != nil {
-			return fmt.Errorf("od-scan: %w", lr.Err)
-		}
-		destBucketPaths = lr.DestKeyBucketPaths
-		// backfill cached result for post-run recap
-		if r.odResult != nil {
-			r.odResult.DestKeyBucketPaths = lr.DestKeyBucketPaths
-			r.odResult.TotalKeysLoaded = lr.TotalKeysLoaded
-			r.odResult.Elapsed = lr.Elapsed
-		}
 	}
 
 	m.phase.Store(phaseDedup)
@@ -402,9 +364,10 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 	m.bucketsBytesTotal.Store(bucketBytes)
 
 	if _, err := dedup(ctx, dedupConfig{
-		bucketPaths:     res.bucketPaths,
-		destBucketPaths: destBucketPaths,
-		workers:         r.dedupWorkers,
+		bucketPaths:  res.bucketPaths,
+		destSidecars: destSidecars,
+		odMetrics:    r.odMetrics,
+		workers:      r.dedupWorkers,
 	}, sink, m); err != nil {
 		return fmt.Errorf("dedup: %w", err)
 	}

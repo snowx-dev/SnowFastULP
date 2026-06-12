@@ -878,6 +878,18 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
 	innerLines = append(innerLines, progressRow, systemRow)
+	// -od: brief "reading index" indicator — library keys pulled from the
+	// sorted sidecars as buckets are deduped (replaces the old routing phase)
+	if r != nil && r.cfg.DestDedup && r.odMetrics != nil {
+		if total := r.odMetrics.keysTotalEstimate.Load(); total > 0 {
+			done := r.odMetrics.keysLoaded.Load()
+			if done > total {
+				done = total
+			}
+			innerLines = append(innerLines, labelStyle.Render("Library")+"      "+
+				"read "+countStyle.Render(fmt.Sprintf("%s / %s", formatCount(done), formatCount(total)))+" keys")
+		}
+	}
 	box := gradientBox(innerLines, width-leftPad, gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 

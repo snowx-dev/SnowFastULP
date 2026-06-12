@@ -223,10 +223,15 @@ type sidecarWriter struct {
 }
 
 func newSidecarWriter(archivePath string) (*sidecarWriter, error) {
-	finalPath := sidecarPathForArchive(archivePath)
 	if err := ensureIdxSubdir(filepath.Dir(archivePath)); err != nil {
 		return nil, fmt.Errorf("sidecar: mkdir %s: %w", idxSubdirName, err)
 	}
+	return newSidecarWriterAtPath(sidecarPathForArchive(archivePath))
+}
+
+// newSidecarWriterAtPath builds a writer targeting an exact .idx path (the
+// parent dir must already exist). used by the v2->v3 in-place upgrade.
+func newSidecarWriterAtPath(finalPath string) (*sidecarWriter, error) {
 	dir := filepath.Dir(finalPath)
 	// O_EXCL random name = no symlink clobbering in shared dirs
 	tmp, err := os.CreateTemp(dir, filepath.Base(finalPath)+".write.*.tmp")
@@ -244,6 +249,29 @@ func newSidecarWriter(archivePath string) (*sidecarWriter, error) {
 	}
 
 	return &sidecarWriter{finalPath: finalPath, dir: dir, tmpPath: tmpPath, f: tmp}, nil
+}
+
+// upgradeSidecarToV3 re-sorts a legacy v2 (unsorted) sidecar into v3 IN PLACE,
+// without touching the archive (no decompression). Bounded RAM via the writer's
+// spill/merge. No-op if already sorted. This is the transparent, one-time
+// migration path triggered the first time -od sees an old sidecar.
+func upgradeSidecarToV3(sidecarPath string) (uint64, error) {
+	hdr, err := readSidecarHeader(sidecarPath)
+	if err != nil {
+		return 0, err
+	}
+	if hdr.sorted() {
+		return hdr.keyCount, nil
+	}
+	w, err := newSidecarWriterAtPath(sidecarPath)
+	if err != nil {
+		return 0, err
+	}
+	if serr := streamSidecarKeys(sidecarPath, w.WriteHash); serr != nil {
+		_ = w.Abort()
+		return 0, serr
+	}
+	return w.Commit()
 }
 
 func (w *sidecarWriter) WriteHash(k uint64) error {

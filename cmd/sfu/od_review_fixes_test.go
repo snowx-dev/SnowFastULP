@@ -105,25 +105,6 @@ func TestStreamArchiveLinesClassifiesCorruption(t *testing.T) {
 	}
 }
 
-// hostile bucket file must not OOM us via huge slice alloc
-func TestLoadDestBucketKeysRejectsOversize(t *testing.T) {
-	dir := t.TempDir()
-	bad := filepath.Join(dir, "huge_bucket.bin")
-	// sparse 16 GiB > maxDestBucketBytes (8 GiB), ~0 bytes on disk
-	f, err := os.Create(bad)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Truncate(16 << 30); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Close()
-
-	if _, err := loadDestBucketKeys(bad); err == nil {
-		t.Error("loadDestBucketKeys must refuse oversize file, got nil error")
-	}
-}
-
 // low-RAM + huge library, chooser should pick large B (perBucket drops)
 func TestChooseBucketCountODAuxFloorOnSparseRAM(t *testing.T) {
 	const libBytes = 5_000_000_000 * 8
@@ -134,34 +115,6 @@ func TestChooseBucketCountODAuxFloorOnSparseRAM(t *testing.T) {
 	}
 	if b > maxBuckets {
 		t.Errorf("B=%d exceeds maxBuckets=%d", b, maxBuckets)
-	}
-}
-
-// after Close commits buckets, deferred abort must not remove them
-func TestDestBucketWritersAbortAfterCloseNoOp(t *testing.T) {
-	dir := t.TempDir()
-	dw, err := newDestBucketWriters(dir, 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// one key so bucket 0 survives Close, empty buckets get removed
-	if err := dw.WriteKey(0, 0xDEADBEEFCAFEBABE); err != nil {
-		t.Fatal(err)
-	}
-	if err := dw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	bucket0 := dw.paths[0]
-	if bucket0 == "" {
-		t.Fatal("bucket 0 path was cleared even though we wrote a key")
-	}
-	if _, err := os.Stat(bucket0); err != nil {
-		t.Fatalf("bucket 0 file missing after Close: %v", err)
-	}
-	// pre-fix this removed the file
-	dw.abort()
-	if _, err := os.Stat(bucket0); err != nil {
-		t.Errorf("bucket 0 removed by abort after Close: %v", err)
 	}
 }
 

@@ -1,10 +1,69 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 )
+
+// writeV2Sidecar writes a legacy unsorted v2 .idx fixture for migration tests.
+func writeV2Sidecar(t *testing.T, archivePath string, keys []uint64) {
+	t.Helper()
+	if err := ensureIdxSubdir(filepath.Dir(archivePath)); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	var h [sidecarHeaderBytes]byte
+	copy(h[0:4], sidecarMagic)
+	binary.LittleEndian.PutUint16(h[4:6], sidecarFormatV2)
+	binary.LittleEndian.PutUint16(h[6:8], sidecarHashAlgoXX)
+	binary.LittleEndian.PutUint64(h[8:16], uint64(len(keys)))
+	binary.LittleEndian.PutUint64(h[16:24], parserVersion)
+	buf.Write(h[:])
+	var kb [sidecarKeyBytes]byte
+	for _, k := range keys {
+		binary.LittleEndian.PutUint64(kb[:], k)
+		buf.Write(kb[:])
+	}
+	if err := os.WriteFile(sidecarPathForArchive(archivePath), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// transparent migration: a legacy v2 sidecar is re-sorted to v3 in place
+// (no archive needed), preserving the exact key set.
+func TestUpgradeV2SidecarToV3(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "sfu_v2.txt.zst")
+	keys := []uint64{500, 3, 3, 1 << 63, 42, 500}
+	writeV2Sidecar(t, archive, keys)
+	path := sidecarPathForArchive(archive)
+
+	if hdr, err := readSidecarHeader(path); err != nil || hdr.sorted() {
+		t.Fatalf("fixture should be readable v2 (unsorted); err=%v", err)
+	}
+	if _, err := upgradeSidecarToV3(path); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	hdr, err := readSidecarHeader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hdr.sorted() || hdr.formatVersion != sidecarFormatV3 {
+		t.Fatalf("expected v3 after upgrade, got v%d", hdr.formatVersion)
+	}
+	got := readAllSidecarKeys(t, path)
+	assertSortedUnique(t, got)
+	want := slices.Clone(keys)
+	slices.Sort(want)
+	want = slices.Compact(want)
+	if !sliceEqualUint64(got, want) {
+		t.Fatalf("upgraded keys = %v, want %v", got, want)
+	}
+}
 
 // reads every key from a sidecar in file order.
 func readAllSidecarKeys(t *testing.T, path string) []uint64 {

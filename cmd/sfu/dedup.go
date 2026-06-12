@@ -193,18 +193,19 @@ func (s *outputSink) close() error {
 
 type dedupConfig struct {
 	bucketPaths []string
-	// 1:1 w/ bucketPaths. entry i = dest_keys/bucket_NNNN.bin for bucket i
-	// (phase 0 of -od), or "" if no dest keys. nil disables dest dedup.
-	destBucketPaths []string
-	workers         int
-	keepBuckets     bool // debug aid
+	// sorted (v3) library sidecars for -od. each bucket's dest keys are read
+	// from these via top-bits range reads (sidecarBucketKeys). nil/empty
+	// disables dest dedup. numBuckets is derived from len(bucketPaths).
+	destSidecars []string
+	odMetrics    *odMetrics // optional: ticks keysLoaded as buckets gather
+	workers      int
+	keepBuckets  bool // debug aid
 }
 
-// one bucket of work + optional dest counterpart
+// one bucket of work
 type dedupJob struct {
 	bucketIdx int
 	inputPath string
-	destPath  string // "" if no dest dedup
 }
 
 // phase 2 orchestrator. caller makes sink, calls dedup, closes sink.
@@ -219,12 +220,9 @@ func dedup(ctx context.Context, cfg dedupConfig, sink lineSink, m *metrics) (int
 	if sink == nil {
 		return 0, fmt.Errorf("sink is nil")
 	}
-	if cfg.destBucketPaths != nil && len(cfg.destBucketPaths) != len(cfg.bucketPaths) {
-		return 0, fmt.Errorf("destBucketPaths len %d != bucketPaths len %d",
-			len(cfg.destBucketPaths), len(cfg.bucketPaths))
-	}
 
-	jobCh := make(chan dedupJob, min(64, len(cfg.bucketPaths)+1))
+	numBuckets := len(cfg.bucketPaths)
+	jobCh := make(chan dedupJob, min(64, numBuckets+1))
 	errCh := make(chan error, cfg.workers)
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -235,7 +233,7 @@ func dedup(ctx context.Context, cfg dedupConfig, sink lineSink, m *metrics) (int
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runDedupWorker(ctx, jobCh, sink, cfg.keepBuckets, m); err != nil {
+			if err := runDedupWorker(ctx, jobCh, sink, cfg.keepBuckets, m, cfg.destSidecars, numBuckets, cfg.odMetrics); err != nil {
 				select {
 				case errCh <- err:
 					cancel()
@@ -248,12 +246,8 @@ func dedup(ctx context.Context, cfg dedupConfig, sink lineSink, m *metrics) (int
 	go func() {
 		defer close(jobCh)
 		for i, p := range cfg.bucketPaths {
-			dest := ""
-			if cfg.destBucketPaths != nil {
-				dest = cfg.destBucketPaths[i]
-			}
 			select {
-			case jobCh <- dedupJob{bucketIdx: i, inputPath: p, destPath: dest}:
+			case jobCh <- dedupJob{bucketIdx: i, inputPath: p}:
 			case <-ctx.Done():
 				return
 			}
@@ -287,7 +281,7 @@ func newDedupWorkState() *dedupWorkState {
 	return ws
 }
 
-func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, keepBuckets bool, m *metrics) error {
+func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, keepBuckets bool, m *metrics, destSidecars []string, numBuckets int, odm *odMetrics) error {
 	if m != nil {
 		m.activeWorkers.Add(1)
 		defer m.activeWorkers.Add(-1)
@@ -305,7 +299,7 @@ func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, k
 			if m != nil {
 				m.busyWorkers.Add(1)
 			}
-			err := dedupBucket(ws, j.inputPath, j.destPath, sink, m)
+			err := dedupBucket(ws, j.inputPath, j.bucketIdx, numBuckets, destSidecars, sink, m, odm)
 			if m != nil {
 				m.busyWorkers.Add(-1)
 				if err == nil {
@@ -315,21 +309,40 @@ func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, k
 			if err != nil {
 				return err
 			}
+			// input shard files are scratch; dest sidecars are the persistent
+			// library and are never removed here.
 			if !keepBuckets {
 				_ = os.Remove(j.inputPath)
-				if j.destPath != "" {
-					_ = os.Remove(j.destPath)
-				}
 			}
 		}
 	}
 }
 
+// gatherDestBucketKeys reads bucket bucketIdx's keys from every library sidecar
+// (top-bits range reads), returning their concatenation. one sidecar is opened
+// at a time, so fd use stays ~constant regardless of library size.
+func gatherDestBucketKeys(destSidecars []string, bucketIdx, numBuckets int) ([]uint64, error) {
+	if len(destSidecars) == 0 {
+		return nil, nil
+	}
+	mask := uint64(numBuckets - 1)
+	usePow2 := numBuckets > 0 && (numBuckets&(numBuckets-1)) == 0
+	var out []uint64
+	for _, sc := range destSidecars {
+		keys, err := sidecarBucketKeys(sc, bucketIdx, mask, usePow2, numBuckets)
+		if err != nil {
+			return nil, fmt.Errorf("gather dest bucket %d from %s: %w", bucketIdx, filepath.Base(sc), err)
+		}
+		out = append(out, keys...)
+	}
+	return out, nil
+}
+
 // dedups one bucket into sink. local batch flushes ~once per MiB so workers
-// dont thrash the shared mutex. destPath (if set) is a phase-0 dest bucket
-// loaded into a sortedUint64Set, every input hash tested first, hits go to
-// linesSkippedByDest and skip output.
-func dedupBucket(ws *dedupWorkState, inputPath, destPath string, sink lineSink, m *metrics) error {
+// dont thrash the shared mutex. for -od, the bucket's dest keys are gathered
+// from the library sidecars' sorted ranges into a sortedUint64Set; every input
+// hash is tested first, hits go to linesSkippedByDest and skip output.
+func dedupBucket(ws *dedupWorkState, inputPath string, bucketIdx, numBuckets int, destSidecars []string, sink lineSink, m *metrics, odm *odMetrics) error {
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return err
@@ -337,10 +350,14 @@ func dedupBucket(ws *dedupWorkState, inputPath, destPath string, sink lineSink, 
 	defer f.Close()
 
 	var destSet sortedUint64Set
-	if destPath != "" {
-		keys, lerr := loadDestBucketKeys(destPath)
-		if lerr != nil {
-			return fmt.Errorf("load dest bucket %s: %w", destPath, lerr)
+	if len(destSidecars) > 0 {
+		keys, gerr := gatherDestBucketKeys(destSidecars, bucketIdx, numBuckets)
+		if gerr != nil {
+			return gerr
+		}
+		if odm != nil {
+			// "reading index" progress: keys pulled from the library this bucket
+			odm.keysLoaded.Add(int64(len(keys)))
 		}
 		destSet.Build(keys)
 	}
@@ -420,31 +437,4 @@ func dedupBucket(ws *dedupWorkState, inputPath, destPath string, sink lineSink, 
 			}
 		}
 	}
-}
-
-// 8 GiB cap = 1B keys/bucket, defence vs corrupt -temp-dir OOM
-const maxDestBucketBytes = 8 << 30
-
-// reads dest_keys/bucket_NNNN.bin (packed uint64 LE, no header)
-func loadDestBucketKeys(path string) ([]uint64, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if fi.Size() > maxDestBucketBytes {
-		return nil, fmt.Errorf("dest bucket %s: size %d exceeds cap %d", path, fi.Size(), int64(maxDestBucketBytes))
-	}
-	if fi.Size()%sidecarKeyBytes != 0 {
-		return nil, fmt.Errorf("dest bucket %s size %d not multiple of %d", path, fi.Size(), sidecarKeyBytes)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	n := len(data) / sidecarKeyBytes
-	out := make([]uint64, n)
-	for i := 0; i < n; i++ {
-		out[i] = binary.LittleEndian.Uint64(data[i*sidecarKeyBytes:])
-	}
-	return out, nil
 }
