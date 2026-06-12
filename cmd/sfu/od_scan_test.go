@@ -207,7 +207,7 @@ func TestRunODScanWithFreshSidecar(t *testing.T) {
 	}
 
 	for _, k := range keys {
-		idx := int(k % 4)
+		idx := int(bucketIndex(k, 3, true, 4)) // top-bits, must match routing
 		bp := res.DestKeyBucketPaths[idx]
 		if bp == "" {
 			t.Errorf("bucket %d for key %d is empty, expected entry", idx, k)
@@ -259,7 +259,7 @@ func TestRunODScanRegenerates(t *testing.T) {
 			t.Fatalf("parse failed for %q (test setup bug)", line)
 		}
 		h := fmtr.HashKey(host, login, password)
-		idx := int(h % 4)
+		idx := int(bucketIndex(h, 3, true, 4)) // top-bits, must match routing
 		bp := res.DestKeyBucketPaths[idx]
 		if bp == "" {
 			t.Errorf("bucket %d empty for %q", idx, line)

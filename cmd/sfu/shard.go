@@ -6,12 +6,29 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+// bucketIndex maps a hash to its bucket. For power-of-two bucket counts it uses
+// the TOP bits of the hash (a range partition) rather than the low bits, so a
+// hash-sorted key file (the .idx sidecars) groups every bucket into a single
+// contiguous, seekable range — which is what lets -od read a bucket's library
+// keys without re-routing them. Falls back to modulo for the non-pow2 case
+// (unused in practice: bucket counts are always rounded up to a power of two).
+//
+// mask must be numBuckets-1; usePow2 says whether numBuckets is a power of two.
+func bucketIndex(h, mask uint64, usePow2 bool, numBuckets int) uint64 {
+	if usePow2 {
+		// bits.Len64(mask) == log2(numBuckets) for a pow2 count.
+		return h >> (64 - uint(bits.Len64(mask)))
+	}
+	return h % uint64(numBuckets)
+}
 
 // bucket record LE: [u64 hash][u32 line_len][line bytes, no \n]
 //
@@ -469,12 +486,7 @@ func processLine(ws *shardWorkState, line string, writers []*bucketWriter, usePo
 	}
 	out := ws.fmt.FormatRecord(host, url, login, password, noURI)
 	h := ws.fmt.HashKey(host, login, password)
-	var idx uint64
-	if usePow2 {
-		idx = h & mask
-	} else {
-		idx = h % uint64(len(writers))
-	}
+	idx := bucketIndex(h, mask, usePow2, len(writers))
 	if err := writers[idx].writeBytes(h, out); err != nil {
 		return err
 	}

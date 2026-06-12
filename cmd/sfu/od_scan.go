@@ -1088,12 +1088,7 @@ func routeAllSidecarsIntoBuckets(ctx context.Context, parts []archivePart, cfg o
 		err := streamSidecarKeyBytes(p.sidecarPath, sidecarRouteChunkBytes, func(raw []byte) error {
 			for off := 0; off < len(raw); off += sidecarKeyBytes {
 				k := binary.LittleEndian.Uint64(raw[off : off+sidecarKeyBytes])
-				var idx uint64
-				if usePow2 {
-					idx = k & mask
-				} else {
-					idx = k % uint64(cfg.Buckets)
-				}
+				idx := bucketIndex(k, mask, usePow2, cfg.Buckets)
 				if err := dw.WriteKey(int(idx), k); err != nil {
 					return err
 				}

@@ -136,8 +136,9 @@ func TestShardKeyRoutesToCorrectBucket(t *testing.T) {
 	}
 	hA := xxhash.Sum64String(dedupKey("a.example.com", "user@example.com", "p"))
 	hB := xxhash.Sum64String(dedupKey("b.example.com", "user@example.com", "p"))
-	wantBucketA := hA & (B - 1)
-	wantBucketB := hB & (B - 1)
+	// top-bits range partition (must match shard's bucketIndex)
+	wantBucketA := bucketIndex(hA, B-1, true, B)
+	wantBucketB := bucketIndex(hB, B-1, true, B)
 
 	for i, p := range res.bucketPaths {
 		recs := readBucket(t, p)
