@@ -12,13 +12,15 @@ func runODScanSync(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, 
 // the library, by gathering that bucket's keys from the result's sidecars.
 // replaces the old "is k in dest_keys/bucket_NNNN.bin" check.
 func destBucketHasKey(res *odResult, k uint64, bucketIdx, numBuckets int) (bool, error) {
-	keys, err := gatherDestBucketKeys(res.DestSidecarPaths, bucketIdx, numBuckets)
-	if err != nil {
-		return false, err
-	}
-	for _, key := range keys {
-		if key == k {
-			return true, nil
+	for _, sc := range res.DestSidecarPaths {
+		keys, err := sidecarBucketKeys(sc, bucketIdx, numBuckets)
+		if err != nil {
+			return false, err
+		}
+		for _, key := range keys {
+			if key == k {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

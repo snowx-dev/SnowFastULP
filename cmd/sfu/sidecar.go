@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"slices"
@@ -523,7 +522,16 @@ func mergeKeyRuns(bw *bufio.Writer, runPaths []string) (uint64, error) {
 // located by binary search over the on-disk keys (positioned ReadAt, no full
 // read, cross-platform). mask = numBuckets-1; numBuckets must be a power of two
 // (top-bits range partition — see bucketIndex).
-func sidecarBucketKeys(path string, bucketIdx int, mask uint64, usePow2 bool, numBuckets int) ([]uint64, error) {
+// sidecarReader is an open, header-validated v3 sidecar. A dedup worker keeps
+// ONE open per library sidecar and range-reads many buckets through it, so each
+// sidecar is opened once per worker instead of once per (worker × bucket).
+type sidecarReader struct {
+	path     string
+	f        *os.File
+	keyCount int64
+}
+
+func openSidecarReader(path string) (*sidecarReader, error) {
 	hdr, err := readSidecarHeader(path)
 	if err != nil {
 		return nil, err
@@ -531,39 +539,44 @@ func sidecarBucketKeys(path string, bucketIdx int, mask uint64, usePow2 bool, nu
 	if !hdr.sorted() {
 		return nil, fmt.Errorf("sidecar %s is v%d (unsorted); upgrade before range read", path, hdr.formatVersion)
 	}
-	if !usePow2 {
-		return nil, fmt.Errorf("sidecar range read needs a power-of-two bucket count, got %d", numBuckets)
-	}
-	if hdr.keyCount == 0 {
-		return nil, nil
-	}
-
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	return &sidecarReader{path: path, f: f, keyCount: int64(hdr.keyCount)}, nil
+}
 
-	n := int64(hdr.keyCount)
+func (sr *sidecarReader) close() {
+	if sr != nil && sr.f != nil {
+		_ = sr.f.Close()
+		sr.f = nil
+	}
+}
+
+// bucketKeys returns one bucket's keys, located by binary search over the sorted
+// on-disk keys (positioned ReadAt — no full read). The bucket's hash range comes
+// from bucketKeyRange (shared with the shard-side partition). numBuckets must be
+// a power of two; callers fail fast on that before reaching here.
+func (sr *sidecarReader) bucketKeys(bucketIdx, numBuckets int) ([]uint64, error) {
+	if sr.keyCount == 0 {
+		return nil, nil
+	}
+	n := sr.keyCount
 	keyAt := func(i int64) (uint64, error) {
 		var b [sidecarKeyBytes]byte
-		if _, rerr := f.ReadAt(b[:], sidecarHeaderBytes+i*sidecarKeyBytes); rerr != nil {
+		if _, rerr := sr.f.ReadAt(b[:], sidecarHeaderBytes+i*sidecarKeyBytes); rerr != nil {
 			return 0, rerr
 		}
 		return binary.LittleEndian.Uint64(b[:]), nil
 	}
 
-	shift := uint(64 - bits.Len64(mask))
-	lo := uint64(bucketIdx) << shift
+	lo, hi, toEnd := bucketKeyRange(bucketIdx, numBuckets)
 	loIdx, err := lowerBoundKey(n, lo, keyAt)
 	if err != nil {
 		return nil, err
 	}
-	var hiIdx int64
-	if bucketIdx+1 >= numBuckets {
-		hiIdx = n // last bucket runs to EOF (avoids the 1<<64 overflow)
-	} else {
-		hi := uint64(bucketIdx+1) << shift
+	hiIdx := n // last bucket runs to EOF (its hi would overflow 1<<64)
+	if !toEnd {
 		if hiIdx, err = lowerBoundKey(n, hi, keyAt); err != nil {
 			return nil, err
 		}
@@ -574,7 +587,7 @@ func sidecarBucketKeys(path string, bucketIdx int, mask uint64, usePow2 bool, nu
 
 	cnt := hiIdx - loIdx
 	raw := make([]byte, cnt*sidecarKeyBytes)
-	if _, rerr := f.ReadAt(raw, sidecarHeaderBytes+loIdx*sidecarKeyBytes); rerr != nil && rerr != io.EOF {
+	if _, rerr := sr.f.ReadAt(raw, sidecarHeaderBytes+loIdx*sidecarKeyBytes); rerr != nil && rerr != io.EOF {
 		return nil, rerr
 	}
 	out := make([]uint64, cnt)
@@ -582,6 +595,17 @@ func sidecarBucketKeys(path string, bucketIdx int, mask uint64, usePow2 bool, nu
 		out[i] = binary.LittleEndian.Uint64(raw[i*sidecarKeyBytes:])
 	}
 	return out, nil
+}
+
+// sidecarBucketKeys opens, range-reads one bucket, and closes — a one-shot
+// convenience for tests. Hot paths reuse a sidecarReader across buckets.
+func sidecarBucketKeys(path string, bucketIdx, numBuckets int) ([]uint64, error) {
+	sr, err := openSidecarReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer sr.close()
+	return sr.bucketKeys(bucketIdx, numBuckets)
 }
 
 // lowerBoundKey returns the first index in [0,n) whose key >= target (or n).

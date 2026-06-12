@@ -24,10 +24,27 @@ import (
 // mask must be numBuckets-1; usePow2 says whether numBuckets is a power of two.
 func bucketIndex(h, mask uint64, usePow2 bool, numBuckets int) uint64 {
 	if usePow2 {
-		// bits.Len64(mask) == log2(numBuckets) for a pow2 count.
-		return h >> (64 - uint(bits.Len64(mask)))
+		return h >> bucketShiftFromMask(mask)
 	}
 	return h % uint64(numBuckets)
+}
+
+// bucketShiftFromMask is the single source of truth for the top-bits partition:
+// a pow2 bucket count B (mask = B-1) splits the 64-bit hash space into B equal
+// ranges, and a key's bucket is its top log2(B) bits. The dest-side range math
+// (bucketKeyRange) derives from the same shift so shard and dedup never diverge.
+func bucketShiftFromMask(mask uint64) uint { return uint(64 - bits.Len64(mask)) }
+
+// bucketKeyRange returns the half-open hash range [lo, hi) owned by bucketIdx
+// for a pow2 bucket count — the inverse of bucketIndex. toEnd is true for the
+// last bucket, whose hi would be 1<<64 (overflow): callers read to EOF instead.
+func bucketKeyRange(bucketIdx, numBuckets int) (lo, hi uint64, toEnd bool) {
+	shift := bucketShiftFromMask(uint64(numBuckets - 1))
+	lo = uint64(bucketIdx) << shift
+	if bucketIdx+1 >= numBuckets {
+		return lo, 0, true
+	}
+	return lo, uint64(bucketIdx+1) << shift, false
 }
 
 // bucket record LE: [u64 hash][u32 line_len][line bytes, no \n]

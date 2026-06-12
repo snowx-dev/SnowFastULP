@@ -281,15 +281,24 @@ func sweepOrphanedSidecars(destDir string, runs []archiveRun) (int, error) {
 	removed := 0
 	for _, e := range entries {
 		name := e.Name()
-		// only .idx, leave .tmp / README / etc. alone
-		if !strings.HasSuffix(name, sidecarSuffix) {
+		if strings.HasSuffix(name, sidecarSuffix) {
+			if live[name] {
+				continue
+			}
+			_ = os.Remove(filepath.Join(subdir, name))
+			removed++
 			continue
 		}
-		if live[name] {
-			continue
+		// stale .write/.idxrun spill temps from a hard-killed run (signal cleanup
+		// handles graceful exits). age-gated so a concurrent run's live temp is
+		// never removed mid-flight.
+		if strings.HasSuffix(name, ".tmp") {
+			full := filepath.Join(subdir, name)
+			if fi, err := os.Stat(full); err == nil && time.Since(fi.ModTime()) > staleTempDirAge {
+				_ = os.Remove(full)
+				removed++
+			}
 		}
-		_ = os.Remove(filepath.Join(subdir, name))
-		removed++
 	}
 	return removed, nil
 }

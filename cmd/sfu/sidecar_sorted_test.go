@@ -159,7 +159,7 @@ func TestSidecarBucketKeysRangeRead(t *testing.T) {
 	mask := uint64(B - 1)
 	var union []uint64
 	for b := 0; b < B; b++ {
-		got, err := sidecarBucketKeys(path, b, mask, true, B)
+		got, err := sidecarBucketKeys(path, b, B)
 		if err != nil {
 			t.Fatalf("bucket %d: %v", b, err)
 		}
