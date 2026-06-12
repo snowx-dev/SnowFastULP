@@ -53,32 +53,6 @@ func TestRenderODFrameRegenContents(t *testing.T) {
 	}
 }
 
-// route phase: keys loaded vs estimate, no Bytes row (regen-only)
-func TestRenderODFrameLoadContents(t *testing.T) {
-	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseLoad))
-	m.archivesTotal.Store(4)
-	m.keysTotalEstimate.Store(1_000_000_000)
-	m.keysLoaded.Store(420_000_000)
-
-	lines := renderODFrame(m, 0, 86)
-	joined := strings.Join(lines, "\n")
-	for _, want := range []string{
-		"Destination dedup",
-		"routing",
-		"4 archives",
-		"420,000,000",
-		"1,000,000,000",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("load frame missing %q\nfull:\n%s", want, joined)
-		}
-	}
-	if strings.Contains(joined, "Bytes") {
-		t.Errorf("load frame should not show Bytes row\nfull:\n%s", joined)
-	}
-}
-
 // active odMetrics: OD frame stacks between bars and footer
 func TestRenderShardLinesIncludesODFrame(t *testing.T) {
 	r := &resolved{

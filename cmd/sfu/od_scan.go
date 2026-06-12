@@ -34,16 +34,11 @@ type odPhase int32
 const (
 	odPhaseIdle     odPhase = 0
 	odPhaseDiscover odPhase = 1
-	odPhaseRegen    odPhase = 2
-	odPhaseLoad     odPhase = 3
-	odPhaseDone     odPhase = 4
+	odPhaseRegen    odPhase = 2 // regen (decompress) + in-place v2->v3 upgrade
+	odPhaseDone     odPhase = 3
 	// post-dedup index write for THIS run's output, shares odMetrics
 	// shape w/ regen so it reuses the same renderer (just swaps labels)
-	odPhaseIndexOwn odPhase = 5
-	// narrow window where keys are routed but dest writers are still
-	// flushing/closing. without this the load bar sits at 100% during
-	// disk I/O and reads as stuck
-	odPhaseCommitBuckets odPhase = 6
+	odPhaseIndexOwn odPhase = 4
 )
 
 // atomic counters for the TUI's second frame + end-of-run summary.

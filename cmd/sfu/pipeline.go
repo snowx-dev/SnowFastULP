@@ -291,6 +291,14 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 	odCtx, odCancel := context.WithCancel(ctx)
 	defer odCancel()
 	if r.cfg.DestDedup {
+		// fail fast on a bad dest dir BEFORE shard does work — the scan now runs
+		// concurrently, so a missing/non-dir would otherwise surface only after
+		// shard wasted effort.
+		if fi, statErr := os.Stat(r.cfg.DestDedupDir); statErr != nil {
+			return fmt.Errorf("od-scan: dest dir: %w", statErr)
+		} else if !fi.IsDir() {
+			return fmt.Errorf("od-scan: dest dir: %s is not a directory", r.cfg.DestDedupDir)
+		}
 		odRunning = true
 		m.phase.Store(phaseShard) // OD frame stacks below the shard frame
 		go func() {

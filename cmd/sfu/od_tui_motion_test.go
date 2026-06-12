@@ -131,13 +131,11 @@ func TestWorkerRowsRenderActiveSlots(t *testing.T) {
 	}
 }
 
-// worker rows only render in regen. discovery/load = stale state, hide
+// worker rows only render in regen. discovery = stale state, hide
 func TestWorkerRowsHiddenOutsideRegen(t *testing.T) {
 	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseLoad))
+	m.phase.Store(int32(odPhaseDiscover))
 	m.archivesTotal.Store(2)
-	m.keysTotalEstimate.Store(1_000_000)
-	m.keysLoaded.Store(250_000)
 	m.workers = make([]workerStatus, 1)
 	stale := "sfu_xyz_part1.txt.zst"
 	m.workers[0].archivePath.Store(&stale)

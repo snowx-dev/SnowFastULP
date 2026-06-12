@@ -355,25 +355,6 @@ func TestLibraryRowFallsBackToArchiveProgress(t *testing.T) {
 	}
 }
 
-// after routing, bucket files still flushing/closing. say so explicitly,
-// not "stuck at 100%"
-func TestRenderODFrameShowsBucketCommitPhase(t *testing.T) {
-	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseCommitBuckets))
-	m.archivesTotal.Store(1)
-	m.filesTotal.Store(16)
-	m.keysTotalEstimate.Store(1000)
-	m.keysLoaded.Store(1000)
-
-	out := strings.Join(renderODFrame(m, 0, 100), "\n")
-	if !strings.Contains(out, "committing lookup buckets") {
-		t.Errorf("missing commit phase label\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "Entries") || !strings.Contains(out, "1,000") {
-		t.Errorf("commit phase should keep final entry count visible\nout:\n%s", out)
-	}
-}
-
 // worker mini-bars must sit outside the gradientBox, indented to match
 // the main progress bar
 func TestWorkerBarsRenderedOutsideFrame(t *testing.T) {

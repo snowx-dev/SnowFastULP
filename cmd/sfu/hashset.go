@@ -16,6 +16,10 @@ func (s *sortedUint64Set) Build(keys []uint64) {
 	s.keys = slices.Compact(keys)
 }
 
+// adoptSorted takes ownership of keys that are ALREADY sorted ascending and
+// deduplicated (e.g. the output of a k-way merge), skipping the Build sort.
+func (s *sortedUint64Set) adoptSorted(keys []uint64) { s.keys = keys }
+
 // O(log n), safe for concurrent readers post-Build
 func (s *sortedUint64Set) Contains(k uint64) bool {
 	_, ok := slices.BinarySearch(s.keys, k)

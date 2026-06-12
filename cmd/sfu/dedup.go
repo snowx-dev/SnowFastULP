@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -342,31 +343,92 @@ func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, k
 const maxDestBucketKeys = 1 << 30
 
 // gatherDestBucketKeys reads bucket bucketIdx's keys from every library sidecar
-// (top-bits range reads) and concatenates them. readers caches one open handle
-// per sidecar (reused across buckets) so a sidecar is opened once per worker,
-// not once per bucket.
-func gatherDestBucketKeys(readers map[string]*sidecarReader, destSidecars []string, bucketIdx, numBuckets int) ([]uint64, error) {
-	var out []uint64
+// (top-bits range reads) and k-way merges the already-sorted per-sidecar ranges
+// into one sorted, deduped slice. readers caches one open handle per sidecar
+// (reused across buckets) so a sidecar is opened once per worker, not per
+// bucket. Returns the merged keys plus the pre-merge gathered count (for the
+// "reading index" progress, which is measured against per-sidecar key totals).
+func gatherDestBucketKeys(readers map[string]*sidecarReader, destSidecars []string, bucketIdx, numBuckets int) (keys []uint64, gathered int, err error) {
+	runs := make([][]uint64, 0, len(destSidecars))
 	for _, path := range destSidecars {
 		sr := readers[path]
 		if sr == nil {
-			var err error
 			if sr, err = openSidecarReader(path); err != nil {
-				return nil, fmt.Errorf("open dest sidecar %s: %w", filepath.Base(path), err)
+				return nil, 0, fmt.Errorf("open dest sidecar %s: %w", filepath.Base(path), err)
 			}
 			readers[path] = sr
 		}
-		keys, err := sr.bucketKeys(bucketIdx, numBuckets)
-		if err != nil {
-			return nil, fmt.Errorf("read dest bucket %d from %s: %w", bucketIdx, filepath.Base(path), err)
+		run, rerr := sr.bucketKeys(bucketIdx, numBuckets)
+		if rerr != nil {
+			return nil, 0, fmt.Errorf("read dest bucket %d from %s: %w", bucketIdx, filepath.Base(path), rerr)
 		}
-		out = append(out, keys...)
-		if int64(len(out)) > maxDestBucketKeys {
-			return nil, fmt.Errorf("dest bucket %d exceeds %d keys; increase -buckets for this library size",
+		if len(run) == 0 {
+			continue
+		}
+		runs = append(runs, run)
+		gathered += len(run)
+		if int64(gathered) > maxDestBucketKeys {
+			return nil, 0, fmt.Errorf("dest bucket %d exceeds %d keys; increase -buckets for this library size",
 				bucketIdx, maxDestBucketKeys)
 		}
 	}
-	return out, nil
+	return mergeSortedUnique(runs, gathered), gathered, nil
+}
+
+// u64RunHeap: min-heap of cursors into sorted []uint64 runs, for k-way merge.
+type u64RunCursor struct {
+	run []uint64
+	pos int
+}
+type u64RunHeap []u64RunCursor
+
+func (h u64RunHeap) Len() int           { return len(h) }
+func (h u64RunHeap) Less(i, j int) bool { return h[i].run[h[i].pos] < h[j].run[h[j].pos] }
+func (h u64RunHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *u64RunHeap) Push(x any)        { *h = append(*h, x.(u64RunCursor)) }
+func (h *u64RunHeap) Pop() any {
+	old := *h
+	n := len(old)
+	it := old[n-1]
+	*h = old[:n-1]
+	return it
+}
+
+// mergeSortedUnique merges already-sorted runs into one ascending, deduped
+// slice in O(N log R) — cheaper than concatenate-then-sort (O(N log N)) when the
+// inputs are already sorted, as each per-sidecar bucket range is.
+func mergeSortedUnique(runs [][]uint64, total int) []uint64 {
+	h := make(u64RunHeap, 0, len(runs))
+	for _, r := range runs {
+		if len(r) > 0 { // empty runs would index run[0] in the heap's Less
+			h = append(h, u64RunCursor{run: r})
+		}
+	}
+	switch len(h) {
+	case 0:
+		return nil
+	case 1:
+		return h[0].run // single non-empty run: already sorted + unique
+	}
+	heap.Init(&h)
+	out := make([]uint64, 0, total)
+	have := false
+	var last uint64
+	for h.Len() > 0 {
+		v := h[0].run[h[0].pos]
+		if !have || v != last {
+			out = append(out, v)
+			last = v
+			have = true
+		}
+		h[0].pos++
+		if h[0].pos < len(h[0].run) {
+			heap.Fix(&h, 0)
+		} else {
+			heap.Pop(&h)
+		}
+	}
+	return out
 }
 
 // dedups one bucket into sink. local batch flushes ~once per MiB so workers
@@ -382,15 +444,16 @@ func dedupBucket(ws *dedupWorkState, inputPath string, bucketIdx, numBuckets int
 
 	var destSet sortedUint64Set
 	if len(destSidecars) > 0 {
-		keys, gerr := gatherDestBucketKeys(destReaders, destSidecars, bucketIdx, numBuckets)
+		keys, gathered, gerr := gatherDestBucketKeys(destReaders, destSidecars, bucketIdx, numBuckets)
 		if gerr != nil {
 			return gerr
 		}
 		if odm != nil {
 			// "reading index" progress: keys pulled from the library this bucket
-			odm.keysLoaded.Add(int64(len(keys)))
+			// (pre-merge count, to match keysTotalEstimate's per-sidecar totals)
+			odm.keysLoaded.Add(int64(gathered))
 		}
-		destSet.Build(keys)
+		destSet.adoptSorted(keys) // already sorted + deduped by the k-way merge
 	}
 
 	ws.reader.Reset(f)
