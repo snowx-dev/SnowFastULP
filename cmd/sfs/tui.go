@@ -68,10 +68,24 @@ const (
 type uiConfig struct {
 	Mode     uiMode
 	Metrics  *search.Metrics
+	Pattern  string
 	Start    time.Time
 	Done     <-chan struct{}
 	Signaled func() bool
 	Layout   *terminalLayout
+}
+
+// renderQueryLine formats the "Query" panel row, truncating the pattern to fit.
+// Returns "" for an empty pattern so callers can omit the row entirely.
+func renderQueryLine(pattern string, innerW int) string {
+	if pattern == "" {
+		return ""
+	}
+	max := innerW - 16
+	if max < 8 {
+		max = 8
+	}
+	return labelStyle.Render("Query     ") + byteStyle.Render("\""+trimToDisplayWidth(pattern, max)+"\"")
 }
 
 func stderrIsTTY() bool {
@@ -132,7 +146,7 @@ func runUI(cfg uiConfig, done *sync.WaitGroup) {
 			curRates := rates.sample(now, cfg.Metrics)
 			switch cfg.Mode {
 			case uiFull:
-				frame.draw(renderFull(now, cfg.Start, cfg.Metrics, curRates))
+				frame.draw(renderFull(now, cfg.Start, cfg.Metrics, curRates, cfg.Pattern))
 			}
 		}
 	}
@@ -218,7 +232,7 @@ func renderInterrupt(elapsed time.Duration, width int) []string {
 	return append(out, renderLiveScreenFooter(width)...)
 }
 
-func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string {
+func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern string) []string {
 	width := termWidth()
 	innerW := width - leftPad
 	phase := m.Phase.Load()
@@ -240,6 +254,9 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string
 	hits := m.Hits.Load()
 
 	inner := []string{renderThroughputRow(phase, rates), renderETARow(phase, rates)}
+	if q := renderQueryLine(pattern, innerW); q != "" {
+		inner = append(inner, q)
+	}
 	inner = append(inner,
 		labelStyle.Render("Archives  ")+countStyle.Render(fmt.Sprintf("%d", archDone))+
 			mutedStyle.Render(" / ")+countStyle.Render(fmt.Sprintf("%d", archTotal)),
@@ -260,6 +277,7 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string
 		scannedDone, scannedTotal := searchBytes(m)
 		inner = append(inner, labelStyle.Render("Scanned   ")+byteStyle.Render(formatBytes(scannedDone))+
 			mutedStyle.Render(" / ")+byteStyle.Render(formatBytes(scannedTotal)))
+		inner = append(inner, renderLibrarySizeRow(m))
 	}
 
 	box := gradientBox(inner, innerW, boxStart, boxEnd)
@@ -274,21 +292,26 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string
 	return out
 }
 
-func renderFinalSummary(start time.Time, m *search.Metrics, outFile string) []string {
+func renderFinalSummary(start time.Time, m *search.Metrics, outFile, pattern string) []string {
 	innerW := termWidth() - leftPad
 	elapsed := time.Since(start)
 	scannedDone, scannedTotal := searchBytes(m)
 
-	inner := []string{
-		labelStyle.Render("Hits      ") + hitStyle.Render(formatCount(m.Hits.Load())),
-		labelStyle.Render("Elapsed   ") + timeStyle.Render(elapsed.Truncate(time.Second).String()),
-		labelStyle.Render("Archives  ") + countStyle.Render(formatCount(m.ArchivesDone.Load())) +
-			mutedStyle.Render(" / ") + countStyle.Render(formatCount(m.ArchivesTotal.Load())),
-		labelStyle.Render("Chunks    ") + countStyle.Render(formatCount(m.ChunksDone.Load())) +
-			mutedStyle.Render(" / ") + countStyle.Render(formatCount(m.ChunksTotal.Load())),
-		labelStyle.Render("Scanned   ") + byteStyle.Render(formatBytes(scannedDone)) +
-			mutedStyle.Render(" / ") + byteStyle.Render(formatBytes(scannedTotal)),
+	inner := []string{}
+	if q := renderQueryLine(pattern, innerW); q != "" {
+		inner = append(inner, q)
 	}
+	inner = append(inner,
+		labelStyle.Render("Hits      ")+hitStyle.Render(formatCount(m.Hits.Load())),
+		labelStyle.Render("Elapsed   ")+timeStyle.Render(elapsed.Truncate(time.Second).String()),
+		labelStyle.Render("Archives  ")+countStyle.Render(formatCount(m.ArchivesDone.Load()))+
+			mutedStyle.Render(" / ")+countStyle.Render(formatCount(m.ArchivesTotal.Load())),
+		labelStyle.Render("Chunks    ")+countStyle.Render(formatCount(m.ChunksDone.Load()))+
+			mutedStyle.Render(" / ")+countStyle.Render(formatCount(m.ChunksTotal.Load())),
+		labelStyle.Render("Scanned   ")+byteStyle.Render(formatBytes(scannedDone))+
+			mutedStyle.Render(" / ")+byteStyle.Render(formatBytes(scannedTotal)),
+		renderLibrarySizeRow(m),
+	)
 	box := gradientBox(inner, innerW, gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 	out := append([]string{phaseStyle.Render("✓ COMPLETE"), ""}, boxLines...)
@@ -550,6 +573,25 @@ func searchBytes(m *search.Metrics) (done, total int64) {
 		done = total
 	}
 	return done, total
+}
+
+// renderLibrarySizeRow shows the on-disk (compressed) library size — the figure
+// that matches `du` — as the headline, with the uncompressed total and ratio
+// trailing discreetly so it's clear compression is doing the heavy lifting.
+// The ratio suffix is omitted when there's no meaningful compression (e.g. -txt).
+func renderLibrarySizeRow(m *search.Metrics) string {
+	compressed := m.IndexBytesTotal.Load()
+	_, uncompressed := searchBytes(m)
+	row := labelStyle.Render("Library   ") + byteStyle.Render(formatBytes(compressed)) + mutedStyle.Render(" on disk")
+	if compressed > 0 && uncompressed > compressed {
+		ratio := float64(uncompressed) / float64(compressed)
+		ratioStr := fmt.Sprintf("%.0f", ratio)
+		if ratio < 10 {
+			ratioStr = fmt.Sprintf("%.1f", ratio)
+		}
+		row += mutedStyle.Render(fmt.Sprintf("  ·  %s uncompressed (%s×)", formatBytes(uncompressed), ratioStr))
+	}
+	return row
 }
 
 func searchScanPercent(m *search.Metrics) float64 {

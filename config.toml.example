@@ -47,6 +47,9 @@
                                # (skips the index path; slower but no preindex needed).
 # clean  = false              # strip URL scheme prefixes from output lines.
 # silent = false              # disable progress UI.
+# l      = 0                  # stop after N total hits, then exit (0 = unlimited).
+# since  = "7d"               # only search archives modified within this window
+                               # (mtime-based; e.g. 7d, 12h, 90m). Default: all.
 
 # Concurrency
 # j = 0                       # worker goroutines (0 = GOMAXPROCS).

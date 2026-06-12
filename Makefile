@@ -107,7 +107,7 @@ release-zip:
 	@command -v zip >/dev/null 2>&1 || { echo "zip is required to package release artifacts" >&2; exit 1; }
 	@rm -f "$(BIN_DIR)/$(RELEASE_ZIP)"
 	@find "$(BIN_DIR)/linux" "$(BIN_DIR)/darwin" "$(BIN_DIR)/windows" "$(BIN_DIR)/SHA256SUMS" \
-		-exec touch -d "1970-01-01 00:00:00 UTC" {} +
+		-exec env TZ=UTC0 touch -t 197001010000.00 {} +
 	@cd "$(BIN_DIR)" && zip -qrX "$(RELEASE_ZIP)" linux darwin windows SHA256SUMS
 	@echo "Release binaries: ./$(BIN_DIR)/"
 	@echo "Release zip: ./$(BIN_DIR)/$(RELEASE_ZIP)"

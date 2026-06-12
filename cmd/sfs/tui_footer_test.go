@@ -13,7 +13,7 @@ func TestRenderFinalSummaryOutputFullPath(t *testing.T) {
 	m := &search.Metrics{}
 	m.Hits.Store(1)
 	path := filepath.Join(t.TempDir(), strings.Repeat("nest/", 20)+"hits/gleeden.txt")
-	joined := strings.Join(renderFinalSummary(time.Now(), m, path), "\n")
+	joined := strings.Join(renderFinalSummary(time.Now(), m, path, ""), "\n")
 	if !strings.Contains(collapseRenderedText(joined), path) {
 		t.Fatalf("missing full output path:\n%s", joined)
 	}
@@ -30,7 +30,7 @@ func TestRenderFinalSummaryOutputResolvesRelativePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(renderFinalSummary(time.Now(), m, rel), "\n")
+	joined := strings.Join(renderFinalSummary(time.Now(), m, rel, ""), "\n")
 	if !strings.Contains(collapseRenderedText(joined), want) {
 		t.Fatalf("missing resolved output path %q in:\n%s", want, joined)
 	}

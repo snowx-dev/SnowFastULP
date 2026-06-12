@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/discover"
 )
@@ -66,6 +67,44 @@ func TestListTxtEmpty(t *testing.T) {
 	_, err := discover.ListTxt(dir)
 	if err == nil {
 		t.Fatal("expected error for empty dir")
+	}
+}
+
+func TestListZstSinceFiltersByMtime(t *testing.T) {
+	dir := t.TempDir()
+	recent := filepath.Join(dir, "recent.zst")
+	old := filepath.Join(dir, "old.zst")
+	mustTouch(t, recent)
+	mustTouch(t, old)
+
+	// backdate old.zst to 30 days ago.
+	old30 := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(old, old30, old30); err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	paths, err := discover.ListZstSince(dir, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || filepath.Base(paths[0]) != "recent.zst" {
+		t.Fatalf("got %v, want only recent.zst", paths)
+	}
+}
+
+func TestListZstSinceAllTooOld(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "old.zst")
+	mustTouch(t, old)
+	old30 := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(old, old30, old30); err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	if _, err := discover.ListZstSince(dir, cutoff); err == nil {
+		t.Fatal("expected error when all files older than cutoff")
 	}
 }
 

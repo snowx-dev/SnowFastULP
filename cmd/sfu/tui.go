@@ -29,6 +29,15 @@ const (
 	tuiFooterLine2 = "https://snowx.dev"
 )
 
+// Horizontal layout: the content block is indented leftPad on the LEFT and the
+// same on the RIGHT so it sits balanced in the terminal rather than flush
+// against the right edge.
+//
+//	contentWidth  — outer width of the bordered box / bar region.
+//	boxInnerWidth — usable text width inside gradientBox (2 borders + 4 padding).
+func contentWidth(width int) int  { return width - 2*leftPad }
+func boxInnerWidth(width int) int { return contentWidth(width) - 6 }
+
 const (
 	ansiHideCursor = "\033[?25l"
 	ansiShowCursor = "\033[?25h"
@@ -239,7 +248,7 @@ func progressBarLabel(name string) string {
 }
 
 func mainPhaseBarWidth(width int) int {
-	body := width - leftPad - progressBarLabelWidth
+	body := contentWidth(width) - progressBarLabelWidth
 	min := barSuffixWidth + 2
 	if body < min {
 		return min
@@ -492,7 +501,7 @@ func renderPhaseTagWithTotal(total, step int, label string) string {
 func renderHeader(icon, phase string, elapsed time.Duration, width int) string {
 	left := indentSpace + icon + "  " + phaseStyle.Render(phase)
 	right := timeStyle.Render(formatDuration(elapsed))
-	pad := width - tuiVisibleWidth(left) - tuiVisibleWidth(right)
+	pad := (width - leftPad) - tuiVisibleWidth(left) - tuiVisibleWidth(right)
 	if pad < 1 {
 		pad = 1
 	}
@@ -756,10 +765,11 @@ func renderLiveScreenFooter(width int) []string {
 	if width < 1 {
 		width = tuiDisplayWidth
 	}
+	right := width - leftPad
 	return []string{
 		"",
-		renderFrostTaglineRight(tuiFooterLine1, width, 0.0, 0.5),
-		renderFrostTaglineRight(tuiFooterLine2, width, 0.2, 0.7),
+		renderFrostTaglineRight(tuiFooterLine1, right, 0.0, 0.5),
+		renderFrostTaglineRight(tuiFooterLine2, right, 0.2, 0.7),
 	}
 }
 
@@ -806,11 +816,11 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 		"buckets " + countStyle.Render(fmt.Sprintf("%d", r.bucketCount))
 
 	// gradientBox reserves 2 borders + 4 padding, remaining = inner
-	innerW := (width - leftPad) - 6
+	innerW := boxInnerWidth(width)
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
 	innerLines = append(innerLines, progressRow, systemRow)
-	box := gradientBox(innerLines, width-leftPad, gradStart, gradEnd)
+	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	bars := renderMainProgressBars(pct, 0, false, width)
@@ -874,11 +884,11 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
 		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
 
-	innerW := (width - leftPad) - 6
+	innerW := boxInnerWidth(width)
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
 	innerLines = append(innerLines, progressRow, systemRow)
-	box := gradientBox(innerLines, width-leftPad, gradStart, gradEnd)
+	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	bars := renderMainProgressBars(1.0, pct2, true, width)
@@ -967,7 +977,7 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 		removedBullets = append(removedBullets,
 			countStyle.Render(formatCount(skippedByDest))+" "+mutedStyle.Render("already in library"))
 	}
-	removedRows := renderRemovedRows(removedBullets, width-leftPad-6 /* gradientBox inner */)
+	removedRows := renderRemovedRows(removedBullets, boxInnerWidth(width))
 
 	innerLines := []string{
 		labelStyle.Render("Input    ") + byteStyle.Render(humanBytes(r.totalInputs)) +
@@ -982,7 +992,7 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 	// number IS the actionable outcome here. label stays muted
 	innerLines = append(innerLines, removedRows...)
 
-	box := gradientBox(innerLines, width-leftPad, doneStart, doneEnd)
+	box := gradientBox(innerLines, contentWidth(width), doneStart, doneEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	out := []string{"", header, ""}
@@ -1034,7 +1044,7 @@ func renderODSummary(r *resolved, width int) []string {
 		mutedStyle.Render("lines in library"),
 	}
 
-	box := gradientBox(innerLines, width-leftPad, gradStart, gradEnd)
+	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	out := []string{"", ""}
@@ -1323,7 +1333,7 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		innerLines = append(innerLines, entriesRow)
 	}
 
-	box := gradientBox(innerLines, width-leftPad, footerGradA, footerGradB)
+	box := gradientBox(innerLines, contentWidth(width), footerGradA, footerGradB)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	// per-worker rows OUTSIDE the frame, between box and main bar so
@@ -1331,7 +1341,7 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 	// inside-the-frame mini bars made the box feel cluttered
 	var workerBars []string
 	if phase == odPhaseRegen || phase == odPhaseIndexOwn {
-		rowWidth := width - leftPad
+		rowWidth := contentWidth(width)
 		cap := workerRowCap(termHeight(), m.workerCount())
 		active := m.activeWorkers(cap)
 		// idx marker width must fit the WIDEST displayed index ("[16]"
@@ -1358,7 +1368,7 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 	if pct > 1 {
 		pct = 1
 	}
-	bar := indentSpace + gradientBar(pct, width-leftPad)
+	bar := indentSpace + gradientBar(pct, contentWidth(width))
 
 	// blank gap above OD frame separates it from main frame's bottom bar
 	out := []string{""}
@@ -1557,7 +1567,7 @@ func renderInterruptLines(elapsed time.Duration, width int) []string {
 		mutedStyle.Render("A second Ctrl+C will force-exit without cleanup."),
 	}
 
-	box := gradientBox(innerLines, width-leftPad, interruptStart, interruptEnd)
+	box := gradientBox(innerLines, contentWidth(width), interruptStart, interruptEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	out := []string{"", header, ""}

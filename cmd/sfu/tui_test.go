@@ -264,9 +264,14 @@ func TestRenderShardBarsAreIndented(t *testing.T) {
 	if !strings.HasPrefix(bar2, "    ") {
 		t.Errorf("bar2 should start with 4-space indent, got: %q", bar2[:8])
 	}
-	// total visible width still 80, right edge unchanged
-	if w := tuiVisibleWidth(bar1); w != 80 {
-		t.Errorf("bar1 visible width = %d, want 80", w)
+	// balanced layout: leftPad (4) indent + content (width-2*leftPad=72) leaves
+	// a matching 4-col right margin, so the bar spans 76 of the 80 cols.
+	if w := tuiVisibleWidth(bar1); w != 76 {
+		t.Errorf("bar1 visible width = %d, want 76", w)
+	}
+	// right edge must sit one leftPad in from the terminal edge (balanced).
+	if w := tuiVisibleWidth(bar1); w > 80-leftPad {
+		t.Errorf("bar1 right edge not balanced: width %d exceeds %d", w, 80-leftPad)
 	}
 }
 
