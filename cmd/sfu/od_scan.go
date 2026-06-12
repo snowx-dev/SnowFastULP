@@ -483,7 +483,10 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, erro
 		m.regenBytesTotal.Store(regenBytes)
 		m.keysTotalEstimate.Store(keysEstimate)
 		m.filesTotal.Store(int32(totalParts))
-		m.partsRegenTotal.Store(int32(len(needRegen)))
+		// both regen and in-place upgrade write a .idx; count both so the
+		// "parts indexed" progress (and migration runs, which are all upgrade,
+		// no regen) move instead of sitting frozen.
+		m.partsRegenTotal.Store(int32(len(needRegen) + len(needUpgrade)))
 	}
 	cfg.Debug.Event("[od] scan classify: parts_total=%d, parts_need_regen=%d, regen_bytes=%d",
 		totalParts, len(needRegen), regenBytes)
@@ -513,7 +516,7 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, erro
 		if m != nil {
 			m.phase.Store(int32(odPhaseRegen))
 		}
-		if err := upgradeSidecars(ctx, needUpgrade, cfg); err != nil {
+		if err := upgradeSidecars(ctx, needUpgrade, cfg, m); err != nil {
 			return nil, fmt.Errorf("odScan: upgrade: %w", err)
 		}
 		cfg.Debug.Event("[od] upgraded %d legacy v2 sidecars to sorted v3", len(needUpgrade))
@@ -579,7 +582,7 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, erro
 
 // upgradeSidecars re-sorts legacy v2 sidecars to v3 in place, in parallel.
 // the archive is never touched (keys come from the existing .idx).
-func upgradeSidecars(ctx context.Context, parts []archivePart, cfg odConfig) error {
+func upgradeSidecars(ctx context.Context, parts []archivePart, cfg odConfig, m *odMetrics) error {
 	workers := cfg.Workers
 	if workers <= 0 {
 		workers = runtime.GOMAXPROCS(0)
@@ -590,6 +593,10 @@ func upgradeSidecars(ctx context.Context, parts []archivePart, cfg odConfig) err
 	if workers < 1 {
 		workers = 1
 	}
+	if m != nil {
+		m.setWorkerSlots(workers)
+		defer m.clearWorkerSlots()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	taskCh := make(chan archivePart)
@@ -597,11 +604,25 @@ func upgradeSidecars(ctx context.Context, parts []archivePart, cfg odConfig) err
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
+		workerIdx := i
 		go func() {
 			defer wg.Done()
+			var ws *workerStatus
+			if m != nil {
+				ws = m.workerSlot(workerIdx)
+			}
+			if ws != nil {
+				defer ws.archivePath.Store(nil)
+			}
 			for p := range taskCh {
 				if ctx.Err() != nil {
 					return
+				}
+				if ws != nil {
+					name := filepath.Base(p.path)
+					ws.archivePath.Store(&name)
+					ws.partIdx.Store(1)
+					ws.partsTotal.Store(1)
 				}
 				if _, err := upgradeSidecarToV3(p.sidecarPath); err != nil {
 					select {
@@ -610,6 +631,10 @@ func upgradeSidecars(ctx context.Context, parts []archivePart, cfg odConfig) err
 					default:
 					}
 					return
+				}
+				if m != nil {
+					m.partsRegenDone.Add(1)
+					m.archivesRegenedDone.Add(1)
 				}
 			}
 		}()

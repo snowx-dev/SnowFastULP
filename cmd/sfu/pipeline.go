@@ -279,22 +279,36 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 	// phase 0 (-od): discover prior archives, regen missing/stale sidecars, and
 	// upgrade legacy v2 sidecars to sorted v3. dedup reads each bucket's library
 	// keys directly from these sidecars (no per-run routing into scratch).
+	//
+	// Runs CONCURRENTLY with shard so the cold-run regen/upgrade cost overlaps
+	// input parsing; we block on it only before dedup, the first step that needs
+	// the sidecars. destSidecars / r.odResult / odErr are written by the
+	// goroutine and read after <-odDone (channel close = happens-before).
 	var destSidecars []string
+	var odErr error
+	odDone := make(chan struct{})
+	odRunning := false
+	odCtx, odCancel := context.WithCancel(ctx)
+	defer odCancel()
 	if r.cfg.DestDedup {
-		odRes, err := runODScan(ctx, odConfig{
-			Dest:            r.cfg.DestDedupDir,
-			CurrentRunStamp: r.cfg.RunStamp,
-			Buckets:         r.bucketCount,
-			TempDir:         runDir,
-			Debug:           r.cfg.Debug,
-		}, r.odMetrics)
-		if err != nil {
-			return fmt.Errorf("od-scan: %w", err)
-		}
-		r.odResult = odRes
-		destSidecars = odRes.DestSidecarPaths
-		// promote TUI to shard frame; OD frame stays stacked below
-		m.phase.Store(phaseShard)
+		odRunning = true
+		m.phase.Store(phaseShard) // OD frame stacks below the shard frame
+		go func() {
+			defer close(odDone)
+			odRes, err := runODScan(odCtx, odConfig{
+				Dest:            r.cfg.DestDedupDir,
+				CurrentRunStamp: r.cfg.RunStamp,
+				Buckets:         r.bucketCount,
+				TempDir:         runDir,
+				Debug:           r.cfg.Debug,
+			}, r.odMetrics)
+			if err != nil {
+				odErr = err
+				return
+			}
+			r.odResult = odRes
+			destSidecars = odRes.DestSidecarPaths
+		}()
 	}
 
 	tShard := time.Now()
@@ -314,10 +328,22 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 		reject:     r.cfg.Reject,
 	}, m)
 	if err != nil {
+		if odRunning { // stop the -od scan and drain before returning
+			odCancel()
+			<-odDone
+		}
 		return fmt.Errorf("shard: %w", err)
 	}
 	if r.cfg.Debug != nil {
 		r.cfg.Debug.printfPhase("PHASE shard END", time.Since(tShard))
+	}
+
+	// block on phase 0 before dedup (first step that needs the library sidecars)
+	if odRunning {
+		<-odDone
+		if odErr != nil {
+			return fmt.Errorf("od-scan: %w", odErr)
+		}
 	}
 
 	m.phase.Store(phaseDedup)
