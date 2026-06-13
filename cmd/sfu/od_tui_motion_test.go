@@ -242,3 +242,28 @@ func strconvI(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// migration/upgrade pass has parts progress but NO byte denominator. it must
+// render a single aggregate bar (parts-indexed), not many frozen per-worker
+// rows. guards the v2->v3 migration UX on a first run against an old library.
+func TestUpgradePassHidesWorkerRowsShowsPartsProgress(t *testing.T) {
+	m := &odMetrics{}
+	m.phase.Store(int32(odPhaseRegen))
+	m.archivesTotal.Store(20)
+	m.partsRegenTotal.Store(20)
+	m.partsRegenDone.Store(7)
+	// regenBytesTotal stays 0 (upgrade has no byte progress)
+	m.workers = make([]workerStatus, 1)
+	name := "sfu_old_part1.txt.zst"
+	m.workers[0].archivePath.Store(&name)
+	m.workers[0].partIdx.Store(1)
+	m.workers[0].partsTotal.Store(1)
+
+	out := strings.Join(renderODFrame(m, 0, 100), "\n")
+	if strings.Contains(out, "[1]") {
+		t.Errorf("upgrade pass should not render frozen per-worker rows\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "7 / 20 parts indexed") {
+		t.Errorf("upgrade pass should show parts progress\nout:\n%s", out)
+	}
+}

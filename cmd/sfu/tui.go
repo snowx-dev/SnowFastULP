@@ -1337,9 +1337,14 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 
 	// per-worker rows OUTSIDE the frame, between box and main bar so
 	// phase 0 mirrors phase 1/2 layout (info box on top, stack below).
-	// inside-the-frame mini bars made the box feel cluttered
+	// inside-the-frame mini bars made the box feel cluttered.
+	//
+	// only shown when there's per-worker BYTE progress (archive decompression).
+	// the in-place v2->v3 upgrade (migration) has no byte denominator, so its
+	// rows would sit frozen — there we fall through to a single aggregate bar
+	// below (parts-indexed), like the old routing bar.
 	var workerBars []string
-	if phase == odPhaseRegen || phase == odPhaseIndexOwn {
+	if (phase == odPhaseRegen || phase == odPhaseIndexOwn) && regenBytesTotal > 0 {
 		rowWidth := contentWidth(width)
 		cap := workerRowCap(termHeight(), m.workerCount())
 		active := m.activeWorkers(cap)
@@ -1351,13 +1356,15 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		}
 	}
 
-	// progress bar below frame, tracks current sub-task. per-part
-	// sidecars finalize inline so 100% bytes = regen genuinely done
+	// single progress bar below the frame. byte-based during archive regen;
+	// falls back to parts-indexed for the upgrade/migration pass (no bytes).
 	var pct float64
 	switch phase {
 	case odPhaseRegen, odPhaseIndexOwn:
 		if regenBytesTotal > 0 {
 			pct = float64(regenBytesRead) / float64(regenBytesTotal)
+		} else if partsRegenTotal > 0 {
+			pct = float64(partsRegenDone) / float64(partsRegenTotal)
 		}
 	}
 	if pct > 1 {
