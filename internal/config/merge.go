@@ -112,6 +112,8 @@ type SFSFlags struct {
 	Debug           *bool
 	DecodeStep      *int
 	MaxHitsPerChunk *int
+	Limit           *int
+	Since           *string
 }
 
 // ApplySFS applies unvisited config values to sfs flags.
@@ -143,6 +145,12 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	}
 	if !v.set("max-hits-per-chunk") && f.SFS.MaxHitsPerChunk != nil {
 		*fl.MaxHitsPerChunk = *f.SFS.MaxHitsPerChunk
+	}
+	if !v.set("l") && f.SFS.Limit != nil {
+		*fl.Limit = *f.SFS.Limit
+	}
+	if !v.set("since") && f.SFS.Since != "" {
+		*fl.Since = f.SFS.Since
 	}
 	return nil
 }

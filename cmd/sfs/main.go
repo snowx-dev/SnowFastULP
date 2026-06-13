@@ -47,6 +47,7 @@ func main() {
 	txtMode := flag.Bool("txt", false, "search plain .txt files instead of .zst archives (no index)")
 	silent := flag.Bool("silent", false, "disable progress UI")
 	clean := flag.Bool("clean", false, "strip URL scheme prefixes from output lines")
+	since := flag.String("since", "", "only search archives modified within this window, e.g. 7d, 12h, 90m (default: all)")
 	workers := flag.Int("j", 0, "worker goroutines (0 = GOMAXPROCS)")
 	debugFlag := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	// 1 MiB default tracks per-core L2 on modern uarch.
@@ -55,6 +56,9 @@ func main() {
 	// per-chunk safety valve vs pathological queries (eg `:` over multi-GiB).
 	// 0 = unbounded, hit = skip rest of chunk + stderr note
 	maxHitsPerChunk := flag.Int("max-hits-per-chunk", 0, "")
+	// global hit cap: stop the whole search + exit cleanly after N total hits.
+	// 0 = unlimited. distinct from -max-hits-per-chunk (per-chunk safety valve).
+	limit := flag.Int("l", 0, "stop after N total hits, then exit (0 = unlimited)")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
@@ -63,7 +67,7 @@ func main() {
 	visited := config.NewVisited()
 	if err := cfg.ApplySFS(visited, config.SFSFlags{
 		O: outFile, Txt: txtMode, Silent: silent, Clean: clean, J: workers, Debug: debugFlag,
-		DecodeStep: decodeStep, MaxHitsPerChunk: maxHitsPerChunk,
+		DecodeStep: decodeStep, MaxHitsPerChunk: maxHitsPerChunk, Limit: limit, Since: since,
 	}); err != nil {
 		fatal("%v", err)
 	}
@@ -90,10 +94,24 @@ func main() {
 		w = runtime.GOMAXPROCS(0)
 	}
 
+	var modifiedAfter time.Time
+	if *since != "" {
+		dur, perr := parseSince(*since)
+		if perr != nil {
+			usage("%v", perr)
+		}
+		modifiedAfter = time.Now().Add(-dur)
+	}
+
 	var archives []string
-	if *txtMode {
+	switch {
+	case *txtMode && !modifiedAfter.IsZero():
+		archives, err = discover.ListTxtSince(args.Root, modifiedAfter)
+	case *txtMode:
 		archives, err = discover.ListTxt(args.Root)
-	} else {
+	case !modifiedAfter.IsZero():
+		archives, err = discover.ListZstSince(args.Root, modifiedAfter)
+	default:
 		archives, err = discover.ListZst(args.Root)
 	}
 	if err != nil {
@@ -204,6 +222,7 @@ func main() {
 		clean:           *clean,
 		decodeStep:      *decodeStep,
 		maxHitsPerChunk: *maxHitsPerChunk,
+		limit:           *limit,
 		signaled:        signaled,
 		started:         started,
 		debug:           dbg,
@@ -225,7 +244,7 @@ func main() {
 		dbg.logCompletion(metrics, wall, debugInfo)
 	}
 	if !*silent {
-		for _, ln := range renderFinalSummary(started, metrics, *outFile) {
+		for _, ln := range renderFinalSummary(started, metrics, *outFile, pattern) {
 			fmt.Fprintln(os.Stderr, ln)
 		}
 	}
@@ -242,6 +261,7 @@ type runConfig struct {
 	clean           bool
 	decodeStep      int
 	maxHitsPerChunk int
+	limit           int
 	signaled        func() bool
 	started         time.Time
 	debug           *debugLog
@@ -249,6 +269,11 @@ type runConfig struct {
 }
 
 func run(ctx context.Context, cfg runConfig) error {
+	// child ctx so we can stop the search early on -l without disturbing the
+	// signal-driven parent ctx (interrupt handling stays in main).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	archiveOrd := make(map[string]int, len(cfg.archives))
 	for i, a := range cfg.archives {
 		archiveOrd[a] = i
@@ -270,25 +295,35 @@ func run(ctx context.Context, cfg runConfig) error {
 		out = f
 	}
 
-	var resultWriter io.Writer = os.Stdout
-	if out != nil {
-		resultWriter = out
-	}
-
 	uiMode := resolveUIMode(cfg.silent, cfg.outFile)
 	var layout *terminalLayout
 	if uiMode == uiFull && stdoutIsTTY() && stderrIsTTY() {
 		layout = &terminalLayout{}
 		layout.Enable()
 	}
-	if layout != nil {
-		resultWriter = newHitViewportWriter(resultWriter, layout)
-	}
 
+	// Wire the hit output:
+	//   resultWriter — the durable/canonical sink (ordered when -o).
+	//   liveWriter   — an on-screen viewport echo, used only with -o so hits
+	//                  still scroll live while the file stays the source of truth.
+	//   capture      — buffers stdout hits for replay after the alt-screen exits
+	//                  (only when there's no -o; with -o the file is the record).
+	var resultWriter io.Writer = os.Stdout
+	var liveWriter io.Writer
 	var capture *hitCapture
-	if layout != nil {
+	switch {
+	case out != nil && layout != nil:
+		// -o on a TTY: persist to the file, echo hits live on screen separately.
+		resultWriter = out
+		liveWriter = newHitViewportWriter(os.Stdout, layout)
+	case layout != nil:
+		// no -o on a TTY: hits stream into the on-screen viewport; capture so
+		// they survive the alt-screen exit.
+		resultWriter = newHitViewportWriter(os.Stdout, layout)
 		capture = newHitCapture(resultWriter)
 		resultWriter = capture
+	case out != nil:
+		resultWriter = out
 	}
 
 	metrics := cfg.metrics
@@ -336,6 +371,7 @@ func run(ctx context.Context, cfg runConfig) error {
 	go runUI(uiConfig{
 		Mode:     uiMode,
 		Metrics:  metrics,
+		Pattern:  cfg.pattern,
 		Start:    cfg.started,
 		Done:     uiDone,
 		Signaled: cfg.signaled,
@@ -374,6 +410,13 @@ func run(ctx context.Context, cfg runConfig) error {
 	sink := search.NewWriter(resultWriter, cfg.clean)
 	orderedOutput := cfg.outFile != ""
 	streamFlush := layout != nil || (out == nil && stdoutIsTTY())
+
+	// Live on-screen echo (only with -o + TUI). The durable sink stays ordered;
+	// this shows hits as they're found so the screen isn't blank during a -o run.
+	var liveSink *search.Writer
+	if liveWriter != nil {
+		liveSink = search.NewWriter(liveWriter, cfg.clean)
+	}
 
 	var printer *search.OrderedPrinter
 	writeHit := func(h search.Hit) error {
@@ -450,6 +493,8 @@ func run(ctx context.Context, cfg runConfig) error {
 		close(hitCh)
 	}()
 
+	var emitted int
+	limitReached := false
 drainHits:
 	for {
 		select {
@@ -467,20 +512,42 @@ drainHits:
 			if err := writeHit(h); err != nil {
 				return fmt.Errorf("write hit: %w", err)
 			}
+			emitted++
 			if streamFlush {
 				if err := sink.Flush(); err != nil {
 					return fmt.Errorf("flush hit: %w", err)
 				}
 			}
+			// echo to the on-screen viewport as found (-o + TUI only)
+			if liveSink != nil {
+				if err := liveSink.WriteHit(h); err != nil {
+					return fmt.Errorf("write live hit: %w", err)
+				}
+				if err := liveSink.Flush(); err != nil {
+					return fmt.Errorf("flush live hit: %w", err)
+				}
+			}
+			// -l: stop the search once N hits are out. cancel() halts workers;
+			// limitReached makes the ctx-cancelled state below a clean exit.
+			if cfg.limit > 0 && emitted >= cfg.limit {
+				limitReached = true
+				cancel()
+				break drainHits
+			}
 		}
 	}
 
 	searchWG.Wait()
+	if limitReached {
+		// workers may have counted buffered-but-undrained hits before stopping;
+		// pin the reported total to what we actually emitted.
+		metrics.Hits.Store(int64(emitted))
+	}
 	if cfg.debug != nil {
 		cfg.debug.Event("search complete hits=%d chunks=%d/%d scanned=%d",
 			metrics.Hits.Load(), metrics.ChunksDone.Load(), metrics.ChunksTotal.Load(), metrics.BytesScanned.Load())
 	}
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && !limitReached {
 		return ctx.Err()
 	}
 
@@ -494,7 +561,7 @@ drainHits:
 	if err := sink.Flush(); err != nil {
 		return fmt.Errorf("flush output: %w", err)
 	}
-	if searchErr != nil {
+	if searchErr != nil && !limitReached {
 		return searchErr
 	}
 	ok = true

@@ -42,6 +42,8 @@ type SFSSection struct {
 	Debug           bool   `toml:"debug"`
 	DecodeStep      *int   `toml:"decode_step"`
 	MaxHitsPerChunk *int   `toml:"max_hits_per_chunk"`
+	Limit           *int   `toml:"l"`
+	Since           string `toml:"since"`
 }
 
 // Path returns the loaded config file path.

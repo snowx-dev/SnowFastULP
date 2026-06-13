@@ -37,6 +37,8 @@ func renderHelp(bin string) string {
 		{"-o", "FILE", "Write results to this file instead of stdout."},
 		{"-silent", "", "Use plain text output instead of the live screen."},
 		{"-clean", "", "Strip URL schemes from output lines."},
+		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
+		{"-since", "DUR", "Only search archives modified within DUR, e.g. 7d, 12h, 90m."},
 	}
 	nerds := []argDef{
 		{"-j", "N", "Set search worker count."},
