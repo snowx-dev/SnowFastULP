@@ -346,7 +346,14 @@ func main() {
 			dbg.logTermination(runErr, sig, time.Since(started))
 		}
 		if sig {
-			fmt.Fprintln(os.Stderr, "\ninterrupted")
+			// reassure a confused user who Ctrl+C'd mid-migration: the dest
+			// library is only ever touched via atomic sidecar renames + a
+			// discarded-on-failure output, so nothing is half-written.
+			if r.cfg.DestDedup {
+				fmt.Fprintln(os.Stderr, "\ninterrupted — existing library left intact (no archives modified); safe to re-run.")
+			} else {
+				fmt.Fprintln(os.Stderr, "\ninterrupted")
+			}
 			os.Exit(130)
 		}
 		fmt.Fprintf(os.Stderr, "\nerror: %v\n", runErr)

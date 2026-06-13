@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"container/heap"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -254,7 +255,7 @@ func newSidecarWriterAtPath(finalPath string) (*sidecarWriter, error) {
 // without touching the archive (no decompression). Bounded RAM via the writer's
 // spill/merge. No-op if already sorted. This is the transparent, one-time
 // migration path triggered the first time -od sees an old sidecar.
-func upgradeSidecarToV3(sidecarPath string) (uint64, error) {
+func upgradeSidecarToV3(ctx context.Context, sidecarPath string) (uint64, error) {
 	hdr, err := readSidecarHeader(sidecarPath)
 	if err != nil {
 		return 0, err
@@ -266,7 +267,20 @@ func upgradeSidecarToV3(sidecarPath string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if serr := streamSidecarKeys(sidecarPath, w.WriteHash); serr != nil {
+	// honor cancellation mid-stream so a Ctrl+C during migration responds
+	// promptly even on a huge single sidecar. Abort drops the temp and leaves
+	// the original v2 .idx untouched — the library is never half-written.
+	n := 0
+	feed := func(k uint64) error {
+		if n&0x3ffff == 0 { // on entry (n=0), then ~every 256K keys
+			if cerr := ctx.Err(); cerr != nil {
+				return cerr
+			}
+		}
+		n++
+		return w.WriteHash(k)
+	}
+	if serr := streamSidecarKeys(sidecarPath, feed); serr != nil {
 		_ = w.Abort()
 		return 0, serr
 	}

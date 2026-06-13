@@ -619,7 +619,7 @@ func upgradeSidecars(ctx context.Context, parts []archivePart, cfg odConfig, m *
 					ws.partIdx.Store(1)
 					ws.partsTotal.Store(1)
 				}
-				if _, err := upgradeSidecarToV3(p.sidecarPath); err != nil {
+				if _, err := upgradeSidecarToV3(ctx, p.sidecarPath); err != nil {
 					select {
 					case errCh <- fmt.Errorf("%s: %w", filepath.Base(p.path), err):
 						cancel()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func TestUpgradeV2SidecarToV3(t *testing.T) {
 	if hdr, err := readSidecarHeader(path); err != nil || hdr.sorted() {
 		t.Fatalf("fixture should be readable v2 (unsorted); err=%v", err)
 	}
-	if _, err := upgradeSidecarToV3(path); err != nil {
+	if _, err := upgradeSidecarToV3(context.Background(), path); err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
 	hdr, err := readSidecarHeader(path)
@@ -177,5 +178,42 @@ func TestSidecarBucketKeysRangeRead(t *testing.T) {
 	want = slices.Compact(want)
 	if !sliceEqualUint64(union, want) {
 		t.Fatalf("union over buckets = %v, want %v", union, want)
+	}
+}
+
+// Ctrl+C during migration: a cancelled upgrade must abort without touching the
+// original v2 sidecar — the library is never left half-written.
+func TestUpgradeSidecarToV3CancelLeavesOriginalIntact(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "sfu_c.txt.zst")
+	keys := []uint64{9, 1, 5, 1, 7}
+	writeV2Sidecar(t, archive, keys)
+	path := sidecarPathForArchive(archive)
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate Ctrl+C before the upgrade gets going
+	if _, uerr := upgradeSidecarToV3(ctx, path); uerr == nil {
+		t.Fatal("cancelled upgrade should return an error")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("original sidecar missing after cancelled upgrade: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("original v2 sidecar was modified by a cancelled upgrade")
+	}
+	if hdr, herr := readSidecarHeader(path); herr != nil || hdr.sorted() {
+		t.Fatalf("sidecar should still be intact v2 after cancel; err=%v", herr)
+	}
+	// no leftover temp in the idx dir
+	tmps, _ := filepath.Glob(filepath.Join(dir, idxSubdirName, "*.tmp"))
+	if len(tmps) != 0 {
+		t.Errorf("cancelled upgrade left temp files: %v", tmps)
 	}
 }
