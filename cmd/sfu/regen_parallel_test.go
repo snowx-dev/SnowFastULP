@@ -355,46 +355,6 @@ func TestLibraryRowFallsBackToArchiveProgress(t *testing.T) {
 	}
 }
 
-// after routing, bucket files still flushing/closing. say so explicitly,
-// not "stuck at 100%"
-func TestRenderODFrameShowsBucketCommitPhase(t *testing.T) {
-	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseCommitBuckets))
-	m.archivesTotal.Store(1)
-	m.filesTotal.Store(16)
-	m.keysTotalEstimate.Store(1000)
-	m.keysLoaded.Store(1000)
-
-	out := strings.Join(renderODFrame(m, 0, 100), "\n")
-	if !strings.Contains(out, "committing lookup buckets") {
-		t.Errorf("missing commit phase label\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "Entries") || !strings.Contains(out, "1,000") {
-		t.Errorf("commit phase should keep final entry count visible\nout:\n%s", out)
-	}
-}
-
-// routing flips to commit subphase before flush/close, narrow window
-// that previously looked like a stuck progress bar
-func TestRouteAllSidecarsIntoBucketsSetsCommitPhase(t *testing.T) {
-	dir := t.TempDir()
-	tempDir := t.TempDir()
-	parts := buildParts(t, dir, "sfu_20260101-000000_commit", 1, 25)
-	regenSidecarForTest(t, parts[0].path)
-
-	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseLoad))
-	if _, err := routeAllSidecarsIntoBuckets(context.Background(), parts, odConfig{
-		TempDir: tempDir,
-		Buckets: 4,
-	}, m); err != nil {
-		t.Fatalf("routeAllSidecarsIntoBuckets: %v", err)
-	}
-	if got := odPhase(m.phase.Load()); got != odPhaseCommitBuckets {
-		t.Errorf("phase after route = %v, want odPhaseCommitBuckets", got)
-	}
-}
-
 // worker mini-bars must sit outside the gradientBox, indented to match
 // the main progress bar
 func TestWorkerBarsRenderedOutsideFrame(t *testing.T) {
@@ -439,18 +399,16 @@ func TestWorkerBarsRenderedOutsideFrame(t *testing.T) {
 	}
 }
 
-// async-load contract: runODScan returns immediately after regen w/
-// empty DestKeyBucketPaths, bucket paths arrive via loadCh. lets phase 1
-// run in parallel with library load
-func TestRunODScanDefersLoadAndPopulatesAfterChannel(t *testing.T) {
+// runODScan returns the sorted library sidecar paths synchronously (no routing
+// into scratch). dedup reads each bucket's keys from them lazily.
+func TestRunODScanReturnsSidecarPaths(t *testing.T) {
 	dir := t.TempDir()
 	tempDir := t.TempDir()
-	// fresh sidecar so no regen work, only the load step is deferred
 	parts := buildParts(t, dir, "sfu_20260101-000000_def", 1, 200)
 	regenSidecarForTest(t, parts[0].path)
 
 	m := &odMetrics{}
-	res, loadCh, err := runODScan(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_other",
 		Buckets:         4,
@@ -459,57 +417,18 @@ func TestRunODScanDefersLoadAndPopulatesAfterChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loadCh == nil {
-		t.Fatal("expected non-nil loadCh for a populated library")
-	}
-	if len(res.DestKeyBucketPaths) != 0 {
-		t.Errorf("DestKeyBucketPaths should be empty pre-load, got %v", res.DestKeyBucketPaths)
-	}
-	if res.TotalKeysLoaded != 0 {
-		t.Errorf("TotalKeysLoaded should be 0 pre-load, got %d", res.TotalKeysLoaded)
-	}
-	// load-independent counts must already be populated
 	if res.ArchivesTotal != 1 {
 		t.Errorf("ArchivesTotal = %d, want 1", res.ArchivesTotal)
 	}
-
-	lr := <-loadCh
-	if lr.Err != nil {
-		t.Fatalf("load err: %v", lr.Err)
+	if len(res.DestSidecarPaths) != 1 {
+		t.Fatalf("DestSidecarPaths = %v, want 1 sidecar", res.DestSidecarPaths)
 	}
-	if len(lr.DestKeyBucketPaths) == 0 {
-		t.Errorf("DestKeyBucketPaths empty after load")
+	if res.TotalKeysLoaded == 0 {
+		t.Errorf("TotalKeysLoaded should be > 0")
 	}
-	if lr.TotalKeysLoaded == 0 {
-		t.Errorf("TotalKeysLoaded should be > 0 after load")
-	}
-}
-
-// deferred load goroutine must flip phase to odPhaseDone, else the OD
-// frame renders forever under phase 1/2
-func TestRunODScanLoadGoroutineSetsPhaseToDone(t *testing.T) {
-	dir := t.TempDir()
-	tempDir := t.TempDir()
-	parts := buildParts(t, dir, "sfu_20260101-000000_ph", 1, 100)
-	regenSidecarForTest(t, parts[0].path)
-	m := &odMetrics{}
-
-	res, loadCh, err := runODScan(context.Background(), odConfig{
-		Dest:            dir,
-		CurrentRunStamp: "sfu_other",
-		Buckets:         4,
-		TempDir:         tempDir,
-	}, m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = res
-	if got := odPhase(m.phase.Load()); got != odPhaseLoad {
-		t.Errorf("during deferred load, expected odPhase=odPhaseLoad, got %v", got)
-	}
-	<-loadCh
+	// phase-0 work is done synchronously; the gather happens during dedup.
 	if got := odPhase(m.phase.Load()); got != odPhaseDone {
-		t.Errorf("after load drains, expected odPhase=odPhaseDone, got %v", got)
+		t.Errorf("phase after scan = %v, want odPhaseDone", got)
 	}
 }
 

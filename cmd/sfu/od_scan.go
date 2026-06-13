@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -24,9 +23,10 @@ import (
 )
 
 // phase 0 (-od): discover prior sfu_*.txt.zst archives at dest, regen
-// stale/missing .idx sidecars, route every dest hash into
-// <tempDir>/dest_keys/bucket_NNNN.bin. phase 2 pre-loads only its bucket
-// (~10 MB at 5B keys, B=4096) so RAM stays bounded regardless of library size.
+// missing/stale .idx sidecars, and upgrade legacy v2 sidecars to sorted v3 in
+// place. dedup (phase 2) then reads each bucket's library keys directly from
+// the sorted sidecars (top-bits range reads), one sidecar open at a time, so
+// RAM and fd use stay bounded regardless of library size. no per-run routing.
 
 // 0 = idle, the 2nd TUI frame renders iff phase != idle && phase != done
 type odPhase int32
@@ -34,16 +34,11 @@ type odPhase int32
 const (
 	odPhaseIdle     odPhase = 0
 	odPhaseDiscover odPhase = 1
-	odPhaseRegen    odPhase = 2
-	odPhaseLoad     odPhase = 3
-	odPhaseDone     odPhase = 4
+	odPhaseRegen    odPhase = 2 // regen (decompress) + in-place v2->v3 upgrade
+	odPhaseDone     odPhase = 3
 	// post-dedup index write for THIS run's output, shares odMetrics
 	// shape w/ regen so it reuses the same renderer (just swaps labels)
-	odPhaseIndexOwn odPhase = 5
-	// narrow window where keys are routed but dest writers are still
-	// flushing/closing. without this the load bar sits at 100% during
-	// disk I/O and reads as stuck
-	odPhaseCommitBuckets odPhase = 6
+	odPhaseIndexOwn odPhase = 4
 )
 
 // atomic counters for the TUI's second frame + end-of-run summary.
@@ -281,15 +276,24 @@ func sweepOrphanedSidecars(destDir string, runs []archiveRun) (int, error) {
 	removed := 0
 	for _, e := range entries {
 		name := e.Name()
-		// only .idx, leave .tmp / README / etc. alone
-		if !strings.HasSuffix(name, sidecarSuffix) {
+		if strings.HasSuffix(name, sidecarSuffix) {
+			if live[name] {
+				continue
+			}
+			_ = os.Remove(filepath.Join(subdir, name))
+			removed++
 			continue
 		}
-		if live[name] {
-			continue
+		// stale .write/.idxrun spill temps from a hard-killed run (signal cleanup
+		// handles graceful exits). age-gated so a concurrent run's live temp is
+		// never removed mid-flight.
+		if strings.HasSuffix(name, ".tmp") {
+			full := filepath.Join(subdir, name)
+			if fi, err := os.Stat(full); err == nil && time.Since(fi.ModTime()) > staleTempDirAge {
+				_ = os.Remove(full)
+				removed++
+			}
 		}
-		_ = os.Remove(filepath.Join(subdir, name))
-		removed++
 	}
 	return removed, nil
 }
@@ -330,9 +334,10 @@ func sweepOrphanedSearchSidecars(destDir string, runs []archiveRun) (int, error)
 type sidecarStatus int
 
 const (
-	sidecarStatusFresh   sidecarStatus = iota // header valid + mtime >= parts
+	sidecarStatusFresh   sidecarStatus = iota // header valid, sorted (v3), mtime >= part
 	sidecarStatusMissing                      // no sidecar on disk
-	sidecarStatusStale                        // malformed, wrong version, or older than parts
+	sidecarStatusStale                        // malformed, wrong version, or older than part
+	sidecarStatusUpgrade                      // valid + fresh but legacy v2 (unsorted): re-sort in place, no decompress
 )
 
 // status of one part's sidecar. reads header but doesnt scan body.
@@ -361,6 +366,11 @@ func classifyPartSidecar(part archivePart) (sidecarStatus, *sidecarHeader) {
 	if part.modTime.After(si.ModTime()) {
 		return sidecarStatusStale, hdr
 	}
+	// content is current but the body is legacy-unsorted (v2): upgrade in place
+	// (re-sort, no archive decompress) so -od can range-read it.
+	if !hdr.sorted() {
+		return sidecarStatusUpgrade, hdr
+	}
 	return sidecarStatusFresh, hdr
 }
 
@@ -373,43 +383,31 @@ type odConfig struct {
 	Debug           *debugLog
 }
 
-// deferred part of the phase-0 contract: populated by routeAllSidecars
-// IntoBuckets after a bg goroutine finishes streaming sidecars into per-
-// bucket files. surfaced via channel so pipeline can start phase 1 in parallel
-type odLoadResult struct {
-	DestKeyBucketPaths []string
-	TotalKeysLoaded    uint64
-	Elapsed            time.Duration
-	Err                error
-}
-
 type odResult struct {
-	DestKeyBucketPaths []string // [bucketIdx] -> path, "" if empty. valid only after loadCh signals
-	ArchivesTotal      int
-	FilesTotal         int
-	ArchivesFresh      int
-	ArchivesRegen      int
-	ArchivesSkipped    int
+	// sorted (v3) library sidecar paths. dedup gathers each bucket's dest keys
+	// from these via sidecarBucketKeys (no per-run routing into scratch).
+	DestSidecarPaths []string
+	ArchivesTotal    int
+	FilesTotal       int
+	ArchivesFresh    int
+	ArchivesRegen    int
+	ArchivesSkipped  int
 	// user-visible skipped paths re-emitted post-alt-screen
 	SkippedArchivePaths []string
 	TotalKeysLoaded     uint64
 	Elapsed             time.Duration
 }
 
-// returns:
-//   - *odResult w/ regen-time fields. DestKeyBucketPaths/TotalKeysLoaded
-//     valid only after receiving from loadCh
-//   - loadCh: 1-buffered chan w/ deferred load result. nil if nothing to load.
-//     caller MUST receive before using bucket paths
-//   - err: synchronous discover/regen failure
-//
-// deferred-load lets phase 1 run in parallel with library load
-func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, <-chan odLoadResult, error) {
+// runODScan does phase 0 of -od: discover prior archives at the dest, regen
+// missing/stale .idx sidecars (decompress), and upgrade legacy v2 sidecars to
+// sorted v3 in place (no decompress). It returns the SORTED sidecar paths;
+// dedup reads each bucket's library keys from them lazily (no per-run routing).
+func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, error) {
 	if cfg.Buckets <= 0 {
-		return nil, nil, fmt.Errorf("odScan: buckets must be > 0")
+		return nil, fmt.Errorf("odScan: buckets must be > 0")
 	}
 	if cfg.Dest == "" {
-		return nil, nil, fmt.Errorf("odScan: dest is empty")
+		return nil, fmt.Errorf("odScan: dest is empty")
 	}
 
 	started := time.Now()
@@ -420,7 +418,7 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, <-ch
 
 	runs, err := discoverArchiveRuns(cfg.Dest, cfg.CurrentRunStamp)
 	if err != nil {
-		return nil, nil, fmt.Errorf("odScan: discover: %w", err)
+		return nil, fmt.Errorf("odScan: discover: %w", err)
 	}
 	cfg.Debug.Event("[od] scan begin: dest=%s, found=%d runs", cfg.Dest, len(runs))
 
@@ -442,12 +440,12 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, <-ch
 			m.elapsedNanos.Store(int64(time.Since(started)))
 		}
 		cfg.Debug.Event("[od] scan: no prior archives, skipping phase 0")
-		return &odResult{Elapsed: time.Since(started)}, nil, nil
+		return &odResult{Elapsed: time.Since(started)}, nil
 	}
 
 	// per-part classify: touching one part of a 16-part run invalidates
 	// only that part, siblings stay fresh
-	var needRegen []archivePart
+	var needRegen, needUpgrade []archivePart
 	var regenBytes int64
 	var keysEstimate int64
 	var totalParts int
@@ -457,6 +455,10 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, <-ch
 			st, hdr := classifyPartSidecar(p)
 			switch st {
 			case sidecarStatusFresh:
+				keysEstimate += int64(hdr.keyCount)
+			case sidecarStatusUpgrade:
+				// fresh content, legacy v2 body: re-sort in place (no decompress)
+				needUpgrade = append(needUpgrade, p)
 				keysEstimate += int64(hdr.keyCount)
 			case sidecarStatusMissing, sidecarStatusStale:
 				needRegen = append(needRegen, p)
@@ -476,7 +478,10 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, <-ch
 		m.regenBytesTotal.Store(regenBytes)
 		m.keysTotalEstimate.Store(keysEstimate)
 		m.filesTotal.Store(int32(totalParts))
-		m.partsRegenTotal.Store(int32(len(needRegen)))
+		// both regen and in-place upgrade write a .idx; count both so the
+		// "parts indexed" progress (and migration runs, which are all upgrade,
+		// no regen) move instead of sitting frozen.
+		m.partsRegenTotal.Store(int32(len(needRegen) + len(needUpgrade)))
 	}
 	cfg.Debug.Event("[od] scan classify: parts_total=%d, parts_need_regen=%d, regen_bytes=%d",
 		totalParts, len(needRegen), regenBytes)
@@ -484,29 +489,39 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, <-ch
 	// regen pool, one task per part. corrupt part = skip w/ warning,
 	// siblings stay usable
 	skippedParts := make(map[string]bool)
-	var skippedPartPaths []string
 	if len(needRegen) > 0 {
 		if m != nil {
 			m.phase.Store(int32(odPhaseRegen))
 		}
 		paths, err := regenParts(ctx, needRegen, cfg, m)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		for _, p := range paths {
 			skippedParts[p] = true
 		}
-		skippedPartPaths = paths
 		if m != nil {
 			m.archivesSkipped.Store(int32(len(paths)))
 		}
+	}
+
+	// one-time transparent migration: re-sort legacy v2 sidecars to v3 in place.
+	// never decompresses the archive; bounded RAM via the writer's spill/merge.
+	if len(needUpgrade) > 0 {
+		if m != nil {
+			m.phase.Store(int32(odPhaseRegen))
+		}
+		if err := upgradeSidecars(ctx, needUpgrade, cfg, m); err != nil {
+			return nil, fmt.Errorf("odScan: upgrade: %w", err)
+		}
+		cfg.Debug.Event("[od] upgraded %d legacy v2 sidecars to sorted v3", len(needUpgrade))
 	}
 
 	// majority-skipped check: > half the library unreadable = refuse run.
 	// silent half-library dedup is worse than failing fast
 	totalSkippedParts := len(skippedParts)
 	if totalParts > 0 && totalSkippedParts*2 > totalParts {
-		return nil, nil, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"od-scan: %d of %d archive parts in %s were unreadable (%d%%). "+
 				"This is too many to safely dedup against -- check the directory and try again",
 			totalSkippedParts, totalParts, cfg.Dest,
@@ -524,75 +539,117 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, <-ch
 		ArchivesSkipped:     runsSkipped,
 		SkippedArchivePaths: skippedRunPaths,
 		FilesTotal:          totalParts,
-		Elapsed:             time.Since(started), // refined by load goroutine
+		Elapsed:             time.Since(started),
 	}
-	_ = skippedPartPaths // surfaced via skippedRunPaths
 
-	// load list = all parts minus the skipped ones. keep healthy siblings
-	// of a partially-corrupt run
-	loadParts := make([]archivePart, 0, totalParts)
+	// dest sidecar list = every non-skipped part's (now sorted v3) sidecar.
+	// dedup gathers each bucket's keys from these lazily via sidecarBucketKeys
+	// — no per-run routing into scratch buckets.
+	destSidecars := make([]string, 0, totalParts)
+	var totalKeys int64
 	for _, r := range runs {
 		for _, p := range r.parts {
 			if skippedParts[p.path] {
 				continue
 			}
-			loadParts = append(loadParts, p)
-		}
-	}
-
-	if len(loadParts) == 0 {
-		// every part corrupt and skipped, majority check above already
-		// validated this isnt "too many bad"
-		if m != nil {
-			m.phase.Store(int32(odPhaseDone))
-			m.elapsedNanos.Store(int64(res.Elapsed))
-		}
-		cfg.Debug.Event("[od] scan done: no readable archive parts to load")
-		return res, nil, nil
-	}
-
-	// refresh keysTotalEstimate w/ real sidecar headers now regen is done
-	if m != nil {
-		var totalKeys int64
-		for _, p := range loadParts {
+			destSidecars = append(destSidecars, p.sidecarPath)
 			if hdr, err := readSidecarHeader(p.sidecarPath); err == nil {
 				totalKeys += int64(hdr.keyCount)
 			}
 		}
+	}
+	res.DestSidecarPaths = destSidecars
+	res.TotalKeysLoaded = uint64(totalKeys)
+
+	if m != nil {
 		if totalKeys > 0 {
 			m.keysTotalEstimate.Store(totalKeys)
 		}
+		// the per-bucket gather happens during dedup; phase-0 work is done.
+		m.phase.Store(int32(odPhaseDone))
+		m.elapsedNanos.Store(int64(res.Elapsed))
 	}
+	cfg.Debug.Event("[od] scan done: archives=%d fresh=%d regen=%d upgrade=%d skipped=%d sidecars=%d keys=%d elapsed=%s",
+		res.ArchivesTotal, res.ArchivesFresh, res.ArchivesRegen, len(needUpgrade), res.ArchivesSkipped,
+		len(destSidecars), totalKeys, res.Elapsed)
+	return res, nil
+}
 
-	// load runs in bg, phase 1 can run while this completes.
-	// 1-buffered so goroutine never blocks if caller abandons
-	loadCh := make(chan odLoadResult, 1)
+// upgradeSidecars re-sorts legacy v2 sidecars to v3 in place, in parallel.
+// the archive is never touched (keys come from the existing .idx).
+func upgradeSidecars(ctx context.Context, parts []archivePart, cfg odConfig, m *odMetrics) error {
+	workers := cfg.Workers
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	if workers > len(parts) {
+		workers = len(parts)
+	}
+	if workers < 1 {
+		workers = 1
+	}
 	if m != nil {
-		m.phase.Store(int32(odPhaseLoad))
+		m.setWorkerSlots(workers)
+		defer m.clearWorkerSlots()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	taskCh := make(chan archivePart)
+	errCh := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		workerIdx := i
+		go func() {
+			defer wg.Done()
+			var ws *workerStatus
+			if m != nil {
+				ws = m.workerSlot(workerIdx)
+			}
+			if ws != nil {
+				defer ws.archivePath.Store(nil)
+			}
+			for p := range taskCh {
+				if ctx.Err() != nil {
+					return
+				}
+				if ws != nil {
+					name := filepath.Base(p.path)
+					ws.archivePath.Store(&name)
+					ws.partIdx.Store(1)
+					ws.partsTotal.Store(1)
+				}
+				if _, err := upgradeSidecarToV3(p.sidecarPath); err != nil {
+					select {
+					case errCh <- fmt.Errorf("%s: %w", filepath.Base(p.path), err):
+						cancel()
+					default:
+					}
+					return
+				}
+				if m != nil {
+					m.partsRegenDone.Add(1)
+					m.archivesRegenedDone.Add(1)
+				}
+			}
+		}()
 	}
 	go func() {
-		loadStart := time.Now()
-		loadRes, err := routeAllSidecarsIntoBuckets(ctx, loadParts, cfg, m)
-		if err != nil {
-			loadCh <- odLoadResult{Err: fmt.Errorf("odScan: route: %w", err)}
-			return
-		}
-		elapsed := time.Since(started)
-		if m != nil {
-			m.phase.Store(int32(odPhaseDone))
-			m.elapsedNanos.Store(int64(elapsed))
-		}
-		cfg.Debug.Event("[od] scan done: archives=%d, fresh=%d, regen=%d, skipped=%d, keys_loaded=%d, load_elapsed=%s, total_elapsed=%s",
-			res.ArchivesTotal, res.ArchivesFresh, res.ArchivesRegen, res.ArchivesSkipped,
-			loadRes.TotalKeysLoaded, time.Since(loadStart), elapsed)
-		loadCh <- odLoadResult{
-			DestKeyBucketPaths: loadRes.DestKeyBucketPaths,
-			TotalKeysLoaded:    loadRes.TotalKeysLoaded,
-			Elapsed:            elapsed,
+		defer close(taskCh)
+		for _, p := range parts {
+			select {
+			case taskCh <- p:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
-
-	return res, loadCh, nil
+	wg.Wait()
+	close(errCh)
+	if e, ok := <-errCh; ok && e != nil {
+		return e
+	}
+	return ctx.Err()
 }
 
 // runs w/ at least one part in needRegen. O(R*P), inputs bounded by dir listing
@@ -963,185 +1020,4 @@ func streamArchiveLines(ctx context.Context, path string, decoderConcurrency int
 			return rerr
 		}
 	}
-}
-
-// one append-only writer per dest bucket file. closed by
-// routeAllSidecarsIntoBuckets, empty buckets get their 0-byte files
-// removed so phase 2 skips the open()
-type destBucketWriters struct {
-	paths   []string
-	files   []*os.File
-	writers []*bufio.Writer
-	counts  []uint64
-	// per-instance scratch for WriteKey. used to be a package-level var,
-	// which was a hidden trap: future parallelization would have raced
-	keyBuf [sidecarKeyBytes]byte
-}
-
-func newDestBucketWriters(rootDir string, buckets int) (*destBucketWriters, error) {
-	dir := filepath.Join(rootDir, "dest_keys")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	dw := &destBucketWriters{
-		paths:   make([]string, buckets),
-		files:   make([]*os.File, buckets),
-		writers: make([]*bufio.Writer, buckets),
-		counts:  make([]uint64, buckets),
-	}
-	bufBytes := bucketBufBytes(buckets)
-	for i := 0; i < buckets; i++ {
-		p := filepath.Join(dir, fmt.Sprintf("bucket_%05d.bin", i))
-		f, err := os.OpenFile(p, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-		if err != nil {
-			dw.abort()
-			return nil, err
-		}
-		dw.paths[i] = p
-		dw.files[i] = f
-		dw.writers[i] = bufio.NewWriterSize(f, bufBytes)
-	}
-	return dw, nil
-}
-
-// appends k to bucket idx. NOT thread-safe, routing is single-threaded
-// (CPU-trivial, parallelism wouldnt buy much)
-func (dw *destBucketWriters) WriteKey(idx int, k uint64) error {
-	binary.LittleEndian.PutUint64(dw.keyBuf[:], k)
-	if _, err := dw.writers[idx].Write(dw.keyBuf[:]); err != nil {
-		return err
-	}
-	dw.counts[idx]++
-	return nil
-}
-
-// flushes + closes every writer, empty bucket files removed.
-// returns first error but always attempts every close.
-// nils file slots on success so a deferred abort() after a late caller
-// error cant remove the files we just produced
-func (dw *destBucketWriters) Close() error {
-	var firstErr error
-	for i, w := range dw.writers {
-		if w != nil {
-			if err := w.Flush(); err != nil && firstErr == nil {
-				firstErr = err
-			}
-			dw.writers[i] = nil
-		}
-		if f := dw.files[i]; f != nil {
-			if err := f.Close(); err != nil && firstErr == nil {
-				firstErr = err
-			}
-			dw.files[i] = nil
-		}
-		if dw.counts[i] == 0 {
-			_ = os.Remove(dw.paths[i])
-			dw.paths[i] = ""
-		}
-	}
-	return firstErr
-}
-
-// error-path cleanup. files Close() already committed have files[i]==nil
-// and paths[i]!="" so abort LEAVES THOSE ALONE
-func (dw *destBucketWriters) abort() {
-	for i, f := range dw.files {
-		if f == nil {
-			continue
-		}
-		_ = f.Close()
-		dw.files[i] = nil
-		if dw.paths[i] != "" {
-			_ = os.Remove(dw.paths[i])
-			dw.paths[i] = ""
-		}
-	}
-}
-
-const sidecarRouteChunkBytes = 4 * 1024 * 1024
-
-// streams every per-part sidecar in multi-MiB chunks, writes each key
-// into its hash-modulo-B bucket. single-threaded by design (parallel
-// routing needs a diff writer architecture)
-func routeAllSidecarsIntoBuckets(ctx context.Context, parts []archivePart, cfg odConfig, m *odMetrics) (*odResult, error) {
-	dw, err := newDestBucketWriters(cfg.TempDir, cfg.Buckets)
-	if err != nil {
-		return nil, fmt.Errorf("newDestBucketWriters: %w", err)
-	}
-	defer func() {
-		if dw != nil {
-			dw.abort()
-		}
-	}()
-
-	usePow2 := cfg.Buckets > 0 && (cfg.Buckets&(cfg.Buckets-1)) == 0
-	mask := uint64(cfg.Buckets) - 1
-
-	var totalKeys uint64
-	var routeSkipped int
-	for _, p := range parts {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-		err := streamSidecarKeyBytes(p.sidecarPath, sidecarRouteChunkBytes, func(raw []byte) error {
-			for off := 0; off < len(raw); off += sidecarKeyBytes {
-				k := binary.LittleEndian.Uint64(raw[off : off+sidecarKeyBytes])
-				var idx uint64
-				if usePow2 {
-					idx = k & mask
-				} else {
-					idx = k % uint64(cfg.Buckets)
-				}
-				if err := dw.WriteKey(int(idx), k); err != nil {
-					return err
-				}
-				totalKeys++
-				if m != nil {
-					// per-key atomic would dominate, update once per 8K keys
-					// (~64 KiB, matches bufio flush cadence)
-					if totalKeys%8192 == 0 {
-						m.keysLoaded.Store(int64(totalKeys))
-					}
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			// narrow window: concurrent process bumped parserVersion or
-			// corrupted sidecar between classify and route. drop the part
-			// from dedup, warn. better UX than fatal mid-phase-1
-			if errors.Is(err, errSidecarStale) || errors.Is(err, errSidecarMalformed) {
-				routeSkipped++
-				if m != nil {
-					m.archivesSkipped.Add(1)
-				}
-				fmt.Fprintf(os.Stderr,
-					"sfu: warning: dropping archive part from dedup set; sidecar became stale or malformed mid-run: %s (%v)\n",
-					p.path, err)
-				cfg.Debug.Event("[od] route skip: part=%s reason=%v", filepath.Base(p.path), err)
-				continue
-			}
-			return nil, fmt.Errorf("route sidecar %s: %w", p.sidecarPath, err)
-		}
-		cfg.Debug.Event("[od] sidecar loaded: part=%s, keys_so_far=%d", filepath.Base(p.path), totalKeys)
-	}
-
-	if m != nil {
-		m.keysLoaded.Store(int64(totalKeys))
-		m.phase.Store(int32(odPhaseCommitBuckets))
-	}
-	cfg.Debug.Event("[od] route commit: keys=%d buckets=%d", totalKeys, cfg.Buckets)
-	if err := dw.Close(); err != nil {
-		return nil, err
-	}
-
-	// hand paths to caller, nil our pointer so deferred abort() is a no-op
-	out := &odResult{
-		DestKeyBucketPaths: dw.paths,
-		TotalKeysLoaded:    totalKeys,
-	}
-	dw = nil
-	return out, nil
 }

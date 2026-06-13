@@ -6,12 +6,46 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+// bucketIndex maps a hash to its bucket. For power-of-two bucket counts it uses
+// the TOP bits of the hash (a range partition) rather than the low bits, so a
+// hash-sorted key file (the .idx sidecars) groups every bucket into a single
+// contiguous, seekable range — which is what lets -od read a bucket's library
+// keys without re-routing them. Falls back to modulo for the non-pow2 case
+// (unused in practice: bucket counts are always rounded up to a power of two).
+//
+// mask must be numBuckets-1; usePow2 says whether numBuckets is a power of two.
+func bucketIndex(h, mask uint64, usePow2 bool, numBuckets int) uint64 {
+	if usePow2 {
+		return h >> bucketShiftFromMask(mask)
+	}
+	return h % uint64(numBuckets)
+}
+
+// bucketShiftFromMask is the single source of truth for the top-bits partition:
+// a pow2 bucket count B (mask = B-1) splits the 64-bit hash space into B equal
+// ranges, and a key's bucket is its top log2(B) bits. The dest-side range math
+// (bucketKeyRange) derives from the same shift so shard and dedup never diverge.
+func bucketShiftFromMask(mask uint64) uint { return uint(64 - bits.Len64(mask)) }
+
+// bucketKeyRange returns the half-open hash range [lo, hi) owned by bucketIdx
+// for a pow2 bucket count — the inverse of bucketIndex. toEnd is true for the
+// last bucket, whose hi would be 1<<64 (overflow): callers read to EOF instead.
+func bucketKeyRange(bucketIdx, numBuckets int) (lo, hi uint64, toEnd bool) {
+	shift := bucketShiftFromMask(uint64(numBuckets - 1))
+	lo = uint64(bucketIdx) << shift
+	if bucketIdx+1 >= numBuckets {
+		return lo, 0, true
+	}
+	return lo, uint64(bucketIdx+1) << shift, false
+}
 
 // bucket record LE: [u64 hash][u32 line_len][line bytes, no \n]
 //
@@ -469,12 +503,7 @@ func processLine(ws *shardWorkState, line string, writers []*bucketWriter, usePo
 	}
 	out := ws.fmt.FormatRecord(host, url, login, password, noURI)
 	h := ws.fmt.HashKey(host, login, password)
-	var idx uint64
-	if usePow2 {
-		idx = h & mask
-	} else {
-		idx = h % uint64(len(writers))
-	}
+	idx := bucketIndex(h, mask, usePow2, len(writers))
 	if err := writers[idx].writeBytes(h, out); err != nil {
 		return err
 	}

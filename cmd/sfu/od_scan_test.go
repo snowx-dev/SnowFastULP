@@ -166,16 +166,12 @@ func TestRunODScanEmpty(t *testing.T) {
 	if res.ArchivesTotal != 0 {
 		t.Errorf("ArchivesTotal = %d, want 0", res.ArchivesTotal)
 	}
-	if len(res.DestKeyBucketPaths) != 0 {
-		t.Errorf("DestKeyBucketPaths len = %d, want 0", len(res.DestKeyBucketPaths))
-	}
-	// no work = no dest_keys/ setup
-	if _, err := os.Stat(filepath.Join(tempDir, "dest_keys")); !os.IsNotExist(err) {
-		t.Errorf("dest_keys/ should not exist when scan found nothing")
+	if len(res.DestSidecarPaths) != 0 {
+		t.Errorf("DestSidecarPaths len = %d, want 0", len(res.DestSidecarPaths))
 	}
 }
 
-// fresh sidecar exists, no regen. dest_keys buckets get the hashes
+// fresh sorted sidecar exists, no regen. its keys are range-readable per bucket
 func TestRunODScanWithFreshSidecar(t *testing.T) {
 	dir := t.TempDir()
 	archive := filepath.Join(dir, "sfu_prev.txt.zst")
@@ -207,13 +203,12 @@ func TestRunODScanWithFreshSidecar(t *testing.T) {
 	}
 
 	for _, k := range keys {
-		idx := int(k % 4)
-		bp := res.DestKeyBucketPaths[idx]
-		if bp == "" {
-			t.Errorf("bucket %d for key %d is empty, expected entry", idx, k)
-			continue
+		idx := int(bucketIndex(k, 3, true, 4)) // top-bits
+		ok, gerr := destBucketHasKey(res, k, idx, 4)
+		if gerr != nil {
+			t.Fatalf("gather bucket %d: %v", idx, gerr)
 		}
-		if !bucketContainsKey(t, bp, k) {
+		if !ok {
 			t.Errorf("bucket %d missing key %d", idx, k)
 		}
 	}
@@ -259,13 +254,12 @@ func TestRunODScanRegenerates(t *testing.T) {
 			t.Fatalf("parse failed for %q (test setup bug)", line)
 		}
 		h := fmtr.HashKey(host, login, password)
-		idx := int(h % 4)
-		bp := res.DestKeyBucketPaths[idx]
-		if bp == "" {
-			t.Errorf("bucket %d empty for %q", idx, line)
-			continue
+		idx := int(bucketIndex(h, 3, true, 4)) // top-bits
+		ok, gerr := destBucketHasKey(res, h, idx, 4)
+		if gerr != nil {
+			t.Fatalf("gather bucket %d: %v", idx, gerr)
 		}
-		if !bucketContainsKey(t, bp, h) {
+		if !ok {
 			t.Errorf("bucket %d missing hash for %q", idx, line)
 		}
 	}

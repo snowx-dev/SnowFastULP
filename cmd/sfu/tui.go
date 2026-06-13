@@ -888,6 +888,18 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
 	innerLines = append(innerLines, progressRow, systemRow)
+	// -od: brief "reading index" indicator — library keys pulled from the
+	// sorted sidecars as buckets are deduped (replaces the old routing phase)
+	if r != nil && r.cfg.DestDedup && r.odMetrics != nil {
+		if total := r.odMetrics.keysTotalEstimate.Load(); total > 0 {
+			done := r.odMetrics.keysLoaded.Load()
+			if done > total {
+				done = total
+			}
+			innerLines = append(innerLines, labelStyle.Render("Library")+"      "+
+				"read "+countStyle.Render(fmt.Sprintf("%s / %s", formatCount(done), formatCount(total)))+" keys")
+		}
+	}
 	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
@@ -1247,9 +1259,6 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 	partsRegenDone := m.partsRegenDone.Load()
 	regenBytesTotal := m.regenBytesTotal.Load()
 	regenBytesRead := m.regenBytesRead.Load()
-	keysLoaded := m.keysLoaded.Load()
-	keysEstimate := m.keysTotalEstimate.Load()
-
 	// per-part sidecars finalize inline at end of each task, so no
 	// "streaming done, finalizing sidecars" sub-phase. 100% bytes = done
 
@@ -1259,12 +1268,8 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		phaseDesc = "scanning library"
 	case odPhaseRegen:
 		phaseDesc = "indexing archives + writing .idx"
-	case odPhaseLoad:
-		phaseDesc = "routing library entries"
 	case odPhaseIndexOwn:
 		phaseDesc = "indexing this run's output"
-	case odPhaseCommitBuckets:
-		phaseDesc = "committing lookup buckets"
 	}
 
 	// header label flips for post-dedup output-index pass so frame
@@ -1325,12 +1330,6 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 			innerLines = append(innerLines, labelStyle.Render("Throughput  ")+
 				byteStyle.Render(formatRate(regenBPS))+eta)
 		}
-	case odPhaseLoad, odPhaseCommitBuckets:
-		entriesRow := labelStyle.Render("Entries     ") + countStyle.Render(formatCount(keysLoaded))
-		if keysEstimate > 0 {
-			entriesRow += " " + mutedStyle.Render("/ ~") + countStyle.Render(formatCount(keysEstimate))
-		}
-		innerLines = append(innerLines, entriesRow)
 	}
 
 	box := gradientBox(innerLines, contentWidth(width), footerGradA, footerGradB)
@@ -1359,10 +1358,6 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 	case odPhaseRegen, odPhaseIndexOwn:
 		if regenBytesTotal > 0 {
 			pct = float64(regenBytesRead) / float64(regenBytesTotal)
-		}
-	case odPhaseLoad, odPhaseCommitBuckets:
-		if keysEstimate > 0 {
-			pct = float64(keysLoaded) / float64(keysEstimate)
 		}
 	}
 	if pct > 1 {

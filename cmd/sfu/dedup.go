@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -193,18 +194,19 @@ func (s *outputSink) close() error {
 
 type dedupConfig struct {
 	bucketPaths []string
-	// 1:1 w/ bucketPaths. entry i = dest_keys/bucket_NNNN.bin for bucket i
-	// (phase 0 of -od), or "" if no dest keys. nil disables dest dedup.
-	destBucketPaths []string
-	workers         int
-	keepBuckets     bool // debug aid
+	// sorted (v3) library sidecars for -od. each bucket's dest keys are read
+	// from these via top-bits range reads (sidecarBucketKeys). nil/empty
+	// disables dest dedup. numBuckets is derived from len(bucketPaths).
+	destSidecars []string
+	odMetrics    *odMetrics // optional: ticks keysLoaded as buckets gather
+	workers      int
+	keepBuckets  bool // debug aid
 }
 
-// one bucket of work + optional dest counterpart
+// one bucket of work
 type dedupJob struct {
 	bucketIdx int
 	inputPath string
-	destPath  string // "" if no dest dedup
 }
 
 // phase 2 orchestrator. caller makes sink, calls dedup, closes sink.
@@ -219,12 +221,15 @@ func dedup(ctx context.Context, cfg dedupConfig, sink lineSink, m *metrics) (int
 	if sink == nil {
 		return 0, fmt.Errorf("sink is nil")
 	}
-	if cfg.destBucketPaths != nil && len(cfg.destBucketPaths) != len(cfg.bucketPaths) {
-		return 0, fmt.Errorf("destBucketPaths len %d != bucketPaths len %d",
-			len(cfg.destBucketPaths), len(cfg.bucketPaths))
-	}
 
-	jobCh := make(chan dedupJob, min(64, len(cfg.bucketPaths)+1))
+	numBuckets := len(cfg.bucketPaths)
+	// fail fast: the sorted-sidecar range reads use a top-bits partition, which
+	// requires a power-of-two bucket count. surface it here, not deep in a
+	// per-bucket read, if bucket-count selection ever stops rounding to pow2.
+	if len(cfg.destSidecars) > 0 && numBuckets&(numBuckets-1) != 0 {
+		return 0, fmt.Errorf("dedup: -od needs a power-of-two bucket count, got %d", numBuckets)
+	}
+	jobCh := make(chan dedupJob, min(64, numBuckets+1))
 	errCh := make(chan error, cfg.workers)
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -235,7 +240,7 @@ func dedup(ctx context.Context, cfg dedupConfig, sink lineSink, m *metrics) (int
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runDedupWorker(ctx, jobCh, sink, cfg.keepBuckets, m); err != nil {
+			if err := runDedupWorker(ctx, jobCh, sink, cfg.keepBuckets, m, cfg.destSidecars, numBuckets, cfg.odMetrics); err != nil {
 				select {
 				case errCh <- err:
 					cancel()
@@ -248,12 +253,8 @@ func dedup(ctx context.Context, cfg dedupConfig, sink lineSink, m *metrics) (int
 	go func() {
 		defer close(jobCh)
 		for i, p := range cfg.bucketPaths {
-			dest := ""
-			if cfg.destBucketPaths != nil {
-				dest = cfg.destBucketPaths[i]
-			}
 			select {
-			case jobCh <- dedupJob{bucketIdx: i, inputPath: p, destPath: dest}:
+			case jobCh <- dedupJob{bucketIdx: i, inputPath: p}:
 			case <-ctx.Done():
 				return
 			}
@@ -287,12 +288,23 @@ func newDedupWorkState() *dedupWorkState {
 	return ws
 }
 
-func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, keepBuckets bool, m *metrics) error {
+func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, keepBuckets bool, m *metrics, destSidecars []string, numBuckets int, odm *odMetrics) error {
 	if m != nil {
 		m.activeWorkers.Add(1)
 		defer m.activeWorkers.Add(-1)
 	}
 	ws := newDedupWorkState()
+	// one open handle per library sidecar, reused across every bucket this
+	// worker processes (vs re-opening per bucket). closed when the worker exits.
+	var destReaders map[string]*sidecarReader
+	if len(destSidecars) > 0 {
+		destReaders = make(map[string]*sidecarReader, len(destSidecars))
+		defer func() {
+			for _, sr := range destReaders {
+				sr.close()
+			}
+		}()
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -305,7 +317,7 @@ func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, k
 			if m != nil {
 				m.busyWorkers.Add(1)
 			}
-			err := dedupBucket(ws, j.inputPath, j.destPath, sink, m)
+			err := dedupBucket(ws, j.inputPath, j.bucketIdx, numBuckets, destSidecars, destReaders, sink, m, odm)
 			if m != nil {
 				m.busyWorkers.Add(-1)
 				if err == nil {
@@ -315,21 +327,115 @@ func runDedupWorker(ctx context.Context, jobCh <-chan dedupJob, sink lineSink, k
 			if err != nil {
 				return err
 			}
+			// input shard files are scratch; dest sidecars are the persistent
+			// library and are never removed here.
 			if !keepBuckets {
 				_ = os.Remove(j.inputPath)
-				if j.destPath != "" {
-					_ = os.Remove(j.destPath)
-				}
 			}
 		}
 	}
 }
 
+// 1 GiB keys = 8 GiB/bucket. defence-in-depth vs a pathological bucket (e.g.
+// a tiny user -buckets against a huge library, or a skewed distribution) that
+// would otherwise gather an unbounded slice. B auto-sizing keeps real buckets
+// far below this; hitting it means -buckets is too small for the library.
+const maxDestBucketKeys = 1 << 30
+
+// gatherDestBucketKeys reads bucket bucketIdx's keys from every library sidecar
+// (top-bits range reads) and k-way merges the already-sorted per-sidecar ranges
+// into one sorted, deduped slice. readers caches one open handle per sidecar
+// (reused across buckets) so a sidecar is opened once per worker, not per
+// bucket. Returns the merged keys plus the pre-merge gathered count (for the
+// "reading index" progress, which is measured against per-sidecar key totals).
+func gatherDestBucketKeys(readers map[string]*sidecarReader, destSidecars []string, bucketIdx, numBuckets int) (keys []uint64, gathered int, err error) {
+	runs := make([][]uint64, 0, len(destSidecars))
+	for _, path := range destSidecars {
+		sr := readers[path]
+		if sr == nil {
+			if sr, err = openSidecarReader(path); err != nil {
+				return nil, 0, fmt.Errorf("open dest sidecar %s: %w", filepath.Base(path), err)
+			}
+			readers[path] = sr
+		}
+		run, rerr := sr.bucketKeys(bucketIdx, numBuckets)
+		if rerr != nil {
+			return nil, 0, fmt.Errorf("read dest bucket %d from %s: %w", bucketIdx, filepath.Base(path), rerr)
+		}
+		if len(run) == 0 {
+			continue
+		}
+		runs = append(runs, run)
+		gathered += len(run)
+		if int64(gathered) > maxDestBucketKeys {
+			return nil, 0, fmt.Errorf("dest bucket %d exceeds %d keys; increase -buckets for this library size",
+				bucketIdx, maxDestBucketKeys)
+		}
+	}
+	return mergeSortedUnique(runs, gathered), gathered, nil
+}
+
+// u64RunHeap: min-heap of cursors into sorted []uint64 runs, for k-way merge.
+type u64RunCursor struct {
+	run []uint64
+	pos int
+}
+type u64RunHeap []u64RunCursor
+
+func (h u64RunHeap) Len() int           { return len(h) }
+func (h u64RunHeap) Less(i, j int) bool { return h[i].run[h[i].pos] < h[j].run[h[j].pos] }
+func (h u64RunHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *u64RunHeap) Push(x any)        { *h = append(*h, x.(u64RunCursor)) }
+func (h *u64RunHeap) Pop() any {
+	old := *h
+	n := len(old)
+	it := old[n-1]
+	*h = old[:n-1]
+	return it
+}
+
+// mergeSortedUnique merges already-sorted runs into one ascending, deduped
+// slice in O(N log R) — cheaper than concatenate-then-sort (O(N log N)) when the
+// inputs are already sorted, as each per-sidecar bucket range is.
+func mergeSortedUnique(runs [][]uint64, total int) []uint64 {
+	h := make(u64RunHeap, 0, len(runs))
+	for _, r := range runs {
+		if len(r) > 0 { // empty runs would index run[0] in the heap's Less
+			h = append(h, u64RunCursor{run: r})
+		}
+	}
+	switch len(h) {
+	case 0:
+		return nil
+	case 1:
+		return h[0].run // single non-empty run: already sorted + unique
+	}
+	heap.Init(&h)
+	out := make([]uint64, 0, total)
+	have := false
+	var last uint64
+	for h.Len() > 0 {
+		v := h[0].run[h[0].pos]
+		if !have || v != last {
+			out = append(out, v)
+			last = v
+			have = true
+		}
+		h[0].pos++
+		if h[0].pos < len(h[0].run) {
+			heap.Fix(&h, 0)
+		} else {
+			heap.Pop(&h)
+		}
+	}
+	return out
+}
+
 // dedups one bucket into sink. local batch flushes ~once per MiB so workers
-// dont thrash the shared mutex. destPath (if set) is a phase-0 dest bucket
-// loaded into a sortedUint64Set, every input hash tested first, hits go to
-// linesSkippedByDest and skip output.
-func dedupBucket(ws *dedupWorkState, inputPath, destPath string, sink lineSink, m *metrics) error {
+// dont thrash the shared mutex. for -od, the bucket's dest keys are gathered
+// from the library sidecars' sorted ranges into a sortedUint64Set; every input
+// hash is tested first, hits go to linesSkippedByDest and skip output.
+func dedupBucket(ws *dedupWorkState, inputPath string, bucketIdx, numBuckets int, destSidecars []string, destReaders map[string]*sidecarReader, sink lineSink, m *metrics, odm *odMetrics) error {
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return err
@@ -337,12 +443,17 @@ func dedupBucket(ws *dedupWorkState, inputPath, destPath string, sink lineSink, 
 	defer f.Close()
 
 	var destSet sortedUint64Set
-	if destPath != "" {
-		keys, lerr := loadDestBucketKeys(destPath)
-		if lerr != nil {
-			return fmt.Errorf("load dest bucket %s: %w", destPath, lerr)
+	if len(destSidecars) > 0 {
+		keys, gathered, gerr := gatherDestBucketKeys(destReaders, destSidecars, bucketIdx, numBuckets)
+		if gerr != nil {
+			return gerr
 		}
-		destSet.Build(keys)
+		if odm != nil {
+			// "reading index" progress: keys pulled from the library this bucket
+			// (pre-merge count, to match keysTotalEstimate's per-sidecar totals)
+			odm.keysLoaded.Add(int64(gathered))
+		}
+		destSet.adoptSorted(keys) // already sorted + deduped by the k-way merge
 	}
 
 	ws.reader.Reset(f)
@@ -420,31 +531,4 @@ func dedupBucket(ws *dedupWorkState, inputPath, destPath string, sink lineSink, 
 			}
 		}
 	}
-}
-
-// 8 GiB cap = 1B keys/bucket, defence vs corrupt -temp-dir OOM
-const maxDestBucketBytes = 8 << 30
-
-// reads dest_keys/bucket_NNNN.bin (packed uint64 LE, no header)
-func loadDestBucketKeys(path string) ([]uint64, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if fi.Size() > maxDestBucketBytes {
-		return nil, fmt.Errorf("dest bucket %s: size %d exceeds cap %d", path, fi.Size(), int64(maxDestBucketBytes))
-	}
-	if fi.Size()%sidecarKeyBytes != 0 {
-		return nil, fmt.Errorf("dest bucket %s size %d not multiple of %d", path, fi.Size(), sidecarKeyBytes)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	n := len(data) / sidecarKeyBytes
-	out := make([]uint64, n)
-	for i := 0; i < n; i++ {
-		out[i] = binary.LittleEndian.Uint64(data[i*sidecarKeyBytes:])
-	}
-	return out, nil
 }
