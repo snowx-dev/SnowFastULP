@@ -101,10 +101,12 @@ func chooseBucketCount(inputBytes, auxKeyBytes int64, mem memInfo, dedupWorkers 
 	}
 	desired := uint64((inputBytes + perBucket - 1) / perBucket)
 
-	// -od dest-set ceiling: 64 MiB/worker for dest alone, seen map and IO
-	// share the rest. 5B keys → 64 MiB/bucket → B ≥ 625 → 1024 after pow2.
+	// -od dest-set budget: 128 MiB/bucket for the library key-set alone, the
+	// seen map and IO buffers share the rest. Bumped from 64 MiB to spend a
+	// bit more RAM for fewer/bigger buckets (snappier dedup, fewer per-bucket
+	// gather passes). 10B keys → 128 MiB/bucket → B ≥ 640 → 1024 after pow2.
 	if auxKeyBytes > 0 {
-		const destSetTargetPerBucket = int64(64 << 20)
+		const destSetTargetPerBucket = int64(128 << 20)
 		auxDesired := uint64((auxKeyBytes + destSetTargetPerBucket - 1) / destSetTargetPerBucket)
 		if auxDesired > desired {
 			desired = auxDesired

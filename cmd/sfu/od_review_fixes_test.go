@@ -107,7 +107,9 @@ func TestStreamArchiveLinesClassifiesCorruption(t *testing.T) {
 
 // low-RAM + huge library, chooser should pick large B (perBucket drops)
 func TestChooseBucketCountODAuxFloorOnSparseRAM(t *testing.T) {
-	const libBytes = 5_000_000_000 * 8
+	// 10e9 keys * 8 = 80 GB; at the 128 MiB dest-set budget the aux floor is
+	// 640 -> 1024 after pow2, still dominating the input-side estimate.
+	const libBytes = 10_000_000_000 * 8
 	b := chooseBucketCount(int64(100<<30), int64(libBytes),
 		memInfo{total: 8 << 30, available: 2 << 30}, 4, minBuckets, maxBuckets)
 	if b < 1024 {

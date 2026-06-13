@@ -390,13 +390,13 @@ func TestChooseBucketCountSensible(t *testing.T) {
 }
 
 // large -od auxKeyBytes must force B high enough to keep per-bucket
-// dest-set <= 64 MiB. pre-fix: 5B keys + 32 GiB box = B=64 = 625 MB/worker
+// dest-set <= 128 MiB. pre-fix: huge library + roomy box = B=64 = GBs/worker
 func TestChooseBucketCountODAuxKeyFloor(t *testing.T) {
-	// 5e9 keys * 8 bytes = 40 GB
-	const libBytes = 5_000_000_000 * 8
+	// 10e9 keys * 8 bytes = 80 GB
+	const libBytes = 10_000_000_000 * 8
 	b := chooseBucketCount(int64(100<<30), int64(libBytes),
 		memInfo{total: 64 << 30, available: 48 << 30}, 4, minBuckets, maxBuckets)
-	// 40 GB / 64 MiB = 625 -> 1024
+	// 80 GB / 128 MiB = 640 -> 1024
 	if b < 1024 {
 		t.Errorf("-od aux floor: B=%d, want >= 1024", b)
 	}
