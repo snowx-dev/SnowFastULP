@@ -238,37 +238,41 @@ func Run(cfg Config) error {
 			}
 			hitsP := hitsPool.Get().(*[]localHit)
 			*hitsP = (*hitsP)[:0]
-			localHits, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk)
+			// emit streams each decode-step's matches to the drain loop as the
+			// chunk is scanned, instead of withholding them until the whole
+			// (multi-GB) chunk finishes — keeps the live display + -l responsive.
+			emit := func(batch []localHit) error {
+				for i := range batch {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					select {
+					case cfg.Hits <- Hit{
+						ArchiveOrd: t.archiveOrd,
+						Archive:    t.archive,
+						ChunkID:    t.chunk.ChunkID,
+						Offset:     batch[i].offset,
+						Line:       batch[i].line,
+					}:
+						if cfg.Metrics != nil {
+							cfg.Metrics.Hits.Add(1)
+						}
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return nil
+			}
+			emitted, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk, emit)
 			if err != nil {
 				if cfg.OnChunkError != nil {
 					cfg.OnChunkError(t.archive, t.chunk.ChunkID, err)
 				}
 			}
 			if capped && cfg.OnChunkCapped != nil {
-				cfg.OnChunkCapped(t.archive, t.chunk.ChunkID, len(localHits))
+				cfg.OnChunkCapped(t.archive, t.chunk.ChunkID, emitted)
 			}
-			if err == nil {
-				for _, h := range localHits {
-					hit := Hit{
-						ArchiveOrd: t.archiveOrd,
-						Archive:    t.archive,
-						ChunkID:    t.chunk.ChunkID,
-						Offset:     h.offset,
-						Line:       h.line,
-					}
-					if ctx.Err() != nil {
-						break
-					}
-					select {
-					case cfg.Hits <- hit:
-						if cfg.Metrics != nil {
-							cfg.Metrics.Hits.Add(1)
-						}
-					case <-ctx.Done():
-					}
-				}
-			}
-			*hitsP = localHits[:0]
+			*hitsP = (*hitsP)[:0]
 			hitsPool.Put(hitsP)
 			bumpChunk(chunkBytes)
 			markChunkDone(t.archiveOrd)
@@ -313,7 +317,13 @@ type localHit struct {
 	line   string
 }
 
-func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, metrics *Metrics, hits []localHit, decodeStep, maxHits int) ([]localHit, bool, error) {
+// searchChunk decodes the chunk in decodeStep reads and, after each read,
+// flushes that step's matches via emit — so hits reach the caller continuously
+// rather than only when the whole chunk finishes. scratch is a reusable hit
+// buffer (caller-pooled); it's cleared after every flush. Returns the number of
+// hits emitted, whether the per-chunk cap (maxHits) truncated the chunk, and
+// any decode/emit error (hits found before an error are still emitted).
+func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, metrics *Metrics, scratch []localHit, decodeStep, maxHits int, emit func([]localHit) error) (int, bool, error) {
 	matcher := newPatternMatcher(pattern)
 	overlap := len(pattern) - 1
 	if overlap < 0 {
@@ -332,11 +342,31 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 	absOff := chunk.UncompressedStart
 	first := true
 	capped := false
+	emitted := 0
+	hits := scratch[:0]
+
+	// flush this step's accumulated hits, truncating to the per-chunk cap.
+	flush := func() error {
+		if len(hits) == 0 {
+			return nil
+		}
+		if maxHits > 0 && emitted+len(hits) > maxHits {
+			hits = hits[:maxHits-emitted]
+		}
+		if len(hits) > 0 {
+			if err := emit(hits); err != nil {
+				return err
+			}
+			emitted += len(hits)
+		}
+		hits = hits[:0]
+		return nil
+	}
 
 	for {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
-				return hits, capped, err
+				return emitted, capped, err
 			}
 		}
 		readLen := len(dst)
@@ -365,13 +395,14 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 			absOff += int64(nOut)
 			first = false
 
+			// emit this step's hits so they reach the drain loop promptly
+			if ferr := flush(); ferr != nil {
+				return emitted, capped, ferr
+			}
 			// cap reached, stop decoding. one cap notification per chunk
-			if maxHits > 0 && len(hits) >= maxHits {
-				if len(hits) > maxHits {
-					hits = hits[:maxHits]
-				}
+			if maxHits > 0 && emitted >= maxHits {
 				capped = true
-				return hits, capped, nil
+				return emitted, capped, nil
 			}
 
 			if overlap > 0 {
@@ -387,11 +418,11 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 			break
 		}
 		if err != nil {
-			return hits, capped, err
+			return emitted, capped, err
 		}
 	}
 
-	return hits, capped, nil
+	return emitted, capped, nil
 }
 
 type ctxReader struct {
