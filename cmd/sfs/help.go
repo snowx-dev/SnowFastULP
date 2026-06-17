@@ -77,6 +77,10 @@ func renderHelp(bin string) string {
 	b.WriteString(mutedStyle.Render("    Flags may appear before or after the pattern. More flags below: Args for nerds, then Args for devs.") + "\n")
 	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; [sfs].dir for PATTERN-only)") + "\n\n")
 
+	b.WriteString(labelStyle.Render("Commands:") + "\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " update   " +
+		mutedStyle.Render("# upgrade sfu & sfs to the latest release") + "\n\n")
+
 	b.WriteString(labelStyle.Render("Examples:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'facebook.com:'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " -txt ./dumps 'user@example'\n")

@@ -20,6 +20,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
 	"github.com/snowx-dev/SnowFastULP/internal/index"
 	"github.com/snowx-dev/SnowFastULP/internal/search"
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
 
@@ -36,6 +37,15 @@ func main() {
 	if cliargs.IsHelpRequest(os.Args[1:]) {
 		printHelp(filepath.Base(os.Args[0]), os.Stdout)
 		os.Exit(0)
+	}
+
+	// `update` / `upgrade`: replace installed sfu+sfs with the latest release.
+	// Handled before cfg load so a bad config can't block self-update.
+	if len(os.Args) > 1 && (os.Args[1] == "update" || os.Args[1] == "upgrade") {
+		if err := selfupdate.Run(os.Args[2:], version.String, os.Stdout); err != nil {
+			fatal("%v", err)
+		}
+		return
 	}
 
 	cfg, err := config.LoadFromArgv(os.Args[1:])

@@ -85,6 +85,10 @@ func renderHelp(bin string) string {
 	b.WriteString(mutedStyle.Render("    More flags below: Args for nerds, then Args for devs (-debug, -debug-reject).") + "\n")
 	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG)") + "\n\n")
 
+	b.WriteString(labelStyle.Render("Commands:") + "\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " update   " +
+		mutedStyle.Render("# upgrade sfu & sfs to the latest release") + "\n\n")
+
 	b.WriteString(labelStyle.Render("Examples:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./logins.txt\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./mydir/ -o ./out/\n")
