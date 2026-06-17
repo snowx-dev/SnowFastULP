@@ -36,6 +36,7 @@ type outputSink struct {
 	f              *os.File
 	frames         *zstFrameTracker
 	writeSearchIdx bool
+	sidecar        *sidecarWriter // -od: hashes indexed during dedup, committed on close
 }
 
 func newOutputSink(path string, compress bool, writeSearchIdx bool) (*outputSink, error) {
@@ -63,6 +64,20 @@ func newOutputSink(path string, compress bool, writeSearchIdx bool) (*outputSink
 	} else {
 		s.bw = bufio.NewWriterSize(f, defaultOutputBufBytes)
 	}
+	return s, nil
+}
+
+func newOutputSinkWithSidecar(path string, compress bool, writeSearchIdx bool) (*outputSink, error) {
+	s, err := newOutputSink(path, compress, writeSearchIdx)
+	if err != nil {
+		return nil, err
+	}
+	sw, err := newSidecarWriter(path)
+	if err != nil {
+		_ = s.close()
+		return nil, err
+	}
+	s.sidecar = sw
 	return s, nil
 }
 
@@ -145,6 +160,40 @@ func (s *outputSink) writeBatch(buf []byte, lineCount int, m *metrics) error {
 	return nil
 }
 
+// pre-formatted lines + parallel dedup hashes. hashes and lineCount must match.
+// sidecar keys are written under the same mutex as archive bytes so worker
+// interleaving stays aligned with the part each line lands in.
+func (s *outputSink) writeBatchIndexed(buf []byte, hashes []uint64, lineCount int, m *metrics) error {
+	if len(buf) == 0 {
+		return nil
+	}
+	if lineCount > 0 && len(hashes) != lineCount {
+		return fmt.Errorf("writeBatchIndexed: %d hashes != %d lines", len(hashes), lineCount)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sidecar != nil {
+		for _, h := range hashes {
+			if err := s.sidecar.WriteHash(h); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := s.bw.Write(buf); err != nil {
+		return err
+	}
+	if err := s.noteCompressedWrite(int64(len(buf))); err != nil {
+		return err
+	}
+	if m != nil {
+		if lineCount > 0 {
+			m.linesUnique.Add(int64(lineCount))
+		}
+		m.bytesWritten.Add(int64(len(buf)))
+	}
+	return nil
+}
+
 // flush bw, close enc, close f. idempotent so deferred safety-net close
 // doesnt double-finalize
 func (s *outputSink) close() error {
@@ -187,6 +236,12 @@ func (s *outputSink) close() error {
 	if writeSearch && len(chunks) > 0 {
 		if err := writeSearchSidecar(path, chunks); err != nil {
 			return err
+		}
+	}
+	if sidecar := s.sidecar; sidecar != nil {
+		s.sidecar = nil
+		if _, err := sidecar.Commit(); err != nil {
+			return fmt.Errorf("sidecar commit %s: %w", path, err)
 		}
 	}
 	return nil
@@ -274,9 +329,10 @@ func dedup(ctx context.Context, cfg dedupConfig, sink lineSink, m *metrics) (int
 
 // per-goroutine reusable buffers, reused across buckets
 type dedupWorkState struct {
-	reader   *bufio.Reader
-	recBuf   []byte
-	localBuf bytes.Buffer
+	reader      *bufio.Reader
+	recBuf      []byte
+	localBuf    bytes.Buffer
+	localHashes []uint64
 }
 
 func newDedupWorkState() *dedupWorkState {
@@ -285,6 +341,7 @@ func newDedupWorkState() *dedupWorkState {
 		recBuf: make([]byte, 0, 256),
 	}
 	ws.localBuf.Grow(dedupWorkerBatchBytes + 4096)
+	ws.localHashes = make([]uint64, 0, 4096)
 	return ws
 }
 
@@ -468,10 +525,17 @@ func dedupBucket(ws *dedupWorkState, inputPath string, bucketIdx, numBuckets int
 		if ws.localBuf.Len() == 0 {
 			return nil
 		}
-		if err := sink.writeBatch(ws.localBuf.Bytes(), localLines, m); err != nil {
+		var err error
+		if ils, ok := sink.(indexedLineSink); ok {
+			err = ils.writeBatchIndexed(ws.localBuf.Bytes(), ws.localHashes, localLines, m)
+		} else {
+			err = sink.writeBatch(ws.localBuf.Bytes(), localLines, m)
+		}
+		if err != nil {
 			return err
 		}
 		ws.localBuf.Reset()
+		ws.localHashes = ws.localHashes[:0]
 		localLines = 0
 		return nil
 	}
@@ -522,6 +586,7 @@ func dedupBucket(ws *dedupWorkState, inputPath string, bucketIdx, numBuckets int
 			continue
 		}
 		seen[h] = struct{}{}
+		ws.localHashes = append(ws.localHashes, h)
 		ws.localBuf.Write(ws.recBuf)
 		ws.localBuf.WriteByte('\n')
 		localLines++

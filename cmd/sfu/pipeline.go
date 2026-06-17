@@ -346,8 +346,13 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 		r.cfg.Debug.printfPhase("PHASE shard END", time.Since(tShard))
 	}
 
-	// block on phase 0 before dedup (first step that needs the library sidecars)
+	// block on phase 0 before dedup (first step that needs the library sidecars).
+	// parsing done but library prep still running → switch to phasePhase0 so
+	// the TUI shows LIBRARY PREP instead of a frozen [1/3 PARSING] bar.
 	if odRunning {
+		if odPhaseInFlight(r.odMetrics) {
+			m.phase.Store(phasePhase0)
+		}
 		<-odDone
 		if odErr != nil {
 			return fmt.Errorf("od-scan: %w", odErr)
@@ -416,13 +421,14 @@ func runBucketed(ctx context.Context, r *resolved, m *metrics) error {
 	}
 	r.OutputPaths = sinkOutputPaths(sink)
 
-	// -od: stamp .idx sidecars for own output so next -od finds them.
-	// re-streams just-finalized zstd through regen pool, surfaced as
-	// phaseIndex instead of the old dedup-bar-stuck-at-100% UX
-	if r.cfg.DestDedup && len(r.OutputPaths) > 0 {
-		m.phase.Store(phaseIndex)
-		if err := regenOwnOutputSidecars(ctx, r.OutputPaths, r.cfg.Debug, r.outputIdxMetrics); err != nil {
-			return fmt.Errorf("output sidecar write: %w", err)
+	if r.cfg.DestDedup && r.cfg.Debug != nil {
+		for _, p := range r.OutputPaths {
+			hdr, err := readSidecarHeader(sidecarPathForArchive(p))
+			if err != nil {
+				r.cfg.Debug.Event("[od] inline sidecar: path=%s read err=%v", filepath.Base(p), err)
+				continue
+			}
+			r.cfg.Debug.Event("[od] inline sidecar: path=%s keys=%d", filepath.Base(p), hdr.keyCount)
 		}
 	}
 

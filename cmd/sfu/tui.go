@@ -446,6 +446,40 @@ func formatCount(n int64) string {
 	return b.String()
 }
 
+// compact K/M/B/T for header badges and library rows at billion scale.
+// sub-million values keep formatCount commas for precision.
+func formatCompactCount(n int64) string {
+	if n < 0 {
+		return "0"
+	}
+	if n < compactCountThreshold {
+		return formatCount(n)
+	}
+	units := []string{"", "K", "M", "B", "T"}
+	v := float64(n)
+	u := 0
+	for v >= 1000 && u < len(units)-1 {
+		v /= 1000
+		u++
+	}
+	if v >= 100 {
+		return fmt.Sprintf("%.0f%s", v, units[u])
+	}
+	if v >= 10 {
+		return fmt.Sprintf("%.1f%s", v, units[u])
+	}
+	return fmt.Sprintf("%.2f%s", v, units[u])
+}
+
+const compactCountThreshold = 1_000_000
+
+func formatLibraryCount(n int64) string {
+	if n >= compactCountThreshold {
+		return formatCompactCount(n)
+	}
+	return formatCount(n)
+}
+
 func humanBytes(n int64) string {
 	if n < 0 {
 		return "0 B"
@@ -490,6 +524,53 @@ func tuiPhaseTotal(r *resolved) int {
 // 1-based step label, eg "[2/3 DEDUPING]"
 func renderPhaseTag(r *resolved, step int, label string) string {
 	return renderPhaseTagWithTotal(tuiPhaseTotal(r), step, label)
+}
+
+// step-1 tag while -od library prep runs. parsing still active → PARSING;
+// inputs fully read but sidecar work continues → LIBRARY PREP.
+func renderStep1PhaseTag(r *resolved, m *metrics) string {
+	if r != nil && r.cfg.DestDedup && odPhaseInFlight(r.odMetrics) && shardInputsFullyRead(m, r) {
+		return renderPhaseTag(r, 1, "LIBRARY PREP")
+	}
+	return renderPhaseTag(r, 1, "PARSING")
+}
+
+// muted header badges after the phase tag during dedup.
+func renderDedupHeaderBadges(r *resolved) string {
+	if r == nil {
+		return ""
+	}
+	var badges []string
+	if r.cfg.DestDedup && r.odMetrics != nil {
+		if total := r.odMetrics.keysTotalEstimate.Load(); total > 0 {
+			badges = append(badges, "vs "+formatLibraryCount(total)+" library")
+		}
+	}
+	if r.cfg.Compress {
+		badges = append(badges, "compressing")
+	}
+	if len(badges) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	for _, b := range badges {
+		out.WriteString(" ")
+		out.WriteString(mutedStyle.Render("· " + b))
+	}
+	return out.String()
+}
+
+func shardInputsFullyRead(m *metrics, r *resolved) bool {
+	if m == nil || r == nil {
+		return false
+	}
+	if ct := m.chunksTotal.Load(); ct > 0 && m.chunksDone.Load() >= ct {
+		return true
+	}
+	if r.totalInputs > 0 && m.bytesRead.Load() >= r.totalInputs {
+		return true
+	}
+	return false
 }
 
 // for -od-only panels where total is always 3 even if test omits DestDedup
@@ -786,7 +867,7 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 		}
 	}
 
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "PARSING"), elapsed, width)
+	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderStep1PhaseTag(r, m), elapsed, width)
 
 	chunksDigits := numDigits(m.chunksTotal.Load())
 	workersDigits := numDigits(int64(r.workers))
@@ -852,12 +933,9 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 		pct2 = 1
 	}
 
-	// inline header build so optional "· compressing" badge can sit
-	// between phase tag and elapsed clock w/o changing renderHeader sig
+	// inline header: phase tag + optional -od/compress badges, elapsed right
 	headerLeft := indentSpace + spinnerStyle.Render(spinnerFrame(now)) + "  " + phaseStyle.Render(renderPhaseTag(r, 2, "DEDUPING"))
-	if r.cfg.Compress {
-		headerLeft += " " + mutedStyle.Render("· compressing")
-	}
+	headerLeft += renderDedupHeaderBadges(r)
 	headerRight := timeStyle.Render(formatDuration(elapsed))
 	headerPad := width - tuiVisibleWidth(headerLeft) - tuiVisibleWidth(headerRight)
 	if headerPad < 1 {
@@ -888,8 +966,7 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
 	innerLines = append(innerLines, progressRow, systemRow)
-	// -od: brief "reading index" indicator — library keys pulled from the
-	// sorted sidecars as buckets are deduped (replaces the old routing phase)
+	// -od: live library index scan while each bucket's dest set is loaded
 	if r != nil && r.cfg.DestDedup && r.odMetrics != nil {
 		if total := r.odMetrics.keysTotalEstimate.Load(); total > 0 {
 			done := r.odMetrics.keysLoaded.Load()
@@ -897,7 +974,11 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 				done = total
 			}
 			innerLines = append(innerLines, labelStyle.Render("Library")+"      "+
-				"read "+countStyle.Render(fmt.Sprintf("%s / %s", formatCount(done), formatCount(total)))+" keys")
+				mutedStyle.Render("matching · ")+
+				countStyle.Render(formatLibraryCount(done))+
+				mutedStyle.Render(" / ")+
+				countStyle.Render(formatLibraryCount(total))+
+				mutedStyle.Render(" loaded"))
 		}
 	}
 	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
@@ -1163,11 +1244,10 @@ var interruptWarnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Adap
 // purple-pink "active phase"
 //
 // renderPhase0Lines is the primary panel when phase 0 is in flight.
-// reuses [1/3 PARSING] tag so library prep reads as opener of step 1.
-// regular shard frame would show 0% w/ all counters at zero, useless
+// shown after parsing finishes while library sidecar work continues.
 func renderPhase0Lines(elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
 	now := time.Now()
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "PARSING"), elapsed, width)
+	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "LIBRARY PREP"), elapsed, width)
 
 	odLines := renderODFrame(r.odMetrics, regenBPS, width)
 	// renderODFrame leads w/ blank for spacing under main frame.
@@ -1268,6 +1348,8 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		phaseDesc = "scanning library"
 	case odPhaseRegen:
 		phaseDesc = "indexing archives + writing .idx"
+	case odPhaseUpgrade:
+		phaseDesc = "upgrading index format (v2→v3)"
 	case odPhaseIndexOwn:
 		phaseDesc = "indexing this run's output"
 	}
@@ -1330,6 +1412,9 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 			innerLines = append(innerLines, labelStyle.Render("Throughput  ")+
 				byteStyle.Render(formatRate(regenBPS))+eta)
 		}
+	case odPhaseUpgrade:
+		innerLines = append(innerLines, labelStyle.Render("Mode        ")+
+			mutedStyle.Render("in-place re-sort · archives not read"))
 	}
 
 	box := gradientBox(innerLines, contentWidth(width), footerGradA, footerGradB)
@@ -1364,6 +1449,10 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		if regenBytesTotal > 0 {
 			pct = float64(regenBytesRead) / float64(regenBytesTotal)
 		} else if partsRegenTotal > 0 {
+			pct = float64(partsRegenDone) / float64(partsRegenTotal)
+		}
+	case odPhaseUpgrade:
+		if partsRegenTotal > 0 {
 			pct = float64(partsRegenDone) / float64(partsRegenTotal)
 		}
 	}

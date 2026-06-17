@@ -106,8 +106,8 @@ func TestRenderPhaseTagCounts(t *testing.T) {
 	withOD.outputIdxMetrics.phase.Store(int32(odPhaseRegen))
 
 	p0 := strings.Join(renderPhase0Lines(time.Second, m, &withOD, 0, 0, 0, 86), "\n")
-	if !strings.Contains(p0, "[1/3 PARSING]") {
-		t.Errorf("od phase0: want [1/3 PARSING]\n%s", p0)
+	if !strings.Contains(p0, "[1/3 LIBRARY PREP]") {
+		t.Errorf("od phase0: want [1/3 LIBRARY PREP]\n%s", p0)
 	}
 	if strings.Contains(p0, "INDEXING LIBRARY") {
 		t.Errorf("od phase0 should not have separate library header\n%s", p0)
@@ -123,6 +123,29 @@ func TestRenderPhaseTagCounts(t *testing.T) {
 	p3 := strings.Join(renderIndexLines(time.Second, m, &withOD, 0, 0, 0, 86), "\n")
 	if !strings.Contains(p3, "[3/3 INDEXING OUTPUT]") {
 		t.Errorf("od index: want [3/3 INDEXING OUTPUT]\n%s", p3)
+	}
+}
+
+func TestRenderStep1PhaseTagSwitchesAfterInputsRead(t *testing.T) {
+	r := &resolved{totalInputs: 1000, workers: 1, dedupWorkers: 1, bucketCount: 1}
+	r.cfg.DestDedup = true
+	r.odMetrics = &odMetrics{}
+	r.odMetrics.phase.Store(int32(odPhaseUpgrade))
+
+	m := &metrics{}
+	if got := renderStep1PhaseTag(r, m); !strings.Contains(got, "PARSING") {
+		t.Errorf("while inputs still reading: want PARSING tag, got %q", got)
+	}
+
+	m.chunksTotal.Store(10)
+	m.chunksDone.Store(10)
+	if got := renderStep1PhaseTag(r, m); !strings.Contains(got, "LIBRARY PREP") {
+		t.Errorf("after inputs read w/ od in flight: want LIBRARY PREP tag, got %q", got)
+	}
+
+	r.odMetrics.phase.Store(int32(odPhaseDone))
+	if got := renderStep1PhaseTag(r, m); !strings.Contains(got, "PARSING") {
+		t.Errorf("after od done: revert to PARSING tag, got %q", got)
 	}
 }
 
@@ -555,7 +578,7 @@ func TestRenderDedupBarUsesByteProgress(t *testing.T) {
 	}
 }
 
-// inline "compressing" badge appears iff -zst, still fits 80-col budget
+// inline header badges: compressing, and -od library scale
 func TestRenderDedupHeaderShowsCompressingBadge(t *testing.T) {
 	m := &metrics{}
 	m.bucketsTotal.Store(256)
@@ -578,6 +601,26 @@ func TestRenderDedupHeaderShowsCompressingBadge(t *testing.T) {
 			if w := tuiVisibleWidth(ln); w > 80 {
 				t.Errorf("compress=%v: line width %d > 80: %q", compress, w, ln)
 			}
+		}
+	}
+}
+
+func TestRenderDedupHeaderShowsLibraryBadge(t *testing.T) {
+	m := &metrics{}
+	r := &resolved{
+		cfg:          pipelineConfig{Output: "out.txt.zst", Compress: true, DestDedup: true},
+		workers:      8,
+		dedupWorkers: 4,
+		bucketCount:  256,
+	}
+	r.odMetrics = &odMetrics{}
+	r.odMetrics.keysTotalEstimate.Store(3_290_076_168)
+
+	lines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, 0, 86)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"[2/3 DEDUPING]", "vs 3.29B library", "compressing"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in dedup header/body\n%s", want, joined)
 		}
 	}
 }
@@ -733,6 +776,22 @@ func TestProgressBarRespectsWidth(t *testing.T) {
 	}
 }
 
+func TestFormatCompactCount(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{999_999, "999,999"},
+		{1_000_000, "1.00M"},
+		{3_290_076_168, "3.29B"},
+	}
+	for _, c := range cases {
+		if got := formatCompactCount(c.n); got != c.want {
+			t.Errorf("formatCompactCount(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
 func TestPendingBarRespectsWidth(t *testing.T) {
 	for _, w := range []int{40, 60, 80} {
 		got := pendingBar(w)
@@ -762,8 +821,8 @@ func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
 	r.odMetrics.keysLoaded.Store(250)
 
 	out := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n")
-	if !strings.Contains(out, "Library") || !strings.Contains(out, "read") {
-		t.Fatalf("dedup frame missing library read indicator:\n%s", out)
+	if !strings.Contains(out, "matching") || !strings.Contains(out, "loaded") {
+		t.Fatalf("dedup frame missing library matching indicator:\n%s", out)
 	}
 	if !strings.Contains(out, "250") || !strings.Contains(out, "1,000") {
 		t.Fatalf("dedup frame missing read counts:\n%s", out)

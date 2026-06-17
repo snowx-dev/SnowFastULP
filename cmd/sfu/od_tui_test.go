@@ -53,6 +53,32 @@ func TestRenderODFrameRegenContents(t *testing.T) {
 	}
 }
 
+func TestRenderODFrameUpgradeContents(t *testing.T) {
+	m := &odMetrics{}
+	m.phase.Store(int32(odPhaseUpgrade))
+	m.archivesTotal.Store(38)
+	m.filesTotal.Store(66)
+	m.partsRegenTotal.Store(56)
+	m.partsRegenDone.Store(39)
+
+	lines := renderODFrame(m, 0, 86)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"Destination dedup",
+		"upgrading index format",
+		"in-place re-sort",
+		"38 archives",
+		"39 / 56 parts indexed",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("upgrade frame missing %q\nfull:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "indexing archives + writing .idx") {
+		t.Errorf("upgrade frame must not use regen label\nfull:\n%s", joined)
+	}
+}
+
 // active odMetrics: OD frame stacks between bars and footer
 func TestRenderShardLinesIncludesODFrame(t *testing.T) {
 	r := &resolved{

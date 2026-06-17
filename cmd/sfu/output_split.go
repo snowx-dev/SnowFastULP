@@ -24,9 +24,23 @@ type lineSink interface {
 	outputPaths() []string
 }
 
+// optional: -od output sinks record dedup hashes alongside archive writes
+type indexedLineSink interface {
+	lineSink
+	writeBatchIndexed(buf []byte, hashes []uint64, lineCount int, m *metrics) error
+}
+
 func newLineSink(r *resolved) (lineSink, error) {
 	writeSearchIdx := r.cfg.DestDedup && r.cfg.Compress
+	indexSidecar := r.cfg.DestDedup
 	if !r.cfg.Compress {
+		if indexSidecar {
+			s, err := newOutputSinkWithSidecar(r.cfg.Output, false, false)
+			if err != nil {
+				return nil, err
+			}
+			return s, nil
+		}
 		s, err := newOutputSink(r.cfg.Output, false, false)
 		if err != nil {
 			return nil, err
@@ -34,6 +48,13 @@ func newLineSink(r *resolved) (lineSink, error) {
 		return s, nil
 	}
 	if r.cfg.ZstChunkLines <= 0 {
+		if indexSidecar {
+			s, err := newOutputSinkWithSidecar(r.cfg.Output, true, writeSearchIdx)
+			if err != nil {
+				return nil, err
+			}
+			return s, nil
+		}
 		s, err := newOutputSink(r.cfg.Output, true, writeSearchIdx)
 		if err != nil {
 			return nil, err
@@ -46,7 +67,7 @@ func newLineSink(r *resolved) (lineSink, error) {
 	if stamp == "" {
 		stamp = r.cfg.RunStarted.Format("20060102")
 	}
-	out, err := newChunkedZstdSink(dir, stamp, chunk, r.cfg.Debug, writeSearchIdx)
+	out, err := newChunkedZstdSink(dir, stamp, chunk, r.cfg.Debug, writeSearchIdx, indexSidecar)
 	if err != nil {
 		return nil, err
 	}
@@ -127,10 +148,11 @@ type chunkedZstdSink struct {
 	paths          []string
 	dbg            *debugLog
 	writeSearchIdx bool
+	indexSidecar   bool
 }
 
-func newChunkedZstdSink(dir, stamp string, chunkLines int64, dbg *debugLog, writeSearchIdx bool) (*chunkedZstdSink, error) {
-	c := &chunkedZstdSink{dir: dir, stamp: stamp, chunkLines: chunkLines, dbg: dbg, writeSearchIdx: writeSearchIdx}
+func newChunkedZstdSink(dir, stamp string, chunkLines int64, dbg *debugLog, writeSearchIdx, indexSidecar bool) (*chunkedZstdSink, error) {
+	c := &chunkedZstdSink{dir: dir, stamp: stamp, chunkLines: chunkLines, dbg: dbg, writeSearchIdx: writeSearchIdx, indexSidecar: indexSidecar}
 	if err := c.rotateLocked(); err != nil {
 		return nil, err
 	}
@@ -153,6 +175,13 @@ func (c *chunkedZstdSink) rotateLocked() error {
 			c.paths[0] = newName
 			registerCleanupPath(newName)
 			c.dbg.Event("rotate-rename: part=1 %s -> %s", old, newName)
+			if c.indexSidecar {
+				oldSC := sidecarPathForArchive(old)
+				newSC := sidecarPathForArchive(newName)
+				if err := atomicfs.Rename(oldSC, newSC); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("rename sidecar %s -> %s: %w", oldSC, newSC, err)
+				}
+			}
 		}
 	}
 	c.part++
@@ -162,7 +191,13 @@ func (c *chunkedZstdSink) rotateLocked() error {
 	} else {
 		path = filepath.Clean(zstPartPath(c.dir, c.stamp, c.part))
 	}
-	sink, err := newOutputSink(path, true, c.writeSearchIdx)
+	var sink *outputSink
+	var err error
+	if c.indexSidecar {
+		sink, err = newOutputSinkWithSidecar(path, true, c.writeSearchIdx)
+	} else {
+		sink, err = newOutputSink(path, true, c.writeSearchIdx)
+	}
 	if err != nil {
 		return err
 	}
@@ -235,6 +270,55 @@ func (c *chunkedZstdSink) writeBatch(buf []byte, lineCount int, m *metrics) erro
 		c.linesInPart += take
 		c.mu.Unlock()
 		off += nBytes
+		remaining -= int(take)
+	}
+	return nil
+}
+
+func (c *chunkedZstdSink) writeBatchIndexed(buf []byte, hashes []uint64, lineCount int, m *metrics) error {
+	if lineCount <= 0 || len(buf) == 0 {
+		return nil
+	}
+	if len(hashes) != lineCount {
+		return fmt.Errorf("writeBatchIndexed: %d hashes != %d lines", len(hashes), lineCount)
+	}
+	off := 0
+	hashOff := 0
+	remaining := lineCount
+	for remaining > 0 {
+		c.mu.Lock()
+		room := c.chunkLines - c.linesInPart
+		if room <= 0 {
+			if err := c.rotateLocked(); err != nil {
+				c.mu.Unlock()
+				return err
+			}
+			room = c.chunkLines
+		}
+		take := int64(remaining)
+		if take > room {
+			take = room
+		}
+		nBytes, err := byteOffsetAfterNLines(buf, off, int(take))
+		if err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		slice := buf[off : off+nBytes]
+		hashSlice := hashes[hashOff : hashOff+int(take)]
+		if c.indexSidecar {
+			if err := c.cur.writeBatchIndexed(slice, hashSlice, int(take), m); err != nil {
+				c.mu.Unlock()
+				return err
+			}
+		} else if err := c.cur.writeBatch(slice, int(take), m); err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		c.linesInPart += take
+		c.mu.Unlock()
+		off += nBytes
+		hashOff += int(take)
 		remaining -= int(take)
 	}
 	return nil

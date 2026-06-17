@@ -363,7 +363,7 @@ func TestDedupKeepBuckets(t *testing.T) {
 func TestChunkedZstdSinkRotatesUniqueLines(t *testing.T) {
 	d := t.TempDir()
 	stamp := runStamp(time.Date(2026, 5, 10, 10, 0, 1, 0, time.UTC), "rot01a")
-	sink, err := newChunkedZstdSink(d, stamp, 3, nil, false)
+	sink, err := newChunkedZstdSink(d, stamp, 3, nil, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestChunkedZstdSinkRotatesUniqueLines(t *testing.T) {
 func TestChunkedZstdWriteBatchSplitsAcrossRotate(t *testing.T) {
 	d := t.TempDir()
 	stamp := runStamp(time.Date(2026, 5, 10, 11, 0, 0, 0, time.UTC), "rot01b")
-	sink, err := newChunkedZstdSink(d, stamp, 5, nil, false)
+	sink, err := newChunkedZstdSink(d, stamp, 5, nil, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestChunkedZstdWriteBatchSplitsAcrossRotate(t *testing.T) {
 func TestChunkedZstdSingleArchiveUsesDedupBasename(t *testing.T) {
 	d := t.TempDir()
 	stamp := runStamp(time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC), "abc123")
-	sink, err := newChunkedZstdSink(d, stamp, 1000, nil, false)
+	sink, err := newChunkedZstdSink(d, stamp, 1000, nil, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,6 +536,97 @@ func TestDedupAdvancesBucketBytes(t *testing.T) {
 	}
 	if read != total {
 		t.Fatalf("bucketsBytesRead = %d, bucketsBytesTotal = %d (must match after success)", read, total)
+	}
+}
+
+// -od output sidecars must index bucket hashes during dedup, not re-parse
+// formatted lines (many fail parseLoose after shard formatting).
+func TestDedupInlineOutputSidecar(t *testing.T) {
+	d := t.TempDir()
+	bucketPath := filepath.Join(d, "shard_00000.bin")
+	writeBucket(t, bucketPath, []bucketRecord{
+		{hash: 100, line: "host1:user:pw"},
+		{hash: 200, line: "host2:user:pw"},
+		{hash: 100, line: "host1-dup:user:pw"},
+	})
+
+	out := filepath.Join(d, "sfu_test.txt.zst")
+	sink, err := newOutputSinkWithSidecar(out, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := dedup(context.Background(), dedupConfig{
+		bucketPaths: []string{bucketPath},
+		workers:     1,
+	}, sink, &metrics{})
+	if err != nil {
+		_ = sink.close()
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("dedup unique lines = %d, want 2", n)
+	}
+	if err := sink.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	hdr, err := readSidecarHeader(sidecarPathForArchive(out))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if hdr.keyCount != 2 {
+		t.Fatalf("sidecar keyCount = %d, want 2 (one per unique hash)", hdr.keyCount)
+	}
+}
+
+// lines with JSON-ish passwords survive shard/dedup but fail parseLoose on
+// re-read. inline sidecar indexing must still capture every emitted hash.
+func TestDedupInlineSidecarUnreparseableLines(t *testing.T) {
+	d := t.TempDir()
+	bucketPath := filepath.Join(d, "shard_00000.bin")
+	recs := make([]bucketRecord, 0, 20)
+	for i := 0; i < 10; i++ {
+		line := fmt.Sprintf("host%d.example.com:user%d:{\"Password%d\"", i, i, i)
+		recs = append(recs, bucketRecord{hash: uint64(1000 + i), line: line})
+	}
+	writeBucket(t, bucketPath, recs)
+
+	out := filepath.Join(d, "sfu_test.txt.zst")
+	sink, err := newOutputSinkWithSidecar(out, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := dedup(context.Background(), dedupConfig{
+		bucketPaths: []string{bucketPath},
+		workers:     1,
+	}, sink, &metrics{})
+	if err != nil {
+		_ = sink.close()
+		t.Fatal(err)
+	}
+	if err := sink.close(); err != nil {
+		t.Fatal(err)
+	}
+	if n != 10 {
+		t.Fatalf("dedup unique lines = %d, want 10", n)
+	}
+
+	looseOK := 0
+	for _, line := range readZstdLines(t, out) {
+		if _, _, _, _, ok := parseLoose(line); ok {
+			looseOK++
+		}
+	}
+	if looseOK > 0 {
+		t.Logf("parseLoose accepted %d/%d output lines (regen would under-index)", looseOK, n)
+	}
+
+	hdr, err := readSidecarHeader(sidecarPathForArchive(out))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if hdr.keyCount != 10 {
+		t.Fatalf("sidecar keyCount = %d, want 10", hdr.keyCount)
 	}
 }
 

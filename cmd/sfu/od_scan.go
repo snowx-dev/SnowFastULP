@@ -34,12 +34,21 @@ type odPhase int32
 const (
 	odPhaseIdle     odPhase = 0
 	odPhaseDiscover odPhase = 1
-	odPhaseRegen    odPhase = 2 // regen (decompress) + in-place v2->v3 upgrade
+	odPhaseRegen    odPhase = 2 // decompress archives + write fresh .idx
 	odPhaseDone     odPhase = 3
 	// post-dedup index write for THIS run's output, shares odMetrics
 	// shape w/ regen so it reuses the same renderer (just swaps labels)
 	odPhaseIndexOwn odPhase = 4
+	odPhaseUpgrade  odPhase = 5 // in-place v2->v3 sidecar re-sort (no archive read)
 )
+
+func odPhaseInFlight(m *odMetrics) bool {
+	if m == nil {
+		return false
+	}
+	ph := odPhase(m.phase.Load())
+	return ph != odPhaseIdle && ph != odPhaseDone
+}
 
 // atomic counters for the TUI's second frame + end-of-run summary.
 // lock-free so TUI doesnt coordinate w/ phase-0 workers
@@ -509,7 +518,7 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, erro
 	// never decompresses the archive; bounded RAM via the writer's spill/merge.
 	if len(needUpgrade) > 0 {
 		if m != nil {
-			m.phase.Store(int32(odPhaseRegen))
+			m.phase.Store(int32(odPhaseUpgrade))
 		}
 		if err := upgradeSidecars(ctx, needUpgrade, cfg, m); err != nil {
 			return nil, fmt.Errorf("odScan: upgrade: %w", err)

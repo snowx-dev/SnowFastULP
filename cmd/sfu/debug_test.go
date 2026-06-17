@@ -188,7 +188,7 @@ func TestChunkedZstdSinkLogsRotationEvents(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = dbg.Close() })
 	stamp := runStamp(time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC), "rot001")
-	sink, err := newChunkedZstdSink(d, stamp, 2, dbg, false)
+	sink, err := newChunkedZstdSink(d, stamp, 2, dbg, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
