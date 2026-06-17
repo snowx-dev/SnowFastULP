@@ -12,7 +12,9 @@
 package selfupdate
 
 import (
+	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -35,7 +37,8 @@ const (
 	// sumsAsset is the checksum manifest published with every release.
 	sumsAsset = "SHA256SUMS"
 
-	httpTimeout = 60 * time.Second
+	httpTimeout     = 60 * time.Second
+	maxDownloadSize = 64 << 20 // release binaries are ~5 MiB today
 )
 
 // product maps an on-disk binary name to its release asset prefix.
@@ -59,6 +62,13 @@ type ghRelease struct {
 	} `json:"assets"`
 }
 
+type pendingUpdate struct {
+	bin    string
+	target string
+	url    string
+	hash   []byte
+}
+
 // Run executes the update subcommand. args are the tokens following "update".
 // currentVersion is the embedded version.String of the running binary. Output
 // (progress, results) is written to out. A nil return means success (or already
@@ -73,6 +83,16 @@ func Run(args []string, currentVersion string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	self, err := resolveExecutable()
+	if err != nil {
+		return err
+	}
+	if err := checkInvokedBinaryName(self); err != nil {
+		return err
+	}
+	dir := filepath.Dir(self)
+	invokedBin := productBasename(self)
 
 	fmt.Fprintln(out, "checking for updates…")
 	rel, err := fetchLatest()
@@ -92,51 +112,182 @@ func Run(args []string, currentVersion string, out io.Writer) error {
 		return nil
 	}
 
-	// Resolve the directory holding the running binary; siblings live beside it.
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("cannot locate running executable: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(self); err == nil {
-		self = resolved
-	}
-	dir := filepath.Dir(self)
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
+	ext := exeExt()
 
 	sums, err := fetchSums(rel)
 	if err != nil {
 		return err
 	}
 
-	var updated []string
+	pending, err := planUpdates(rel, latest, suffix, dir, ext, sums)
+	if err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		return errNoUpdateTargets(dir)
+	}
+
+	// Download and verify every payload before swapping anything on disk.
+	payloads := make([][]byte, len(pending))
+	for i, u := range pending {
+		data, derr := downloadVerified(u.url, u.hash)
+		if derr != nil {
+			return fmt.Errorf("downloading %s failed: %w", u.bin, derr)
+		}
+		payloads[i] = data
+	}
+
+	// Apply siblings first, the invoked binary last — if apply aborts midway,
+	// the running executable is still the old build and the user can retry.
+	order := applyOrder(pending, invokedBin)
+	for _, i := range order {
+		u := pending[i]
+		if err := applyPayload(payloads[i], u.target, u.hash); err != nil {
+			return fmt.Errorf("updating %s failed: %w", u.bin, err)
+		}
+	}
+
+	updated := make([]string, len(pending))
+	for i, u := range pending {
+		updated[i] = u.bin
+	}
+	fmt.Fprintf(out, "updated %s to %s\n", strings.Join(updated, ", "), latest)
+	return nil
+}
+
+func resolveExecutable() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("cannot locate running executable: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(self); err == nil {
+		self = resolved
+	}
+	return self, nil
+}
+
+func exeExt() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// productBasename returns the executable stem (sfu/sfs), stripping a trailing .exe.
+func productBasename(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(strings.ToLower(base), ".exe")
+}
+
+func isKnownBin(name string) bool {
+	for _, p := range products {
+		if p.bin == name {
+			return true
+		}
+	}
+	return false
+}
+
+// checkInvokedBinaryName rejects release download names so users rename first.
+func checkInvokedBinaryName(selfPath string) error {
+	name := productBasename(selfPath)
+	if isKnownBin(name) {
+		return nil
+	}
+	return fmt.Errorf(
+		"this executable is named %q; self-update only works when the binary is named %q or %q\n"+
+			"  rename the release download in %s:\n"+
+			"    SnowFastULP-*  → sfu%s\n"+
+			"    SnowFastSearch-* → sfs%s\n"+
+			"  place sfu and sfs in the same directory, then run: sfu update",
+		filepath.Base(selfPath), products[0].bin, products[1].bin,
+		filepath.Dir(selfPath), exeExt(), exeExt())
+}
+
+func errNoUpdateTargets(dir string) error {
+	return fmt.Errorf(
+		"found no installed binaries named sfu%s or sfs%s in %s\n"+
+			"  release downloads use names like SnowFastULP-<version>-linux-amd64 — rename them to sfu%s and sfs%s in the same folder, then re-run update",
+		exeExt(), exeExt(), dir, exeExt(), exeExt())
+}
+
+func planUpdates(rel *ghRelease, latest, suffix, dir, ext string, sums map[string][]byte) ([]pendingUpdate, error) {
+	var pending []pendingUpdate
 	for _, p := range products {
 		target := filepath.Join(dir, p.bin+ext)
 		if _, statErr := os.Stat(target); statErr != nil {
-			continue // sibling not installed here — nothing to update
+			continue
 		}
 
 		assetName := fmt.Sprintf("%s-%s-%s", p.prefix, latest, suffix)
 		url := findAsset(rel, assetName)
 		if url == "" {
-			return fmt.Errorf("release %s has no asset %q for this platform", latest, assetName)
+			return nil, fmt.Errorf("release %s has no asset %q for this platform", latest, assetName)
 		}
 		wantHash, ok := sums[assetName]
 		if !ok {
-			return fmt.Errorf("%s missing checksum for %q", sumsAsset, assetName)
+			return nil, fmt.Errorf("%s missing checksum for %q", sumsAsset, assetName)
 		}
-		if err := downloadAndApply(url, target, wantHash); err != nil {
-			return fmt.Errorf("updating %s failed: %w", p.bin, err)
-		}
-		updated = append(updated, p.bin)
+		pending = append(pending, pendingUpdate{
+			bin:    p.bin,
+			target: target,
+			url:    url,
+			hash:   wantHash,
+		})
 	}
+	return pending, nil
+}
 
-	if len(updated) == 0 {
-		return fmt.Errorf("found no installed binaries to update in %s", dir)
+// applyOrder returns pending indices with the invoked binary last.
+func applyOrder(pending []pendingUpdate, invokedBin string) []int {
+	order := make([]int, 0, len(pending))
+	var invokedIdx = -1
+	for i, u := range pending {
+		if u.bin == invokedBin {
+			invokedIdx = i
+			continue
+		}
+		order = append(order, i)
 	}
-	fmt.Fprintf(out, "updated %s to %s\n", strings.Join(updated, ", "), latest)
+	if invokedIdx >= 0 {
+		order = append(order, invokedIdx)
+	}
+	return order
+}
+
+func downloadVerified(url string, wantHash []byte) ([]byte, error) {
+	body, err := httpGet(url)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(body, maxDownloadSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxDownloadSize {
+		return nil, fmt.Errorf("download exceeds %d bytes", maxDownloadSize)
+	}
+	got := sha256.Sum256(data)
+	if !bytes.Equal(got[:], wantHash) {
+		return nil, fmt.Errorf("checksum mismatch (got %x, want %x)", got, wantHash)
+	}
+	return data, nil
+}
+
+func applyPayload(data []byte, target string, wantHash []byte) error {
+	err := selfupdate.Apply(bytes.NewReader(data), selfupdate.Options{
+		TargetPath: target,
+		Checksum:   wantHash,
+		Hash:       crypto.SHA256,
+	})
+	if err != nil {
+		if rb := selfupdate.RollbackError(err); rb != nil {
+			return fmt.Errorf("%w (ROLLBACK ALSO FAILED: %v — restore %s manually)", err, rb, target)
+		}
+		return err
+	}
 	return nil
 }
 
@@ -296,30 +447,6 @@ func parseSums(data []byte) map[string][]byte {
 		sums[name] = digest
 	}
 	return sums
-}
-
-// downloadAndApply streams the asset at url and atomically replaces target,
-// verifying the SHA256 digest before the swap. On failure it reports whether
-// the original binary was rolled back.
-func downloadAndApply(url, target string, wantHash []byte) error {
-	body, err := httpGet(url)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-
-	err = selfupdate.Apply(body, selfupdate.Options{
-		TargetPath: target,
-		Checksum:   wantHash,
-		Hash:       crypto.SHA256,
-	})
-	if err != nil {
-		if rb := selfupdate.RollbackError(err); rb != nil {
-			return fmt.Errorf("%w (ROLLBACK ALSO FAILED: %v — restore %s manually)", err, rb, target)
-		}
-		return err
-	}
-	return nil
 }
 
 // httpGet performs a GET with a sane timeout and returns the response body for

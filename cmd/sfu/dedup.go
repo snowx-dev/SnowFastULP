@@ -161,8 +161,9 @@ func (s *outputSink) writeBatch(buf []byte, lineCount int, m *metrics) error {
 }
 
 // pre-formatted lines + parallel dedup hashes. hashes and lineCount must match.
-// sidecar keys are written under the same mutex as archive bytes so worker
-// interleaving stays aligned with the part each line lands in.
+// archive bytes land before sidecar keys so a failed write cannot leave a .idx
+// ahead of the archive. sidecar keys are still under the same mutex as archive
+// bytes so worker interleaving stays aligned with the part each line lands in.
 func (s *outputSink) writeBatchIndexed(buf []byte, hashes []uint64, lineCount int, m *metrics) error {
 	if len(buf) == 0 {
 		return nil
@@ -172,18 +173,18 @@ func (s *outputSink) writeBatchIndexed(buf []byte, hashes []uint64, lineCount in
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, err := s.bw.Write(buf); err != nil {
+		return err
+	}
+	if err := s.noteCompressedWrite(int64(len(buf))); err != nil {
+		return err
+	}
 	if s.sidecar != nil {
 		for _, h := range hashes {
 			if err := s.sidecar.WriteHash(h); err != nil {
 				return err
 			}
 		}
-	}
-	if _, err := s.bw.Write(buf); err != nil {
-		return err
-	}
-	if err := s.noteCompressedWrite(int64(len(buf))); err != nil {
-		return err
 	}
 	if m != nil {
 		if lineCount > 0 {

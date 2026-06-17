@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +48,45 @@ func TestFetchSumsParsing(t *testing.T) {
 	// Leading '*' (binary-mode marker) must be stripped from the name.
 	if _, ok := sums["SnowFastSearch-0.2-windows-amd64.exe"]; !ok {
 		t.Errorf("windows entry not found (star-prefix not stripped?): %v", sums)
+	}
+}
+
+func TestProductBasename(t *testing.T) {
+	if got := productBasename("/opt/bin/sfu"); got != "sfu" {
+		t.Fatalf("got %q want sfu", got)
+	}
+	if got := productBasename("/opt/bin/sfs.exe"); got != "sfs" {
+		t.Fatalf("got %q want sfs", got)
+	}
+}
+
+func TestCheckInvokedBinaryName(t *testing.T) {
+	if err := checkInvokedBinaryName("/opt/bin/sfu"); err != nil {
+		t.Fatalf("sfu: %v", err)
+	}
+	if err := checkInvokedBinaryName("/opt/bin/sfs"); err != nil {
+		t.Fatalf("sfs: %v", err)
+	}
+	err := checkInvokedBinaryName("/opt/bin/SnowFastULP-0.1-linux-amd64")
+	if err == nil {
+		t.Fatal("expected error for release download name")
+	}
+	if !strings.Contains(err.Error(), `SnowFastULP-*  → sfu`) {
+		t.Fatalf("expected rename hint, got: %v", err)
+	}
+}
+
+func TestApplyOrderInvokedLast(t *testing.T) {
+	pending := []pendingUpdate{
+		{bin: "sfu", target: "/bin/sfu"},
+		{bin: "sfs", target: "/bin/sfs"},
+	}
+	order := applyOrder(pending, "sfu")
+	if len(order) != 2 || pending[order[0]].bin != "sfs" || pending[order[1]].bin != "sfu" {
+		t.Fatalf("order = %v, want sfs then sfu", order)
+	}
+	order = applyOrder(pending, "sfs")
+	if len(order) != 2 || pending[order[0]].bin != "sfu" || pending[order[1]].bin != "sfs" {
+		t.Fatalf("order = %v, want sfu then sfs", order)
 	}
 }
