@@ -75,6 +75,9 @@ type odMetrics struct {
 	partsRegenTotal atomic.Int32
 	partsRegenDone  atomic.Int32
 
+	// set during discover when legacy v2 sidecars need a one-time in-place upgrade
+	partsUpgradeTotal atomic.Int32
+
 	keysTotalEstimate atomic.Int64
 	keysLoaded        atomic.Int64
 
@@ -403,6 +406,7 @@ type odResult struct {
 	ArchivesSkipped  int
 	// user-visible skipped paths re-emitted post-alt-screen
 	SkippedArchivePaths []string
+	ArchivesUpgraded    int // parts upgraded v2→v3 in place (one-time per legacy library)
 	TotalKeysLoaded     uint64
 	Elapsed             time.Duration
 }
@@ -491,6 +495,9 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, erro
 		// "parts indexed" progress (and migration runs, which are all upgrade,
 		// no regen) move instead of sitting frozen.
 		m.partsRegenTotal.Store(int32(len(needRegen) + len(needUpgrade)))
+		if len(needUpgrade) > 0 {
+			m.partsUpgradeTotal.Store(int32(len(needUpgrade)))
+		}
 	}
 	cfg.Debug.Event("[od] scan classify: parts_total=%d, parts_need_regen=%d, regen_bytes=%d",
 		totalParts, len(needRegen), regenBytes)
@@ -546,6 +553,7 @@ func runODScan(ctx context.Context, cfg odConfig, m *odMetrics) (*odResult, erro
 		ArchivesFresh:       runsFresh,
 		ArchivesRegen:       runsRegen,
 		ArchivesSkipped:     runsSkipped,
+		ArchivesUpgraded:    len(needUpgrade),
 		SkippedArchivePaths: skippedRunPaths,
 		FilesTotal:          totalParts,
 		Elapsed:             time.Since(started),

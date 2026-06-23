@@ -123,6 +123,7 @@ func main() {
 	noEncodingSniff := flag.Bool("no-encoding-sniff", false, "skip BOM detection; treat all inputs as UTF-8 (debug / A-B benchmark)")
 	debug := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	debugReject := flag.Bool("debug-reject", false, "append parser-rejected lines to a file in CWD")
+	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
 
 	// allow positional anywhere on cmdline. flag.Parse stops at first
 	// non-flag, so split first and pass only flag tokens
@@ -301,6 +302,9 @@ func main() {
 		}
 	}
 
+	updateChecker := selfupdate.NewChecker(version.String, os.Args[0], *noUpdateCheck)
+	updateChecker.Start()
+
 	// sweep orphan shard subdirs from crashed runs. best-effort,
 	// failures silent in sweepStaleTempDirs
 	if err := os.MkdirAll(r.tempDir, 0o755); err == nil {
@@ -390,7 +394,11 @@ func main() {
 	// clean for `sfu in -o ./out/ | grep ...` pipelines. lipgloss strips
 	// styling automatically on non-TTY stderr
 	tw := termWidth()
-	for _, ln := range renderFinalStdoutSummary(time.Since(started), m, r, tw) {
+	var updateNotice *selfupdate.Notice
+	if !*noUpdateCheck {
+		updateNotice = updateChecker.NoticeForSummary()
+	}
+	for _, ln := range renderFinalStdoutSummary(time.Since(started), m, r, tw, updateNotice) {
 		fmt.Fprintln(os.Stderr, ln)
 	}
 }

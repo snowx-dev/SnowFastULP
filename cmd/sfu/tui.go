@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"golang.org/x/term"
 )
 
@@ -805,15 +806,11 @@ func numDigits(n int64) int {
 	return d
 }
 
-// per-rune frost gradient, left-padded to width cells, right-aligned.
-// Faint for discreet footer
-func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+// per-rune frost gradient without width padding.
+func renderFrostTagline(text string, spanStart, spanEnd float64) string {
 	run := []rune(text)
-	if len(run) == 0 || width <= 0 {
-		if width < 0 {
-			width = 0
-		}
-		return strings.Repeat(" ", width)
+	if len(run) == 0 {
+		return ""
 	}
 	var b strings.Builder
 	for i, r := range run {
@@ -829,7 +826,19 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 			Faint(true)
 		b.WriteString(st.Render(string(r)))
 	}
-	styled := b.String()
+	return b.String()
+}
+
+// per-rune frost gradient, left-padded to width cells, right-aligned.
+// Faint for discreet footer
+func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+	styled := renderFrostTagline(text, spanStart, spanEnd)
+	if width <= 0 {
+		if width < 0 {
+			width = 0
+		}
+		return strings.Repeat(" ", width)
+	}
 	vw := tuiVisibleWidth(styled)
 	if vw > width {
 		return trimToDisplayWidth(styled, width)
@@ -838,6 +847,46 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 		return strings.Repeat(" ", width-vw) + styled
 	}
 	return styled
+}
+
+func renderUpdateNoticeLine(notice *selfupdate.Notice) string {
+	return warnStyle.Render("Update available: v"+notice.Latest) +
+		mutedStyle.Render(" · run: ") +
+		phaseStyle.Render(notice.Command)
+}
+
+func renderFooterRow(left, right string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	rw := tuiVisibleWidth(right)
+	maxLeft := width - rw - 1
+	if maxLeft < 0 {
+		maxLeft = 0
+	}
+	if lw := tuiVisibleWidth(left); lw > maxLeft {
+		left = trimToDisplayWidth(left, maxLeft)
+	}
+	lw := tuiVisibleWidth(left)
+	gap := width - lw - rw
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func renderSummaryFooter(width int, notice *selfupdate.Notice) []string {
+	if notice == nil {
+		return renderLiveScreenFooter(width)
+	}
+	if width < 1 {
+		width = tuiDisplayWidth
+	}
+	rowW := width - leftPad
+	right1 := renderFrostTagline(tuiFooterLine1, 0.0, 0.5)
+	line1 := renderFooterRow(renderUpdateNoticeLine(notice), right1, rowW)
+	line2 := renderFrostTaglineRight(tuiFooterLine2, rowW, 0.2, 0.7)
+	return []string{"", line1, line2}
 }
 
 // blank + two right-aligned taglines for bottom of live TUI + DONE.
@@ -1095,7 +1144,7 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 
 // everything printed post-success on main screen: COMPLETE frame, optional
 // -od library recap, output path row, frost tagline footer
-func renderFinalStdoutSummary(elapsed time.Duration, m *metrics, r *resolved, width int) []string {
+func renderFinalStdoutSummary(elapsed time.Duration, m *metrics, r *resolved, width int, notice *selfupdate.Notice) []string {
 	var out []string
 	// -del paths before DONE summary so long delete lists dont
 	// push stats off-screen
@@ -1105,7 +1154,7 @@ func renderFinalStdoutSummary(elapsed time.Duration, m *metrics, r *resolved, wi
 		out = append(out, odLines...)
 	}
 	out = append(out, renderDoneOutputFooter(r)...)
-	out = append(out, renderLiveScreenFooter(width)...)
+	out = append(out, renderSummaryFooter(width, notice)...)
 	if skipLines := renderODSkippedPaths(r, width); len(skipLines) > 0 {
 		out = append(out, skipLines...)
 	}
@@ -1135,6 +1184,11 @@ func renderODSummary(r *resolved, width int) []string {
 	innerLines := []string{
 		uniqueStyle.Render(formatCount(int64(res.TotalKeysLoaded))),
 		mutedStyle.Render("lines in library"),
+	}
+	if res.ArchivesUpgraded > 0 {
+		innerLines = append(innerLines,
+			warnStyle.Render(fmt.Sprintf("Index format upgraded (one-time, %d parts)", res.ArchivesUpgraded)),
+		)
 	}
 
 	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
@@ -1346,6 +1400,9 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 	switch phase {
 	case odPhaseDiscover:
 		phaseDesc = "scanning library"
+		if m.partsUpgradeTotal.Load() > 0 {
+			phaseDesc = "scanning library · legacy index detected"
+		}
 	case odPhaseRegen:
 		phaseDesc = "indexing archives + writing .idx"
 	case odPhaseUpgrade:
@@ -1388,11 +1445,20 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		libRow += " " + mutedStyle.Render("·") + " " +
 			warnStyle.Render(fmt.Sprintf("%d skipped", archivesSkipped))
 	}
+	if phase == odPhaseDiscover && m.partsUpgradeTotal.Load() > 0 {
+		libRow += " " + mutedStyle.Render("·") + " " +
+			warnStyle.Render("one-time upgrade next")
+	}
 
 	innerLines := []string{headerLine, libRow}
 
 	// phase-specific second row
 	switch phase {
+	case odPhaseDiscover:
+		if m.partsUpgradeTotal.Load() > 0 {
+			innerLines = append(innerLines, labelStyle.Render("Note        ")+
+				warnStyle.Render("Legacy index format · in-place upgrade runs once, then skipped"))
+		}
 	case odPhaseRegen, odPhaseIndexOwn:
 		if regenBytesTotal > 0 {
 			innerLines = append(innerLines, labelStyle.Render("Bytes       ")+
@@ -1413,8 +1479,14 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 				byteStyle.Render(formatRate(regenBPS))+eta)
 		}
 	case odPhaseUpgrade:
-		innerLines = append(innerLines, labelStyle.Render("Mode        ")+
-			mutedStyle.Render("in-place re-sort · archives not read"))
+		innerLines = append(innerLines,
+			labelStyle.Render("Important   ")+
+				warnStyle.Render("One-time library upgrade — please wait, do not interrupt (Ctrl+C)"),
+			labelStyle.Render("Mode        ")+
+				mutedStyle.Render("in-place re-sort · archives not read"),
+			labelStyle.Render("Safety      ")+
+				mutedStyle.Render("your .zst archives are safe · only index files are updated"),
+		)
 	}
 
 	box := gradientBox(innerLines, contentWidth(width), footerGradA, footerGradB)

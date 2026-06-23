@@ -58,6 +58,7 @@ func renderHelp(bin string) string {
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
 		{"-debug-reject", "", "Write rejected input lines to a debug file."},
+		{"-no-update-check", "", "Disable background update availability check."},
 	}
 
 	// fixed flag col, computed off unstyled length (SGR escapes would skew)

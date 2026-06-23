@@ -45,6 +45,7 @@ func renderHelp(bin string) string {
 	}
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
+		{"-no-update-check", "", "Disable background update availability check."},
 		{"-decode-step", "BYTES", "Per-Read decode budget (default 1048576). Lower (e.g. 262144) on pre-2017 Xeon / Zen 2-3."},
 		{"-max-hits-per-chunk", "N", "Truncate hits per chunk to N (default 0 = unbounded). Safety valve for `:` / `@` -style queries."},
 	}
@@ -75,7 +76,8 @@ func renderHelp(bin string) string {
 		byteStyle.Render("PATTERN") + " " +
 		mutedStyle.Render("[-o FILE]") + "\n")
 	b.WriteString(mutedStyle.Render("    Flags may appear before or after the pattern. More flags below: Args for nerds, then Args for devs.") + "\n")
-	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; [sfs].dir for PATTERN-only)") + "\n\n")
+	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; [sfs].dir for PATTERN-only)") + "\n")
+	b.WriteString(mutedStyle.Render("    PATTERN '*' exports every line (quote it in the shell).") + "\n\n")
 
 	b.WriteString(labelStyle.Render("Commands:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " update   " +
@@ -85,6 +87,7 @@ func renderHelp(bin string) string {
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'facebook.com:'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " -txt ./dumps 'user@example'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'user@example'\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " ./library '*' -since 5m -o recent.txt\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library -o hits.txt 'user@example'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -o out.txt -silent\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -o out.txt -clean\n")

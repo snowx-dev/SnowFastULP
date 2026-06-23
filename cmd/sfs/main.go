@@ -60,6 +60,7 @@ func main() {
 	since := flag.String("since", "", "only search archives modified within this window, e.g. 7d, 12h, 90m (default: all)")
 	workers := flag.Int("j", 0, "worker goroutines (0 = GOMAXPROCS)")
 	debugFlag := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
+	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
 	// 1 MiB default tracks per-core L2 on modern uarch.
 	// drop to 256 KiB on Broadwell/Haswell Xeon, Zen 2/3
 	decodeStep := flag.Int("decode-step", 0, "")
@@ -95,8 +96,12 @@ func main() {
 		args.Root = dir
 	}
 	pattern := args.Pattern
+	matchAll := pattern == "*"
 	if pattern == "" {
 		fatal("empty pattern")
+	}
+	if matchAll && *limit == 0 && *since == "" {
+		fmt.Fprintln(os.Stderr, "note: '*' exports all lines; use -l N or -since DUR to narrow scope")
 	}
 
 	w := *workers
@@ -156,6 +161,8 @@ func main() {
 	}
 
 	started := time.Now()
+	updateChecker := selfupdate.NewChecker(version.String, os.Args[0], *noUpdateCheck)
+	updateChecker.Start()
 	ctx, cancel, signaled := signalContext()
 	defer cancel()
 
@@ -224,6 +231,7 @@ func main() {
 	runErr := run(ctx, runConfig{
 		root:            args.Root,
 		pattern:         pattern,
+		matchAll:        matchAll,
 		archives:        archives,
 		txtMode:         *txtMode,
 		workers:         w,
@@ -254,7 +262,11 @@ func main() {
 		dbg.logCompletion(metrics, wall, debugInfo)
 	}
 	if !*silent {
-		for _, ln := range renderFinalSummary(started, metrics, *outFile, pattern) {
+		var updateNotice *selfupdate.Notice
+		if !*noUpdateCheck {
+			updateNotice = updateChecker.NoticeForSummary()
+		}
+		for _, ln := range renderFinalSummary(started, metrics, *outFile, pattern, updateNotice) {
 			fmt.Fprintln(os.Stderr, ln)
 		}
 	}
@@ -263,6 +275,7 @@ func main() {
 type runConfig struct {
 	root            string
 	pattern         string
+	matchAll        bool
 	archives        []string
 	txtMode         bool
 	workers         int
@@ -462,6 +475,7 @@ func run(ctx context.Context, cfg runConfig) error {
 		if cfg.txtMode {
 			searchErr = search.RunTxt(search.TxtConfig{
 				Ctx:        ctx,
+				MatchAll:   cfg.matchAll,
 				Pattern:    []byte(cfg.pattern),
 				Workers:    cfg.workers,
 				Files:      cfg.archives,
@@ -479,6 +493,7 @@ func run(ctx context.Context, cfg runConfig) error {
 				Ctx:             ctx,
 				DecodeStep:      cfg.decodeStep,
 				MaxHitsPerChunk: cfg.maxHitsPerChunk,
+				MatchAll:        cfg.matchAll,
 				Pattern:         []byte(cfg.pattern),
 				Workers:         cfg.workers,
 				Archives:        cfg.archives,

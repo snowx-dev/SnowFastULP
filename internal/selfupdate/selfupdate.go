@@ -41,6 +41,34 @@ const (
 	maxDownloadSize = 64 << 20 // release binaries are ~5 MiB today
 )
 
+// releaseAPIURL is the GitHub /releases/latest endpoint. Tests override via
+// withTestHooks to point at an httptest.Server.
+var releaseAPIURL = latestURL
+
+// testHooks holds optional overrides used by integration tests in this package.
+type testHooks struct {
+	releaseURL     string
+	executablePath string
+}
+
+func (h *testHooks) releaseEndpoint() string {
+	if h != nil && h.releaseURL != "" {
+		return h.releaseURL
+	}
+	return releaseAPIURL
+}
+
+func (h *testHooks) resolveSelf() (string, error) {
+	if h != nil && h.executablePath != "" {
+		return h.executablePath, nil
+	}
+	return resolveExecutable()
+}
+
+func httpClient() *http.Client {
+	return &http.Client{Timeout: httpTimeout}
+}
+
 // product maps an on-disk binary name to its release asset prefix.
 type product struct {
 	bin    string // executable basename, no extension (e.g. "sfu")
@@ -69,12 +97,22 @@ type pendingUpdate struct {
 	hash   []byte
 }
 
+// applyPayloadHook, when non-nil, replaces applyPayload during tests.
+var applyPayloadHook func(data []byte, target string, wantHash []byte) error
+
+// recordApplyTarget is test-only; records each target path passed to applyPayload.
+var recordApplyTarget func(string)
+
 // Run executes the update subcommand. args are the tokens following "update".
 // currentVersion is the embedded version.String of the running binary. Output
 // (progress, results) is written to out. A nil return means success (or already
 // up to date); a non-nil error means nothing was changed unless explicitly
 // stated in the message.
 func Run(args []string, currentVersion string, out io.Writer) error {
+	return run(args, currentVersion, out, nil)
+}
+
+func run(args []string, currentVersion string, out io.Writer, hooks *testHooks) error {
 	if len(args) > 0 {
 		return fmt.Errorf("update takes no arguments")
 	}
@@ -84,7 +122,7 @@ func Run(args []string, currentVersion string, out io.Writer) error {
 		return err
 	}
 
-	self, err := resolveExecutable()
+	self, err := hooks.resolveSelf()
 	if err != nil {
 		return err
 	}
@@ -95,7 +133,7 @@ func Run(args []string, currentVersion string, out io.Writer) error {
 	invokedBin := productBasename(self)
 
 	fmt.Fprintln(out, "checking for updates…")
-	rel, err := fetchLatest()
+	rel, err := fetchLatest(hooks)
 	if err != nil {
 		return fmt.Errorf("could not reach the release server: %w", err)
 	}
@@ -114,7 +152,7 @@ func Run(args []string, currentVersion string, out io.Writer) error {
 
 	ext := exeExt()
 
-	sums, err := fetchSums(rel)
+	sums, err := fetchSums(rel, hooks)
 	if err != nil {
 		return err
 	}
@@ -130,7 +168,7 @@ func Run(args []string, currentVersion string, out io.Writer) error {
 	// Download and verify every payload before swapping anything on disk.
 	payloads := make([][]byte, len(pending))
 	for i, u := range pending {
-		data, derr := downloadVerified(u.url, u.hash)
+		data, derr := downloadVerified(u.url, u.hash, hooks)
 		if derr != nil {
 			return fmt.Errorf("downloading %s failed: %w", u.bin, derr)
 		}
@@ -255,8 +293,8 @@ func applyOrder(pending []pendingUpdate, invokedBin string) []int {
 	return order
 }
 
-func downloadVerified(url string, wantHash []byte) ([]byte, error) {
-	body, err := httpGet(url)
+func downloadVerified(url string, wantHash []byte, hooks *testHooks) ([]byte, error) {
+	body, err := httpGet(url, hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +315,12 @@ func downloadVerified(url string, wantHash []byte) ([]byte, error) {
 }
 
 func applyPayload(data []byte, target string, wantHash []byte) error {
+	if applyPayloadHook != nil {
+		return applyPayloadHook(data, target, wantHash)
+	}
+	if recordApplyTarget != nil {
+		recordApplyTarget(target)
+	}
 	err := selfupdate.Apply(bytes.NewReader(data), selfupdate.Options{
 		TargetPath: target,
 		Checksum:   wantHash,
@@ -367,15 +411,15 @@ func assetSuffix() (string, error) {
 
 // fetchLatest queries the GitHub API for the most recent published release.
 // Draft and prerelease entries are excluded by the /latest endpoint.
-func fetchLatest() (*ghRelease, error) {
-	req, err := http.NewRequest(http.MethodGet, latestURL, nil)
+func fetchLatest(hooks *testHooks) (*ghRelease, error) {
+	req, err := http.NewRequest(http.MethodGet, hooks.releaseEndpoint(), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", repoName+"-selfupdate")
 
-	resp, err := (&http.Client{Timeout: httpTimeout}).Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -406,12 +450,12 @@ func findAsset(rel *ghRelease, name string) string {
 
 // fetchSums downloads and parses the release SHA256SUMS manifest into a map of
 // asset name → expected sha256 digest bytes.
-func fetchSums(rel *ghRelease) (map[string][]byte, error) {
+func fetchSums(rel *ghRelease, hooks *testHooks) (map[string][]byte, error) {
 	url := findAsset(rel, sumsAsset)
 	if url == "" {
 		return nil, fmt.Errorf("release has no %s manifest", sumsAsset)
 	}
-	body, err := httpGet(url)
+	body, err := httpGet(url, hooks)
 	if err != nil {
 		return nil, fmt.Errorf("downloading %s: %w", sumsAsset, err)
 	}
@@ -451,13 +495,13 @@ func parseSums(data []byte) map[string][]byte {
 
 // httpGet performs a GET with a sane timeout and returns the response body for
 // the caller to close. Non-2xx statuses are surfaced as errors.
-func httpGet(url string) (io.ReadCloser, error) {
+func httpGet(url string, hooks *testHooks) (io.ReadCloser, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", repoName+"-selfupdate")
-	resp, err := (&http.Client{Timeout: httpTimeout}).Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -63,6 +63,10 @@ const (
 // const) so tests can force the spill/merge path with a tiny budget.
 var sidecarSortMaxKeys = (32 << 20) / sidecarKeyBytes // 32 MiB of keys
 
+// cancel poll interval during v2→v3 upgrade (bit mask on key index). default
+// ~every 256K keys. tests may lower for mid-stream cancel coverage.
+var sidecarUpgradeCancelCheckMask uint64 = 0x3ffff
+
 var (
 	errSidecarMissing   = errors.New("sidecar: not found")
 	errSidecarMalformed = errors.New("sidecar: malformed header")
@@ -272,7 +276,7 @@ func upgradeSidecarToV3(ctx context.Context, sidecarPath string) (uint64, error)
 	// the original v2 .idx untouched — the library is never half-written.
 	n := 0
 	feed := func(k uint64) error {
-		if n&0x3ffff == 0 { // on entry (n=0), then ~every 256K keys
+		if sidecarUpgradeCancelCheckMask != 0 && uint64(n)&sidecarUpgradeCancelCheckMask == 0 {
 			if cerr := ctx.Err(); cerr != nil {
 				return cerr
 			}

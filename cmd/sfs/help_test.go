@@ -25,6 +25,8 @@ func TestRenderHelpMatchesSFULayout(t *testing.T) {
 		"Set search worker count.",
 		"-debug",
 		"Write a debug log for this run.",
+		"'*' -since 5m -o recent.txt",
+		"PATTERN '*' exports every line",
 	}
 	for _, s := range want {
 		if !strings.Contains(help, s) {

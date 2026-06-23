@@ -120,6 +120,16 @@ func TestParseSearchArgsDirWithoutPattern(t *testing.T) {
 	}
 }
 
+func TestParseSearchArgsStarPattern(t *testing.T) {
+	args, err := parseSearchArgs([]string{"*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args.Pattern != "*" {
+		t.Fatalf("pattern = %q, want *", args.Pattern)
+	}
+}
+
 func TestParseSearchArgsMissing(t *testing.T) {
 	_, err := parseSearchArgs(nil)
 	if err == nil {

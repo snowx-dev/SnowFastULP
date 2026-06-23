@@ -8,6 +8,25 @@ import (
 	"time"
 )
 
+func TestRenderODFrameDiscoverShowsLegacyHint(t *testing.T) {
+	m := &odMetrics{}
+	m.phase.Store(int32(odPhaseDiscover))
+	m.archivesTotal.Store(5)
+	m.partsUpgradeTotal.Store(12)
+
+	lines := renderODFrame(m, 0, 86)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"legacy index detected",
+		"one-time upgrade next",
+		"Legacy index format",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("discover legacy hint missing %q\nfull:\n%s", want, joined)
+		}
+	}
+}
+
 // no -od work = nil frame. non-od runs see the same TUI as before
 func TestRenderODFrameInactiveYieldsNil(t *testing.T) {
 	if got := renderODFrame(nil, 0, 86); got != nil {
@@ -66,6 +85,9 @@ func TestRenderODFrameUpgradeContents(t *testing.T) {
 	for _, want := range []string{
 		"Destination dedup",
 		"upgrading index format",
+		"One-time library upgrade",
+		"do not interrupt",
+		"your .zst archives are safe",
 		"in-place re-sort",
 		"38 archives",
 		"39 / 56 parts indexed",
@@ -125,7 +147,7 @@ func TestRenderFinalStdoutSummaryODBlockOrder(t *testing.T) {
 	}
 	r.OutputPaths = []string{filepath.Join(t.TempDir(), "sfu_xyz.txt.zst")}
 
-	out := renderFinalStdoutSummary(60*time.Second, &metrics{}, r, 86)
+	out := renderFinalStdoutSummary(60*time.Second, &metrics{}, r, 86, nil)
 	joined := strings.Join(out, "\n")
 
 	odIdx := strings.Index(joined, "lines in library")
@@ -169,6 +191,22 @@ func TestRenderODSummaryLargeCountNotTruncated(t *testing.T) {
 	}
 }
 
+func TestRenderODSummaryShowsUpgradeComplete(t *testing.T) {
+	r := &resolved{}
+	r.odResult = &odResult{
+		ArchivesTotal:    2,
+		TotalKeysLoaded:  1000,
+		ArchivesUpgraded: 3,
+	}
+	out := strings.Join(renderODSummary(r, 86), "\n")
+	if !strings.Contains(out, "Index format upgraded") {
+		t.Errorf("summary missing upgrade line\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "3 parts") {
+		t.Errorf("summary missing part count\nout:\n%s", out)
+	}
+}
+
 // COMPLETE frame always shows lines read, not just when -od is on
 func TestRenderDoneLinesIncludesLinesRead(t *testing.T) {
 	m := &metrics{}
@@ -191,7 +229,7 @@ func TestRenderFinalStdoutSummaryDeletedBeforeComplete(t *testing.T) {
 	r := &resolved{
 		DeletedInputPaths: []string{"/data/in/a.txt", "/data/in/b.txt"},
 	}
-	out := strings.Join(renderFinalStdoutSummary(time.Second, &metrics{}, r, 86), "\n")
+	out := strings.Join(renderFinalStdoutSummary(time.Second, &metrics{}, r, 86, nil), "\n")
 	idxDel := strings.Index(out, "Deleted")
 	idxDone := strings.Index(out, "COMPLETE")
 	if idxDel < 0 || idxDone < 0 {
@@ -230,7 +268,7 @@ func TestRenderODSkippedPathsListed(t *testing.T) {
 		ArchivesSkipped:     2,
 		SkippedArchivePaths: []string{"/lib/sfu_a.txt.zst", "/lib/sfu_b.txt.zst"},
 	}
-	out := strings.Join(renderFinalStdoutSummary(time.Second, &metrics{}, r, 86), "\n")
+	out := strings.Join(renderFinalStdoutSummary(time.Second, &metrics{}, r, 86, nil), "\n")
 	for _, p := range r.odResult.SkippedArchivePaths {
 		if !strings.Contains(out, p) {
 			t.Errorf("skipped archive path %q must appear in summary; got:\n%s", p, out)

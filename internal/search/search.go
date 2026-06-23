@@ -79,6 +79,7 @@ type Config struct {
 	// per-chunk hit cap. 0 = unbounded. safety valve vs pathological queries
 	// (eg `:` on multi-GiB ULP). when hit, chunk truncates and OnChunkCapped fires
 	MaxHitsPerChunk int
+	MatchAll        bool // pattern "*" — emit every non-empty line
 	Pattern         []byte
 	Workers         int
 	Archives        []string
@@ -108,7 +109,7 @@ func resolveDecodeStep(req int) int {
 
 // Run searches all archives using a worker pool over chunks.
 func Run(cfg Config) error {
-	if len(cfg.Pattern) == 0 {
+	if !cfg.MatchAll && len(cfg.Pattern) == 0 {
 		return fmt.Errorf("empty pattern")
 	}
 	ctx := cfg.Ctx
@@ -263,7 +264,7 @@ func Run(cfg Config) error {
 				}
 				return nil
 			}
-			emitted, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk, emit)
+			emitted, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.MatchAll, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk, emit)
 			if err != nil {
 				if cfg.OnChunkError != nil {
 					cfg.OnChunkError(t.archive, t.chunk.ChunkID, err)
@@ -323,10 +324,12 @@ type localHit struct {
 // buffer (caller-pooled); it's cleared after every flush. Returns the number of
 // hits emitted, whether the per-chunk cap (maxHits) truncated the chunk, and
 // any decode/emit error (hits found before an error are still emitted).
-func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, metrics *Metrics, scratch []localHit, decodeStep, maxHits int, emit func([]localHit) error) (int, bool, error) {
+func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, matchAll bool, metrics *Metrics, scratch []localHit, decodeStep, maxHits int, emit func([]localHit) error) (int, bool, error) {
 	matcher := newPatternMatcher(pattern)
 	overlap := len(pattern) - 1
-	if overlap < 0 {
+	if matchAll {
+		overlap = 0
+	} else if overlap < 0 {
 		overlap = 0
 	}
 
@@ -344,6 +347,8 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 	capped := false
 	emitted := 0
 	hits := scratch[:0]
+	var carry []byte
+	var carryOff int64
 
 	// flush this step's accumulated hits, truncating to the per-chunk cap.
 	flush := func() error {
@@ -390,7 +395,11 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 				searchLen = overlap + nOut
 				base = absOff - int64(overlap)
 			}
-			hits = appendHits(hits, searchPtr, searchLen, &matcher, base)
+			if matchAll {
+				hits = appendAllLines(hits, &carry, &carryOff, searchPtr, base)
+			} else {
+				hits = appendHits(hits, searchPtr, searchLen, &matcher, base)
+			}
 
 			absOff += int64(nOut)
 			first = false
@@ -419,6 +428,13 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 		}
 		if err != nil {
 			return emitted, capped, err
+		}
+	}
+
+	if matchAll && len(carry) > 0 {
+		hits = flushLineCarry(hits, carry, carryOff)
+		if ferr := flush(); ferr != nil {
+			return emitted, capped, ferr
 		}
 	}
 

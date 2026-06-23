@@ -18,6 +18,7 @@ const maxTxtLineBackref = 64 * 1024
 // TxtConfig holds plain-text search parameters.
 type TxtConfig struct {
 	Ctx         context.Context
+	MatchAll    bool
 	Pattern     []byte
 	Workers     int
 	Files       []string
@@ -31,7 +32,7 @@ type TxtConfig struct {
 // RunTxt searches plain .txt files via worker pool (no index/sidecar).
 // caller sets headline counters (ChunksTotal etc), RunTxt updates only progress
 func RunTxt(cfg TxtConfig) error {
-	if len(cfg.Pattern) == 0 {
+	if !cfg.MatchAll && len(cfg.Pattern) == 0 {
 		return fmt.Errorf("empty pattern")
 	}
 	ctx := cfg.Ctx
@@ -104,7 +105,7 @@ func RunTxt(cfg TxtConfig) error {
 				unreg = reg.Register(f)
 			}
 
-			localHits, err := searchTxtFile(ctx, f, cfg.Pattern, cfg.Metrics)
+			localHits, err := searchTxtFile(ctx, f, cfg.Pattern, cfg.MatchAll, cfg.Metrics)
 			if unreg != nil {
 				unreg()
 			}
@@ -168,7 +169,10 @@ func RunTxt(cfg TxtConfig) error {
 
 // sliding-window BMH on plain text. seam-straddling matches recovered via
 // backref read from disk so emitted lines arent buffer-truncated
-func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, metrics *Metrics) ([]localHit, error) {
+func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll bool, metrics *Metrics) ([]localHit, error) {
+	if matchAll {
+		return searchTxtFileAll(ctx, f, metrics)
+	}
 	matcher := newPatternMatcher(pattern)
 	overlap := len(pattern) - 1
 	if overlap < 0 {
@@ -235,6 +239,49 @@ func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, metrics *Met
 		}
 	}
 
+	return hits, nil
+}
+
+func searchTxtFileAll(ctx context.Context, f *os.File, metrics *Metrics) ([]localHit, error) {
+	buf := make([]byte, outWin)
+	var src io.Reader = f
+	if ctx != nil {
+		src = &ctxReader{ctx: ctx, r: f}
+	}
+
+	absOff := int64(0)
+	var hits []localHit
+	var carry []byte
+	var carryOff int64
+
+	for {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return hits, err
+			}
+		}
+		readLen := len(buf)
+		if readLen > defaultDecodeStep {
+			readLen = defaultDecodeStep
+		}
+		n, err := src.Read(buf[:readLen])
+		if n > 0 {
+			if metrics != nil {
+				metrics.BytesScanned.Add(int64(n))
+			}
+			hits = appendAllLines(hits, &carry, &carryOff, buf[:n], absOff)
+			absOff += int64(n)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return hits, err
+		}
+	}
+	if len(carry) > 0 {
+		hits = flushLineCarry(hits, carry, carryOff)
+	}
 	return hits, nil
 }
 

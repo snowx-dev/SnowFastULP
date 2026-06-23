@@ -32,7 +32,7 @@ func TestRenderFinalSummaryIncludesFooter(t *testing.T) {
 	m.ChunksTotal.Store(313)
 	m.BytesScanned.Store(512 << 20)
 	m.BytesScannedTotal.Store(2 << 30)
-	joined := strings.Join(renderFinalSummary(time.Now().Add(-time.Minute), m, "", ""), "\n")
+	joined := strings.Join(renderFinalSummary(time.Now().Add(-time.Minute), m, "", "", nil), "\n")
 	for _, want := range []string{"sfs is open-source", "https://snowx.dev", "COMPLETE", "42", "10", "36", "100", "313"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in:\n%s", want, joined)
@@ -123,7 +123,7 @@ func TestRenderFinalSummaryShowsOutputOutsideFrame(t *testing.T) {
 	m := &search.Metrics{}
 	m.Hits.Store(1)
 	path := filepath.Join(t.TempDir(), "hits", "gleeden.txt")
-	joined := strings.Join(renderFinalSummary(time.Now(), m, path, ""), "\n")
+	joined := strings.Join(renderFinalSummary(time.Now(), m, path, "", nil), "\n")
 	closeIdx := strings.Index(joined, "╰")
 	pathIdx := strings.Index(joined, path)
 	if closeIdx < 0 || pathIdx < closeIdx {

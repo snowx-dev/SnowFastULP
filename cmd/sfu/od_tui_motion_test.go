@@ -266,6 +266,9 @@ func TestUpgradePassHidesWorkerRowsShowsPartsProgress(t *testing.T) {
 	if !strings.Contains(out, "upgrading index format") {
 		t.Errorf("upgrade pass should show v2->v3 label\nout:\n%s", out)
 	}
+	if !strings.Contains(out, "One-time library upgrade") {
+		t.Errorf("upgrade pass should show one-time callout\nout:\n%s", out)
+	}
 	if strings.Contains(out, "indexing archives + writing .idx") {
 		t.Errorf("upgrade pass must not use decompress regen label\nout:\n%s", out)
 	}

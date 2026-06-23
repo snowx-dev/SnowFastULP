@@ -25,3 +25,16 @@ jobs:
 
       - name: Build (host platform smoke)
         run: make build
+
+  test-selfupdate-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Self-update package (race)
+        run: go test -race ./internal/selfupdate/...

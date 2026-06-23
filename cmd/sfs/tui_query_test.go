@@ -19,7 +19,7 @@ func TestRenderFullShowsQuery(t *testing.T) {
 
 func TestRenderFinalSummaryShowsQuery(t *testing.T) {
 	m := &search.Metrics{}
-	out := strings.Join(renderFinalSummary(time.Now(), m, "", "user@example"), "\n")
+	out := strings.Join(renderFinalSummary(time.Now(), m, "", "user@example", nil), "\n")
 	if !strings.Contains(out, "Query") || !strings.Contains(out, "user@example") {
 		t.Fatalf("renderFinalSummary missing query row:\n%s", out)
 	}
@@ -28,6 +28,13 @@ func TestRenderFinalSummaryShowsQuery(t *testing.T) {
 func TestRenderQueryLineEmptyOmitted(t *testing.T) {
 	if got := renderQueryLine("", 80); got != "" {
 		t.Fatalf("empty pattern should yield no row, got %q", got)
+	}
+}
+
+func TestRenderQueryLineMatchAll(t *testing.T) {
+	got := renderQueryLine("*", 80)
+	if !strings.Contains(got, "* (all lines)") {
+		t.Fatalf("match-all query should show (all lines), got %q", got)
 	}
 }
 

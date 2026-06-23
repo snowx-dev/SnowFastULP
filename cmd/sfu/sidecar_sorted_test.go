@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 // writeV2Sidecar writes a legacy unsorted v2 .idx fixture for migration tests.
@@ -181,6 +182,41 @@ func TestSidecarBucketKeysRangeRead(t *testing.T) {
 	}
 }
 
+// external-merge during in-place upgrade: huge v2 sidecar must still become sorted v3.
+func TestUpgradeV2SidecarToV3ExternalMerge(t *testing.T) {
+	old := sidecarSortMaxKeys
+	sidecarSortMaxKeys = 4
+	defer func() { sidecarSortMaxKeys = old }()
+
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "sfu_big.txt.zst")
+	keys := make([]uint64, 0, 80)
+	for i := 0; i < 80; i++ {
+		keys = append(keys, uint64((i*17)%31)) // unsorted + cross-batch dups
+	}
+	writeV2Sidecar(t, archive, keys)
+	path := sidecarPathForArchive(archive)
+
+	if _, err := upgradeSidecarToV3(context.Background(), path); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	got := readAllSidecarKeys(t, path)
+	assertSortedUnique(t, got)
+	want := slices.Clone(keys)
+	slices.Sort(want)
+	want = slices.Compact(want)
+	if !sliceEqualUint64(got, want) {
+		t.Fatalf("upgraded keys mismatch: got %d want %d", len(got), len(want))
+	}
+	hdr, err := readSidecarHeader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hdr.sorted() || hdr.formatVersion != sidecarFormatV3 {
+		t.Fatalf("expected v3 after spill upgrade, got v%d", hdr.formatVersion)
+	}
+}
+
 // Ctrl+C during migration: a cancelled upgrade must abort without touching the
 // original v2 sidecar — the library is never left half-written.
 func TestUpgradeSidecarToV3CancelLeavesOriginalIntact(t *testing.T) {
@@ -212,6 +248,55 @@ func TestUpgradeSidecarToV3CancelLeavesOriginalIntact(t *testing.T) {
 		t.Fatalf("sidecar should still be intact v2 after cancel; err=%v", herr)
 	}
 	// no leftover temp in the idx dir
+	tmps, _ := filepath.Glob(filepath.Join(dir, idxSubdirName, "*.tmp"))
+	if len(tmps) != 0 {
+		t.Errorf("cancelled upgrade left temp files: %v", tmps)
+	}
+}
+
+// mid-stream cancel on a large v2 sidecar: must abort without modifying the original.
+func TestUpgradeSidecarToV3CancelMidStreamLeavesOriginalIntact(t *testing.T) {
+	oldMask := sidecarUpgradeCancelCheckMask
+	sidecarUpgradeCancelCheckMask = 0xfff // poll often so cancel wins the race in tests
+	defer func() { sidecarUpgradeCancelCheckMask = oldMask }()
+
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "sfu_big.txt.zst")
+	const nKeys = 50_000
+	keys := make([]uint64, nKeys)
+	for i := range keys {
+		keys[i] = uint64((i * 17) % 999983)
+	}
+	writeV2Sidecar(t, archive, keys)
+	path := sidecarPathForArchive(archive)
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, uerr := upgradeSidecarToV3(ctx, path)
+		done <- uerr
+	}()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	if uerr := <-done; uerr == nil {
+		t.Fatal("cancelled mid-stream upgrade should return an error")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("original sidecar missing after cancelled upgrade: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("original v2 sidecar was modified by a mid-stream cancelled upgrade")
+	}
+	if hdr, herr := readSidecarHeader(path); herr != nil || hdr.sorted() {
+		t.Fatalf("sidecar should still be intact v2 after mid-stream cancel; err=%v", herr)
+	}
 	tmps, _ := filepath.Glob(filepath.Join(dir, idxSubdirName, "*.tmp"))
 	if len(tmps) != 0 {
 		t.Errorf("cancelled upgrade left temp files: %v", tmps)

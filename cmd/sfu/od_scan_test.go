@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -119,6 +121,14 @@ func TestClassifyPartSidecar(t *testing.T) {
 		t.Errorf("status = %v, want fresh", st)
 	}
 
+	// valid v2 sidecar, archive not newer => upgrade (not stale, not fresh)
+	writeV2Sidecar(t, archive, []uint64{99, 1, 42, 1})
+	if st, hdr := classifyPartSidecar(part); st != sidecarStatusUpgrade {
+		t.Errorf("status (v2 fresh) = %v, want upgrade", st)
+	} else if hdr == nil || hdr.sorted() {
+		t.Errorf("upgrade status should carry unsorted v2 header, got %+v", hdr)
+	}
+
 	// archive newer than sidecar => stale
 	future := time.Now().Add(time.Hour)
 	if err := os.Chtimes(archive, future, future); err != nil {
@@ -168,6 +178,107 @@ func TestRunODScanEmpty(t *testing.T) {
 	}
 	if len(res.DestSidecarPaths) != 0 {
 		t.Errorf("DestSidecarPaths len = %d, want 0", len(res.DestSidecarPaths))
+	}
+}
+
+// legacy v2 sidecar exists and is current: upgrade in place, no archive decompress.
+func TestRunODScanUpgradesLegacySidecarOnly(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "sfu_prev.txt.zst")
+	if err := os.WriteFile(archive, []byte("dummy archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keys := []uint64{10, 3, 7, 3, 0xdeadbeef}
+	writeV2Sidecar(t, archive, keys)
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(archive, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	tempDir := t.TempDir()
+	res, err := runODScanSync(context.Background(), odConfig{
+		Dest:            dir,
+		CurrentRunStamp: "sfu_self",
+		Buckets:         4,
+		TempDir:         tempDir,
+	}, &odMetrics{})
+	if err != nil {
+		t.Fatalf("runODScan: %v", err)
+	}
+	if res.ArchivesRegen != 0 {
+		t.Errorf("ArchivesRegen = %d, want 0 (upgrade-only, no decompress)", res.ArchivesRegen)
+	}
+	if res.ArchivesFresh != 1 {
+		t.Errorf("ArchivesFresh = %d, want 1", res.ArchivesFresh)
+	}
+	if res.ArchivesUpgraded != 1 {
+		t.Errorf("ArchivesUpgraded = %d, want 1", res.ArchivesUpgraded)
+	}
+	hdr, err := readSidecarHeader(sidecarPathForArchive(archive))
+	if err != nil {
+		t.Fatalf("post-upgrade sidecar: %v", err)
+	}
+	if !hdr.sorted() || hdr.formatVersion != sidecarFormatV3 {
+		t.Errorf("sidecar not upgraded to v3: formatVersion=%d", hdr.formatVersion)
+	}
+	got := readAllSidecarKeys(t, sidecarPathForArchive(archive))
+	want := slices.Clone(keys)
+	slices.Sort(want)
+	want = slices.Compact(want)
+	if !sliceEqualUint64(got, want) {
+		t.Errorf("upgraded keys = %v, want %v", got, want)
+	}
+}
+
+// multi-part run: every part has a legacy v2 sidecar; all must upgrade to v3.
+func TestRunODScanUpgradesMultiPartLegacySidecars(t *testing.T) {
+	dir := t.TempDir()
+	runID := "sfu_multi"
+	const parts = 4
+	for i := 1; i <= parts; i++ {
+		name := fmt.Sprintf("%s_part%d.txt.zst", runID, i)
+		archive := filepath.Join(dir, name)
+		if err := os.WriteFile(archive, []byte(fmt.Sprintf("part %d", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		keys := []uint64{uint64(i), uint64(i * 1000), uint64(i * 1000), uint64(i << 32)}
+		writeV2Sidecar(t, archive, keys)
+	}
+	past := time.Now().Add(-time.Hour)
+	for i := 1; i <= parts; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("%s_part%d.txt.zst", runID, i))
+		if err := os.Chtimes(p, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tempDir := t.TempDir()
+	res, err := runODScanSync(context.Background(), odConfig{
+		Dest:            dir,
+		CurrentRunStamp: "sfu_self",
+		Buckets:         4,
+		TempDir:         tempDir,
+		Workers:         2,
+	}, &odMetrics{})
+	if err != nil {
+		t.Fatalf("runODScan: %v", err)
+	}
+	if res.ArchivesTotal != 1 || res.FilesTotal != parts {
+		t.Errorf("counts = archives %d files %d, want 1 / %d", res.ArchivesTotal, res.FilesTotal, parts)
+	}
+	if res.ArchivesRegen != 0 {
+		t.Errorf("ArchivesRegen = %d, want 0", res.ArchivesRegen)
+	}
+	for i := 1; i <= parts; i++ {
+		path := sidecarPathForArchive(filepath.Join(dir, fmt.Sprintf("%s_part%d.txt.zst", runID, i)))
+		hdr, herr := readSidecarHeader(path)
+		if herr != nil {
+			t.Fatalf("part %d sidecar: %v", i, herr)
+		}
+		if !hdr.sorted() || hdr.formatVersion != sidecarFormatV3 {
+			t.Errorf("part %d not v3: formatVersion=%d", i, hdr.formatVersion)
+		}
+		assertSortedUnique(t, readAllSidecarKeys(t, path))
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 )
 
 func TestFormatDuration(t *testing.T) {
@@ -376,7 +378,7 @@ func TestRenderDedupAndDoneFitsWidth(t *testing.T) {
 	for _, w := range []int{80, 60} {
 		now := time.Now()
 		ded := renderDedupLines(now, 48*time.Second, m, r, 290.1, 410.0, 240e6, 0, w)
-		done := renderFinalStdoutSummary(131*time.Second, m, r, w)
+		done := renderFinalStdoutSummary(131*time.Second, m, r, w, nil)
 		for _, ln := range append(ded, done...) {
 			if vw := tuiVisibleWidth(ln); vw > w {
 				t.Errorf("width=%d line visible width %d > %d: %q", w, vw, w, ln)
@@ -397,7 +399,7 @@ func TestRenderDoneIncludesAllSummaryFields(t *testing.T) {
 		totalInputs:    10_737_418_240, // 10 GB
 		inputFileCount: 4,
 	}
-	lines := renderFinalStdoutSummary(102*time.Second, m, r, 80)
+	lines := renderFinalStdoutSummary(102*time.Second, m, r, 80, nil)
 	joined := strings.Join(lines, "\n")
 	want := []string{
 		"COMPLETE",
@@ -417,6 +419,34 @@ func TestRenderDoneIncludesAllSummaryFields(t *testing.T) {
 	for _, s := range []string{"sfu is open-source", "https://snowx.dev"} {
 		if !strings.Contains(joined, s) {
 			t.Errorf("final summary missing footer %q in:\n%s", s, joined)
+		}
+	}
+}
+
+func TestRenderFinalStdoutSummaryUpdateNoticeFooter(t *testing.T) {
+	m := &metrics{}
+	m.linesUnique.Store(1)
+	r := &resolved{cfg: pipelineConfig{Output: "./out.txt"}}
+	notice := &selfupdate.Notice{Latest: "0.2.0", Command: "sfu update"}
+	joined := strings.Join(renderFinalStdoutSummary(time.Second, m, r, 86, notice), "\n")
+	for _, want := range []string{"Update available", "v0.2.0", "sfu update", "sfu is open-source", "https://snowx.dev"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in summary footer:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderFinalStdoutSummaryNoNoticeUsesPlainFooter(t *testing.T) {
+	m := &metrics{}
+	m.linesUnique.Store(1)
+	r := &resolved{cfg: pipelineConfig{Output: "./out.txt"}}
+	joined := strings.Join(renderFinalStdoutSummary(time.Second, m, r, 86, nil), "\n")
+	if strings.Contains(joined, "Update available") {
+		t.Fatalf("nil notice should not show update line:\n%s", joined)
+	}
+	for _, want := range []string{"sfu is open-source", "https://snowx.dev"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in footer:\n%s", want, joined)
 		}
 	}
 }
@@ -650,7 +680,7 @@ func TestRenderDoneShowsCompressionRatio(t *testing.T) {
 		totalInputs:    1 << 20,
 		inputFileCount: 1,
 	}
-	lines := renderFinalStdoutSummary(60*time.Second, m, r, 80)
+	lines := renderFinalStdoutSummary(60*time.Second, m, r, 80, nil)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "compressed") {
 		t.Errorf("DONE block missing compression ratio note:\n%s", joined)
@@ -677,7 +707,7 @@ func TestRenderDoneOutputFooterListsAllArchivesAligned(t *testing.T) {
 			filepath.Join(dir, "sfu_20260509_abc123_part3.txt.zst"),
 		},
 	}
-	lines := renderFinalStdoutSummary(time.Second, &metrics{}, r, 80)
+	lines := renderFinalStdoutSummary(time.Second, &metrics{}, r, 80, nil)
 	joined := strings.Join(lines, "\n")
 	if strings.Contains(joined, "more parts") {
 		t.Fatalf("should list paths explicitly, got:\n%s", joined)
@@ -712,7 +742,7 @@ func TestRenderDoneOutputFooterPlainLongPath(t *testing.T) {
 	// long suffix built inline, no checked-in personal mount path
 	longPath := filepath.Join(os.TempDir(), strings.Repeat("nest/", 20)+"sfu_20260509-203530.txt")
 	r := &resolved{cfg: pipelineConfig{Output: longPath}}
-	lines := renderFinalStdoutSummary(time.Second, &metrics{}, r, 80)
+	lines := renderFinalStdoutSummary(time.Second, &metrics{}, r, 80, nil)
 	var pathLine string
 	for _, ln := range lines {
 		if strings.Contains(ln, longPath) {

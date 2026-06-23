@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/search"
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
@@ -81,11 +82,15 @@ func renderQueryLine(pattern string, innerW int) string {
 	if pattern == "" {
 		return ""
 	}
+	display := pattern
+	if pattern == "*" {
+		display = "* (all lines)"
+	}
 	max := innerW - 16
 	if max < 8 {
 		max = 8
 	}
-	return labelStyle.Render("Query     ") + byteStyle.Render("\""+trimToDisplayWidth(pattern, max)+"\"")
+	return labelStyle.Render("Query     ") + byteStyle.Render("\""+trimToDisplayWidth(display, max)+"\"")
 }
 
 func stderrIsTTY() bool {
@@ -292,7 +297,7 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern 
 	return out
 }
 
-func renderFinalSummary(start time.Time, m *search.Metrics, outFile, pattern string) []string {
+func renderFinalSummary(start time.Time, m *search.Metrics, outFile, pattern string, notice *selfupdate.Notice) []string {
 	innerW := termWidth() - leftPad
 	elapsed := time.Since(start)
 	scannedDone, scannedTotal := searchBytes(m)
@@ -318,7 +323,7 @@ func renderFinalSummary(start time.Time, m *search.Metrics, outFile, pattern str
 	if footer := renderOutputFooter(outFile, gradStart, gradEnd); len(footer) > 0 {
 		out = append(out, footer...)
 	}
-	return append(out, renderLiveScreenFooter(termWidth())...)
+	return append(out, renderSummaryFooter(termWidth(), notice)...)
 }
 
 func formatCount(n int64) string {
@@ -470,13 +475,10 @@ func indentBlock(s string, pad int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+func renderFrostTagline(text string, spanStart, spanEnd float64) string {
 	run := []rune(text)
-	if len(run) == 0 || width <= 0 {
-		if width < 0 {
-			width = 0
-		}
-		return strings.Repeat(" ", width)
+	if len(run) == 0 {
+		return ""
 	}
 	var b strings.Builder
 	for i, r := range run {
@@ -492,7 +494,14 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 			Faint(true)
 		b.WriteString(st.Render(string(r)))
 	}
-	styled := b.String()
+	return b.String()
+}
+
+func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+	styled := renderFrostTagline(text, spanStart, spanEnd)
+	if width <= 0 {
+		return strings.Repeat(" ", width)
+	}
 	vw := tuiVisibleWidth(styled)
 	if vw > width {
 		return trimToDisplayWidth(styled, width)
@@ -501,6 +510,45 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 		return strings.Repeat(" ", width-vw) + styled
 	}
 	return styled
+}
+
+func renderUpdateNoticeLine(notice *selfupdate.Notice) string {
+	return interruptWarnStyle.Render("Update available: v"+notice.Latest) +
+		mutedStyle.Render(" · run: ") +
+		phaseStyle.Render(notice.Command)
+}
+
+func renderFooterRow(left, right string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	rw := tuiVisibleWidth(right)
+	maxLeft := width - rw - 1
+	if maxLeft < 0 {
+		maxLeft = 0
+	}
+	if lw := tuiVisibleWidth(left); lw > maxLeft {
+		left = trimToDisplayWidth(left, maxLeft)
+	}
+	lw := tuiVisibleWidth(left)
+	gap := width - lw - rw
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func renderSummaryFooter(width int, notice *selfupdate.Notice) []string {
+	if notice == nil {
+		return renderLiveScreenFooter(width)
+	}
+	if width < 1 {
+		width = tuiDisplayWidth
+	}
+	right1 := renderFrostTagline(tuiFooterLine1, 0.0, 0.5)
+	line1 := renderFooterRow(renderUpdateNoticeLine(notice), right1, width)
+	line2 := renderFrostTaglineRight(tuiFooterLine2, width, 0.2, 0.7)
+	return []string{"", line1, line2}
 }
 
 func renderLiveScreenFooter(width int) []string {
