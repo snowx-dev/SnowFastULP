@@ -158,8 +158,11 @@ func TestRunApplyOrderInvokedBinaryLast(t *testing.T) {
 
 	_, hooks := installTestBinaries(t, "old-sfu", "old-sfs", "sfu")
 	var applied []string
-	recordApplyTarget = func(path string) { applied = append(applied, filepath.Base(path)) }
-	t.Cleanup(func() { recordApplyTarget = nil })
+	applyPayloadHook = func(_ []byte, target string, _ []byte) error {
+		applied = append(applied, filepath.Base(target))
+		return nil
+	}
+	t.Cleanup(func() { applyPayloadHook = nil })
 
 	if err := run(nil, "0.1.1", new(bytes.Buffer), &testHooks{
 		releaseURL:     srv.URL + "/releases/latest",
@@ -214,6 +217,46 @@ func TestRunChecksumMismatchLeavesBinariesUntouched(t *testing.T) {
 	}
 	assertFileContents(t, filepath.Join(dir, "sfu"+exeExt()), "old-sfu")
 	assertFileContents(t, filepath.Join(dir, "sfs"+exeExt()), "old-sfs")
+}
+
+func TestRunPartialUpdateReportsVersionSkew(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	srv, _ := startMockReleaseServer(t, "0.1.2", suffix, []byte("new-sfu"), []byte("new-sfs"))
+	defer srv.Close()
+
+	_, hooks := installTestBinaries(t, "old-sfu", "old-sfs", "sfu")
+
+	// Invoked as sfu → apply order is [sfs, sfu]. Let the sibling (sfs) apply,
+	// then fail the invoked binary (sfu) so the pair ends up version-skewed.
+	applyPayloadHook = func(_ []byte, target string, _ []byte) error {
+		if productBasename(target) == "sfu" {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	}
+	t.Cleanup(func() { applyPayloadHook = nil })
+
+	err = run(nil, "0.1.1", new(bytes.Buffer), &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	})
+	if err == nil {
+		t.Fatal("expected a partial-update error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"updating sfu failed",
+		"already updated to 0.1.2: sfs",
+		"still on the old version: sfu",
+		"re-run `sfu update`",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("partial-update error missing %q:\n%s", want, msg)
+		}
+	}
 }
 
 func TestRunOnlySFUPresentUpdatesSingleBinary(t *testing.T) {

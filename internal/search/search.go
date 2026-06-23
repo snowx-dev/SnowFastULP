@@ -33,6 +33,13 @@ const (
 	// (256 KiB L2) or Zen 2/3 (512 KiB L2) lose ~3%, tune via -decode-step
 	defaultDecodeStep = 1 << 20
 	minDecodeStep     = 4 << 10
+
+	// maxDecoderWindow caps the zstd decompression window per decoder. Untrusted
+	// archives may declare a huge window (klauspost defaults to 512 MiB), which
+	// would let one crafted frame allocate that much × every worker. 128 MiB
+	// covers anything sfu writes (≤8 MiB) and standard `zstd --long` (≤128 MiB);
+	// a frame above this fails the chunk via OnChunkError rather than the run.
+	maxDecoderWindow = 128 << 20
 )
 
 // Hit is one pattern match.
@@ -214,20 +221,19 @@ func Run(cfg Config) error {
 		slot := &workerSlot{}
 		defer closeSlot(slot)
 
-		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxDecoderWindow))
 		if err != nil {
 			return
 		}
 		defer dec.Close()
 
 		for t := range tasks {
-			chunkBytes := t.chunk.UncompressedEnd - t.chunk.UncompressedStart
 			// on cancel: drain silently, skip bumpChunk + markChunkDone.
 			// signaling "done" would let OrderedPrinter flush partial results
 			if ctx.Err() != nil {
-				_ = chunkBytes
 				continue
 			}
+			chunkBytes := t.chunk.UncompressedEnd - t.chunk.UncompressedStart
 			file, err := openSlot(slot, t.archive)
 			if err != nil {
 				if cfg.OnChunkError != nil {
@@ -320,21 +326,23 @@ type localHit struct {
 
 // searchChunk decodes the chunk in decodeStep reads and, after each read,
 // flushes that step's matches via emit — so hits reach the caller continuously
-// rather than only when the whole chunk finishes. scratch is a reusable hit
-// buffer (caller-pooled); it's cleared after every flush. Returns the number of
-// hits emitted, whether the per-chunk cap (maxHits) truncated the chunk, and
-// any decode/emit error (hits found before an error are still emitted).
+// rather than only when the whole chunk finishes. A lineAssembler stitches
+// complete lines across read seams, so a matched line is never truncated at a
+// decode-step boundary (and a pattern straddling a seam needs no overlap window).
+// scratch is a reusable hit buffer (caller-pooled); it's cleared after every
+// flush. Returns the number of hits emitted, whether the per-chunk cap (maxHits)
+// truncated the chunk, and any decode/emit error (hits found before an error are
+// still emitted).
 func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, matchAll bool, metrics *Metrics, scratch []localHit, decodeStep, maxHits int, emit func([]localHit) error) (int, bool, error) {
-	matcher := newPatternMatcher(pattern)
-	overlap := len(pattern) - 1
+	var process processFn
 	if matchAll {
-		overlap = 0
-	} else if overlap < 0 {
-		overlap = 0
+		process = matchAllRegion
+	} else {
+		matcher := newPatternMatcher(pattern)
+		process = patternRegion(&matcher)
 	}
 
-	buf := make([]byte, outWin+overlap)
-	dst := buf[overlap:]
+	buf := make([]byte, outWin)
 	section := io.NewSectionReader(f, chunk.CompressedOffset, chunk.CompressedSize)
 	var src io.Reader = section
 	if ctx != nil {
@@ -343,12 +351,10 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 	dec.Reset(src)
 
 	absOff := chunk.UncompressedStart
-	first := true
 	capped := false
 	emitted := 0
 	hits := scratch[:0]
-	var carry []byte
-	var carryOff int64
+	var asm lineAssembler
 
 	// flush this step's accumulated hits, truncating to the per-chunk cap.
 	flush := func() error {
@@ -374,35 +380,17 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 				return emitted, capped, err
 			}
 		}
-		readLen := len(dst)
+		readLen := len(buf)
 		if readLen > decodeStep {
 			readLen = decodeStep
 		}
-		nOut, err := dec.Read(dst[:readLen])
+		nOut, err := dec.Read(buf[:readLen])
 		if nOut > 0 {
 			if metrics != nil {
 				metrics.BytesScanned.Add(int64(nOut))
 			}
-			var searchPtr []byte
-			var searchLen int
-			var base int64
-			if first {
-				searchPtr = dst[:nOut]
-				searchLen = nOut
-				base = absOff
-			} else {
-				searchPtr = buf[:overlap+nOut]
-				searchLen = overlap + nOut
-				base = absOff - int64(overlap)
-			}
-			if matchAll {
-				hits = appendAllLines(hits, &carry, &carryOff, searchPtr, base)
-			} else {
-				hits = appendHits(hits, searchPtr, searchLen, &matcher, base)
-			}
-
+			hits = asm.feed(hits, buf[:nOut], absOff, process)
 			absOff += int64(nOut)
-			first = false
 
 			// emit this step's hits so they reach the drain loop promptly
 			if ferr := flush(); ferr != nil {
@@ -413,15 +401,6 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 				capped = true
 				return emitted, capped, nil
 			}
-
-			if overlap > 0 {
-				if nOut >= overlap {
-					copy(buf, dst[nOut-overlap:nOut])
-				} else {
-					copy(buf, buf[nOut:overlap])
-					copy(buf[overlap-nOut:], dst[:nOut])
-				}
-			}
 		}
 		if err == io.EOF {
 			break
@@ -431,13 +410,11 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 		}
 	}
 
-	if matchAll && len(carry) > 0 {
-		hits = flushLineCarry(hits, carry, carryOff)
-		if ferr := flush(); ferr != nil {
-			return emitted, capped, ferr
-		}
+	// finalize the trailing line (no terminating newline) before the chunk ends.
+	hits = asm.flush(hits, process)
+	if ferr := flush(); ferr != nil {
+		return emitted, capped, ferr
 	}
-
 	return emitted, capped, nil
 }
 
@@ -453,29 +430,9 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-// writes matches into caller-owned dst slice, lets worker reuse pooled
-// backing across chunks, removes log2(N) slice-grow allocs per chunk
-func appendHits(dst []localHit, text []byte, textLen int, matcher *patternMatcher, baseOff int64) []localHit {
-	patLen := len(matcher.pat)
-	if patLen == 0 || textLen < patLen {
-		return dst
-	}
-	offset := 0
-	for offset+patLen <= textLen {
-		rel := matcher.find(text[offset:textLen])
-		if rel < 0 {
-			break
-		}
-		pos := offset + rel
-		line := extractLine(text, textLen, pos)
-		if line != "" {
-			dst = append(dst, localHit{offset: baseOff + int64(pos), line: line})
-		}
-		offset = pos + 1
-	}
-	return dst
-}
-
+// extractLine returns the complete line containing the match at matchPos. text
+// is a region of whole '\n'-terminated lines (assembled by lineAssembler), so the
+// surrounding newlines are always present — the line is never buffer-truncated.
 func extractLine(text []byte, textLen, matchPos int) string {
 	if matchPos >= textLen {
 		return ""
@@ -485,7 +442,7 @@ func extractLine(text []byte, textLen, matchPos int) string {
 	for start > 0 && text[start-1] != '\n' {
 		start--
 	}
-	for end < textLen && text[end] != '\n' && text[end] != 0 {
+	for end < textLen && text[end] != '\n' {
 		end++
 	}
 	// inline CRLF strip, cheaper than bytes.TrimRight on dense-hit path

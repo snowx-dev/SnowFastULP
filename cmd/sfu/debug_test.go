@@ -194,7 +194,7 @@ func TestChunkedZstdSinkLogsRotationEvents(t *testing.T) {
 	}
 	// 5 lines, chunkLines=2 => 2+2+1 = 3 archives, 2 rotations
 	for i := 0; i < 5; i++ {
-		if err := sink.writeLine("x", nil); err != nil {
+		if err := writeLine(sink, "x", nil); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
-	"time"
 )
 
 // writeV2Sidecar writes a legacy unsorted v2 .idx fixture for migration tests.
@@ -275,16 +274,25 @@ func TestUpgradeSidecarToV3CancelMidStreamLeavesOriginalIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Deterministically cancel mid-stream: the first poll fires at key 0, so
+	// cancelling on the second poll guarantees a batch of keys was already
+	// written to the temp before the upgrade aborts (no wall-clock race).
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, uerr := upgradeSidecarToV3(ctx, path)
-		done <- uerr
-	}()
-	time.Sleep(25 * time.Millisecond)
-	cancel()
-	if uerr := <-done; uerr == nil {
+	defer cancel()
+	var polls int
+	sidecarUpgradeOnCancelCheck = func() {
+		polls++
+		if polls == 2 {
+			cancel()
+		}
+	}
+	defer func() { sidecarUpgradeOnCancelCheck = nil }()
+
+	if _, uerr := upgradeSidecarToV3(ctx, path); uerr == nil {
 		t.Fatal("cancelled mid-stream upgrade should return an error")
+	}
+	if polls < 2 {
+		t.Fatalf("upgrade finished after %d poll(s); cancel never landed mid-stream", polls)
 	}
 
 	after, err := os.ReadFile(path)

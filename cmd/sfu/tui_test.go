@@ -667,7 +667,7 @@ func TestRenderDoneShowsCompressionRatio(t *testing.T) {
 	// repeated line = dramatic ratio
 	const N = 200
 	for i := 0; i < N; i++ {
-		if err := sink.writeLine("aaa.example.com:user@example.com:hunter2", m); err != nil {
+		if err := writeLine(sink, "aaa.example.com:user@example.com:hunter2", m); err != nil {
 			t.Fatal(err)
 		}
 	}

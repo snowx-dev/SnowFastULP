@@ -251,7 +251,7 @@ func TestOutputSinkZstdRoundTrip(t *testing.T) {
 		"b.example.com:user:p2",
 		"c.example.com:user:p3",
 	}
-	if err := sink.writeLine(want[0], m); err != nil {
+	if err := writeLine(sink, want[0], m); err != nil {
 		t.Fatal(err)
 	}
 	if err := sink.writeBatch([]byte(want[1]+"\n"+want[2]+"\n"), 2, m); err != nil {
@@ -369,7 +369,7 @@ func TestChunkedZstdSinkRotatesUniqueLines(t *testing.T) {
 	}
 	m := &metrics{}
 	for i := 0; i < 10; i++ {
-		if err := sink.writeLine(fmt.Sprintf("line%d", i), m); err != nil {
+		if err := writeLine(sink, fmt.Sprintf("line%d", i), m); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -482,7 +482,7 @@ func TestChunkedZstdSingleArchiveUsesDedupBasename(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
-		if err := sink.writeLine(fmt.Sprintf("x%d", i), nil); err != nil {
+		if err := writeLine(sink, fmt.Sprintf("x%d", i), nil); err != nil {
 			t.Fatal(err)
 		}
 	}

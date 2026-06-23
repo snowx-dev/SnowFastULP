@@ -59,7 +59,7 @@ func TestOutputSinkSearchSidecarOnlyWhenRequested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sink.writeLine("hello", nil); err != nil {
+	if err := writeLine(sink, "hello", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := sink.close(); err != nil {

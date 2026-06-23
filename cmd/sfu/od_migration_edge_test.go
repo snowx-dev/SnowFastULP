@@ -99,7 +99,7 @@ func TestClassifyPartSidecarArchiveNewerThanV2IsStale(t *testing.T) {
 		sidecarPath: sidecarPathForArchive(archive),
 	}
 	if fi, err := os.Stat(archive); err == nil {
-	 part.modTime = fi.ModTime()
+		part.modTime = fi.ModTime()
 	}
 	if st, _ := classifyPartSidecar(part); st != sidecarStatusStale {
 		t.Errorf("status = %v, want stale when archive newer than v2 sidecar", st)
@@ -197,11 +197,18 @@ func TestRunODScanUpgradeCancelMidStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Cancel deterministically once the upgrade is mid-stream (second poll),
+	// rather than racing a wall-clock sleep against a fast in-RAM migration.
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(25 * time.Millisecond)
-		cancel()
-	}()
+	defer cancel()
+	var polls int
+	sidecarUpgradeOnCancelCheck = func() {
+		polls++
+		if polls == 2 {
+			cancel()
+		}
+	}
+	defer func() { sidecarUpgradeOnCancelCheck = nil }()
 
 	_, err = runODScanSync(ctx, odConfig{
 		Dest:            dir,
@@ -212,6 +219,9 @@ func TestRunODScanUpgradeCancelMidStream(t *testing.T) {
 	}, &odMetrics{})
 	if err == nil {
 		t.Fatal("expected cancel during upgrade scan")
+	}
+	if polls < 2 {
+		t.Fatalf("upgrade finished after %d poll(s); cancel never landed mid-stream", polls)
 	}
 
 	got, rerr := os.ReadFile(path)

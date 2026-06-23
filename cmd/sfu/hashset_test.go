@@ -2,8 +2,17 @@ package main
 
 import (
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
+
+// Build sorts+dedups and adopts keys. Test-only: production always feeds the set
+// pre-sorted keys via adoptSorted (the k-way merge output), so this convenience
+// lives with the tests that exercise the set directly.
+func (s *sortedUint64Set) Build(keys []uint64) {
+	slices.Sort(keys)
+	s.adoptSorted(slices.Compact(keys))
+}
 
 func TestSortedUint64SetBasic(t *testing.T) {
 	var s sortedUint64Set

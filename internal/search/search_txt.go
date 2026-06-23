@@ -1,7 +1,6 @@
 package search
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,10 +9,6 @@ import (
 
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
 )
-
-// max on-disk backref to recover lines starting before the search buffer.
-// 64 KiB caps "reasonable line len", longer lines stay truncated
-const maxTxtLineBackref = 64 * 1024
 
 // TxtConfig holds plain-text search parameters.
 type TxtConfig struct {
@@ -167,82 +162,19 @@ func RunTxt(cfg TxtConfig) error {
 	return nil
 }
 
-// sliding-window BMH on plain text. seam-straddling matches recovered via
-// backref read from disk so emitted lines arent buffer-truncated
+// searchTxtFile streams a plain-text file in decode-step reads, assembling
+// complete lines across read seams via lineAssembler so a matched line is never
+// truncated at a buffer boundary — no overlap window or on-disk backref needed,
+// and pattern/match-all share one path.
 func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll bool, metrics *Metrics) ([]localHit, error) {
+	var process processFn
 	if matchAll {
-		return searchTxtFileAll(ctx, f, metrics)
-	}
-	matcher := newPatternMatcher(pattern)
-	overlap := len(pattern) - 1
-	if overlap < 0 {
-		overlap = 0
+		process = matchAllRegion
+	} else {
+		matcher := newPatternMatcher(pattern)
+		process = patternRegion(&matcher)
 	}
 
-	buf := make([]byte, outWin+overlap)
-	dst := buf[overlap:]
-	var src io.Reader = f
-	if ctx != nil {
-		src = &ctxReader{ctx: ctx, r: f}
-	}
-
-	absOff := int64(0)
-	first := true
-	var hits []localHit
-
-	for {
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
-				return hits, err
-			}
-		}
-		readLen := len(dst)
-		if readLen > defaultDecodeStep {
-			readLen = defaultDecodeStep
-		}
-		n, err := src.Read(dst[:readLen])
-		if n > 0 {
-			if metrics != nil {
-				metrics.BytesScanned.Add(int64(n))
-			}
-			var searchPtr []byte
-			var searchLen int
-			var base int64
-			if first {
-				searchPtr = dst[:n]
-				searchLen = n
-				base = absOff
-			} else {
-				searchPtr = buf[:overlap+n]
-				searchLen = overlap + n
-				base = absOff - int64(overlap)
-			}
-			hits = append(hits, findHitsTxt(searchPtr, searchLen, &matcher, base, f)...)
-
-			absOff += int64(n)
-			first = false
-
-			if overlap > 0 {
-				if n >= overlap {
-					copy(buf, dst[n-overlap:n])
-				} else {
-					copy(buf, buf[n:overlap])
-					copy(buf[overlap-n:], dst[:n])
-				}
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return hits, err
-		}
-	}
-
-	return hits, nil
-}
-
-func searchTxtFileAll(ctx context.Context, f *os.File, metrics *Metrics) ([]localHit, error) {
 	buf := make([]byte, outWin)
 	var src io.Reader = f
 	if ctx != nil {
@@ -251,8 +183,7 @@ func searchTxtFileAll(ctx context.Context, f *os.File, metrics *Metrics) ([]loca
 
 	absOff := int64(0)
 	var hits []localHit
-	var carry []byte
-	var carryOff int64
+	var asm lineAssembler
 
 	for {
 		if ctx != nil {
@@ -269,7 +200,7 @@ func searchTxtFileAll(ctx context.Context, f *os.File, metrics *Metrics) ([]loca
 			if metrics != nil {
 				metrics.BytesScanned.Add(int64(n))
 			}
-			hits = appendAllLines(hits, &carry, &carryOff, buf[:n], absOff)
+			hits = asm.feed(hits, buf[:n], absOff, process)
 			absOff += int64(n)
 		}
 		if err == io.EOF {
@@ -279,75 +210,6 @@ func searchTxtFileAll(ctx context.Context, f *os.File, metrics *Metrics) ([]loca
 			return hits, err
 		}
 	}
-	if len(carry) > 0 {
-		hits = flushLineCarry(hits, carry, carryOff)
-	}
-	return hits, nil
-}
 
-// like appendHits but uses extractLineWithBackref so seam matches arent truncated
-func findHitsTxt(text []byte, textLen int, matcher *patternMatcher, baseOff int64, f *os.File) []localHit {
-	patLen := len(matcher.pat)
-	if patLen == 0 || textLen < patLen {
-		return nil
-	}
-	var hits []localHit
-	offset := 0
-	for offset+patLen <= textLen {
-		rel := matcher.find(text[offset:textLen])
-		if rel < 0 {
-			break
-		}
-		pos := offset + rel
-		line := extractLineWithBackref(text, textLen, pos, baseOff, f)
-		if line != "" {
-			hits = append(hits, localHit{offset: baseOff + int64(pos), line: line})
-		}
-		offset = pos + 1
-	}
-	return hits
-}
-
-// returns full line at matchPos. if line starts at text[0] and we're past
-// the file head, reads backward up to maxTxtLineBackref to grab the prefix
-func extractLineWithBackref(text []byte, textLen, matchPos int, bufStartAbs int64, f *os.File) string {
-	if matchPos >= textLen {
-		return ""
-	}
-	start := matchPos
-	end := matchPos
-	for start > 0 && text[start-1] != '\n' {
-		start--
-	}
-	for end < textLen && text[end] != '\n' && text[end] != 0 {
-		end++
-	}
-	line := bytes.TrimRight(text[start:end], "\r")
-	if start != 0 || bufStartAbs == 0 || f == nil {
-		return string(line)
-	}
-	backStart := bufStartAbs - maxTxtLineBackref
-	if backStart < 0 {
-		backStart = 0
-	}
-	backLen := bufStartAbs - backStart
-	if backLen <= 0 {
-		return string(line)
-	}
-	back := make([]byte, backLen)
-	n, err := f.ReadAt(back, backStart)
-	if err != nil && err != io.EOF {
-		return string(line)
-	}
-	back = back[:n]
-	if i := bytes.LastIndexByte(back, '\n'); i >= 0 {
-		back = back[i+1:]
-	} else if backStart > 0 {
-		// no newline in backref window, keep truncated line vs incomplete chunk
-		return string(line)
-	}
-	full := make([]byte, 0, len(back)+len(line))
-	full = append(full, back...)
-	full = append(full, line...)
-	return string(bytes.TrimRight(full, "\r"))
+	return asm.flush(hits, process), nil
 }

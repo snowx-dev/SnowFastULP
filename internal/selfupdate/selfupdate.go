@@ -41,11 +41,8 @@ const (
 	maxDownloadSize = 64 << 20 // release binaries are ~5 MiB today
 )
 
-// releaseAPIURL is the GitHub /releases/latest endpoint. Tests override via
-// withTestHooks to point at an httptest.Server.
-var releaseAPIURL = latestURL
-
 // testHooks holds optional overrides used by integration tests in this package.
+// Tests set releaseURL to point fetches at an httptest.Server.
 type testHooks struct {
 	releaseURL     string
 	executablePath string
@@ -55,7 +52,7 @@ func (h *testHooks) releaseEndpoint() string {
 	if h != nil && h.releaseURL != "" {
 		return h.releaseURL
 	}
-	return releaseAPIURL
+	return latestURL
 }
 
 func (h *testHooks) resolveSelf() (string, error) {
@@ -97,11 +94,9 @@ type pendingUpdate struct {
 	hash   []byte
 }
 
-// applyPayloadHook, when non-nil, replaces applyPayload during tests.
+// applyPayloadHook, when non-nil, replaces applyPayload during tests (used both
+// to inject apply failures and to record apply order/targets).
 var applyPayloadHook func(data []byte, target string, wantHash []byte) error
-
-// recordApplyTarget is test-only; records each target path passed to applyPayload.
-var recordApplyTarget func(string)
 
 // Run executes the update subcommand. args are the tokens following "update".
 // currentVersion is the embedded version.String of the running binary. Output
@@ -110,6 +105,18 @@ var recordApplyTarget func(string)
 // stated in the message.
 func Run(args []string, currentVersion string, out io.Writer) error {
 	return run(args, currentVersion, out, nil)
+}
+
+// Dispatch runs the update subcommand when args invokes it ("update"/"upgrade").
+// args are the CLI tokens after the program name (os.Args[1:]). It returns
+// handled=true when the update path ran — the caller should then exit — together
+// with the update result; for any other args it returns (false, nil) so the
+// caller proceeds normally. Both sfu and sfs share this dispatch.
+func Dispatch(args []string, currentVersion string, out io.Writer) (handled bool, err error) {
+	if len(args) == 0 || (args[0] != "update" && args[0] != "upgrade") {
+		return false, nil
+	}
+	return true, Run(args[1:], currentVersion, out)
 }
 
 func run(args []string, currentVersion string, out io.Writer, hooks *testHooks) error {
@@ -178,11 +185,25 @@ func run(args []string, currentVersion string, out io.Writer, hooks *testHooks) 
 	// Apply siblings first, the invoked binary last — if apply aborts midway,
 	// the running executable is still the old build and the user can retry.
 	order := applyOrder(pending, invokedBin)
+	var done []string
 	for _, i := range order {
 		u := pending[i]
 		if err := applyPayload(payloads[i], u.target, u.hash); err != nil {
+			if len(done) > 0 {
+				// A sibling already swapped: the pair is now version-skewed.
+				// Say so explicitly (the binaries are meant to move in lockstep)
+				// and point at the safe recovery — re-running finishes the job.
+				return fmt.Errorf(
+					"updating %s failed: %w\n"+
+						"  already updated to %s: %s\n"+
+						"  still on the old version: %s\n"+
+						"  the binaries are now out of step — re-run `%s update` to finish",
+					u.bin, err, latest, strings.Join(done, ", "),
+					strings.Join(notUpdated(pending, done), ", "), invokedBin)
+			}
 			return fmt.Errorf("updating %s failed: %w", u.bin, err)
 		}
+		done = append(done, u.bin)
 	}
 
 	updated := make([]string, len(pending))
@@ -293,6 +314,22 @@ func applyOrder(pending []pendingUpdate, invokedBin string) []int {
 	return order
 }
 
+// notUpdated returns the pending binaries not present in done, preserving
+// pending order — i.e. the ones still on the old version after a partial apply.
+func notUpdated(pending []pendingUpdate, done []string) []string {
+	doneSet := make(map[string]bool, len(done))
+	for _, b := range done {
+		doneSet[b] = true
+	}
+	var rest []string
+	for _, u := range pending {
+		if !doneSet[u.bin] {
+			rest = append(rest, u.bin)
+		}
+	}
+	return rest
+}
+
 func downloadVerified(url string, wantHash []byte, hooks *testHooks) ([]byte, error) {
 	body, err := httpGet(url, hooks)
 	if err != nil {
@@ -317,9 +354,6 @@ func downloadVerified(url string, wantHash []byte, hooks *testHooks) ([]byte, er
 func applyPayload(data []byte, target string, wantHash []byte) error {
 	if applyPayloadHook != nil {
 		return applyPayloadHook(data, target, wantHash)
-	}
-	if recordApplyTarget != nil {
-		recordApplyTarget(target)
 	}
 	err := selfupdate.Apply(bytes.NewReader(data), selfupdate.Options{
 		TargetPath: target,

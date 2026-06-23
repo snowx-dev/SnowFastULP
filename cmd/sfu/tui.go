@@ -768,7 +768,6 @@ func renderRemovedRows(bullets []string, maxInnerWidth int) []string {
 	}
 	const label = "Removed  " // 9 cells, matches Input/Output/Unique
 	sep := mutedStyle.Render(" · ")
-	sepWidth := tuiVisibleWidth(sep)
 
 	// try single-line first. tuiVisibleWidth strips ANSI styling
 	singleLineRest := strings.Join(bullets, sep)
@@ -785,7 +784,6 @@ func renderRemovedRows(bullets []string, maxInnerWidth int) []string {
 	for _, b := range bullets[1:] {
 		rows = append(rows, indent+b)
 	}
-	_ = sepWidth // kept for future widening logic
 	return rows
 }
 

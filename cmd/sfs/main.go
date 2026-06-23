@@ -41,8 +41,8 @@ func main() {
 
 	// `update` / `upgrade`: replace installed sfu+sfs with the latest release.
 	// Handled before cfg load so a bad config can't block self-update.
-	if len(os.Args) > 1 && (os.Args[1] == "update" || os.Args[1] == "upgrade") {
-		if err := selfupdate.Run(os.Args[2:], version.String, os.Stdout); err != nil {
+	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
+		if err != nil {
 			fatal("%v", err)
 		}
 		return
@@ -262,10 +262,8 @@ func main() {
 		dbg.logCompletion(metrics, wall, debugInfo)
 	}
 	if !*silent {
-		var updateNotice *selfupdate.Notice
-		if !*noUpdateCheck {
-			updateNotice = updateChecker.NoticeForSummary()
-		}
+		// NoticeForSummary returns nil when the check is disabled, so no extra guard.
+		updateNotice := updateChecker.NoticeForSummary()
 		for _, ln := range renderFinalSummary(started, metrics, *outFile, pattern, updateNotice) {
 			fmt.Fprintln(os.Stderr, ln)
 		}
@@ -388,6 +386,17 @@ func run(ctx context.Context, cfg runConfig) error {
 		}
 	}
 
+	// Notices (chunk-cap, skipped corrupt archives) are collected during the run
+	// and printed only after the alt-screen is torn down, so they never corrupt a
+	// live TUI frame. addNote is safe to call from worker goroutines.
+	var noteMu sync.Mutex
+	var notes []string
+	addNote := func(s string) {
+		noteMu.Lock()
+		notes = append(notes, s)
+		noteMu.Unlock()
+	}
+
 	uiDone := make(chan struct{})
 	var uiWG sync.WaitGroup
 	uiWG.Add(1)
@@ -407,12 +416,17 @@ func run(ctx context.Context, cfg runConfig) error {
 		if ok && capture != nil {
 			capture.ReplayToStdout()
 		}
+		noteMu.Lock()
+		for _, n := range notes {
+			fmt.Fprintln(os.Stderr, n)
+		}
+		noteMu.Unlock()
 	}()
 
 	var sidecars map[string]*index.Sidecar
 	if !cfg.txtMode {
 		var err error
-		sidecars, err = indexArchives(ctx, cfg.archives, cfg.workers, metrics, cfg.debug)
+		sidecars, err = indexArchives(ctx, cfg.archives, cfg.workers, metrics, cfg.debug, addNote)
 		if err != nil {
 			return err
 		}
@@ -445,11 +459,23 @@ func run(ctx context.Context, cfg runConfig) error {
 	writeHit := func(h search.Hit) error {
 		return sink.WriteHit(h)
 	}
+	// archiveDoneCh carries "this archive is fully processed" from the search
+	// workers to the drain loop. Only used for ordered -o output, where it lets
+	// the OrderedPrinter flush and release completed archives mid-run instead of
+	// holding every hit in memory until the search finishes. Buffered past the
+	// archive count so a worker's done-callback never blocks.
+	var archiveDoneCh chan int
 	if orderedOutput {
+		archiveDoneCh = make(chan int, len(cfg.archives)+1)
 		printer = search.NewOrderedPrinter(func(h search.Hit) error {
 			return sink.WriteHit(h)
 		})
 		writeHit = printer.Add
+	}
+	onArchiveDone := func(ord int) {
+		if archiveDoneCh != nil {
+			archiveDoneCh <- ord
+		}
 	}
 
 	var firstHit sync.Once
@@ -482,6 +508,7 @@ func run(ctx context.Context, cfg runConfig) error {
 				Metrics:    metrics,
 				Hits:       hitCh,
 				ArchiveOrd: archiveOrd,
+				OnFileDone: onArchiveDone,
 				OnFileError: func(path string, err error) {
 					if cfg.debug != nil {
 						cfg.debug.Event("file error path=%s err=%v", filepath.Base(path), err)
@@ -501,14 +528,15 @@ func run(ctx context.Context, cfg runConfig) error {
 				Metrics:         metrics,
 				Hits:            hitCh,
 				ArchiveOrd:      archiveOrd,
+				OnArchiveDone:   onArchiveDone,
 				OnChunkError: func(archive string, chunkID int, err error) {
 					if cfg.debug != nil {
 						cfg.debug.Event("chunk error archive=%s chunk=%d err=%v", filepath.Base(archive), chunkID, err)
 					}
 				},
 				OnChunkCapped: func(archive string, chunkID int, emitted int) {
-					fmt.Fprintf(os.Stderr, "note: %s chunk %d: hit cap reached (%d hits); chunk truncated\n",
-						filepath.Base(archive), chunkID, emitted)
+					addNote(fmt.Sprintf("note: %s chunk %d: hit cap reached (%d hits); chunk truncated",
+						filepath.Base(archive), chunkID, emitted))
 					if cfg.debug != nil {
 						cfg.debug.Event("chunk capped archive=%s chunk=%d emitted=%d", filepath.Base(archive), chunkID, emitted)
 					}
@@ -520,43 +548,86 @@ func run(ctx context.Context, cfg runConfig) error {
 
 	var emitted int
 	limitReached := false
+
+	// handleHit records one hit. Returns stop=true when the -l limit is reached
+	// (cancel() halts workers; limitReached makes the ctx-cancelled state below a
+	// clean exit). Shared by the main drain and the archive-done pre-drain.
+	handleHit := func(h search.Hit) (stop bool, err error) {
+		firstHit.Do(func() {
+			if cfg.debug != nil {
+				cfg.debug.Event("first hit archive=%s chunk=%d offset=%d", filepath.Base(h.Archive), h.ChunkID, h.Offset)
+			}
+		})
+		if err := writeHit(h); err != nil {
+			return false, fmt.Errorf("write hit: %w", err)
+		}
+		emitted++
+		if streamFlush {
+			if err := sink.Flush(); err != nil {
+				return false, fmt.Errorf("flush hit: %w", err)
+			}
+		}
+		// echo to the on-screen viewport as found (-o + TUI only)
+		if liveSink != nil {
+			if err := liveSink.WriteHit(h); err != nil {
+				return false, fmt.Errorf("write live hit: %w", err)
+			}
+			if err := liveSink.Flush(); err != nil {
+				return false, fmt.Errorf("flush live hit: %w", err)
+			}
+		}
+		if cfg.limit > 0 && emitted >= cfg.limit {
+			limitReached = true
+			cancel()
+			return true, nil
+		}
+		return false, nil
+	}
+
+	// drainBuffered consumes hits already queued on hitCh, non-blocking. A done
+	// signal for an archive is sent only after every one of its chunks/files has
+	// finished, so all that archive's hits are guaranteed already on hitCh by
+	// then — draining them here before MarkArchiveDone is what keeps a late hit
+	// from being stranded past an already-flushed archive.
+	drainBuffered := func() (stop bool, err error) {
+		for {
+			select {
+			case h, ok := <-hitCh:
+				if !ok {
+					return false, nil
+				}
+				if stop, err := handleHit(h); err != nil || stop {
+					return stop, err
+				}
+			default:
+				return false, nil
+			}
+		}
+	}
+
 drainHits:
 	for {
 		select {
 		case <-ctx.Done():
 			break drainHits
+		case ord := <-archiveDoneCh:
+			// Flush and release this archive (plus any contiguous completed
+			// ones) mid-run, so -o output doesn't accumulate every hit in RAM.
+			if stop, err := drainBuffered(); err != nil {
+				return err
+			} else if stop {
+				break drainHits
+			}
+			if err := printer.MarkArchiveDone(ord); err != nil {
+				return fmt.Errorf("write hit: %w", err)
+			}
 		case h, ok := <-hitCh:
 			if !ok {
 				break drainHits
 			}
-			firstHit.Do(func() {
-				if cfg.debug != nil {
-					cfg.debug.Event("first hit archive=%s chunk=%d offset=%d", filepath.Base(h.Archive), h.ChunkID, h.Offset)
-				}
-			})
-			if err := writeHit(h); err != nil {
-				return fmt.Errorf("write hit: %w", err)
-			}
-			emitted++
-			if streamFlush {
-				if err := sink.Flush(); err != nil {
-					return fmt.Errorf("flush hit: %w", err)
-				}
-			}
-			// echo to the on-screen viewport as found (-o + TUI only)
-			if liveSink != nil {
-				if err := liveSink.WriteHit(h); err != nil {
-					return fmt.Errorf("write live hit: %w", err)
-				}
-				if err := liveSink.Flush(); err != nil {
-					return fmt.Errorf("flush live hit: %w", err)
-				}
-			}
-			// -l: stop the search once N hits are out. cancel() halts workers;
-			// limitReached makes the ctx-cancelled state below a clean exit.
-			if cfg.limit > 0 && emitted >= cfg.limit {
-				limitReached = true
-				cancel()
+			if stop, err := handleHit(h); err != nil {
+				return err
+			} else if stop {
 				break drainHits
 			}
 		}
@@ -593,7 +664,7 @@ drainHits:
 	return nil
 }
 
-func indexArchives(ctx context.Context, archives []string, workers int, metrics *search.Metrics, dbg *debugLog) (map[string]*index.Sidecar, error) {
+func indexArchives(ctx context.Context, archives []string, workers int, metrics *search.Metrics, dbg *debugLog, note func(string)) (map[string]*index.Sidecar, error) {
 	sidecars := make(map[string]*index.Sidecar, len(archives))
 	var sidecarMu sync.Mutex
 	indexJobs := make(chan string, len(archives))
@@ -620,7 +691,7 @@ func indexArchives(ctx context.Context, archives []string, workers int, metrics 
 					if dbg != nil {
 						dbg.Event("index failed archive=%s err=%v", filepath.Base(arch), err)
 					}
-					fmt.Fprintf(os.Stderr, "index %s: %v\n", arch, err)
+					note(fmt.Sprintf("index %s: %v", arch, err))
 					continue
 				}
 				progress.Finish(archSize)

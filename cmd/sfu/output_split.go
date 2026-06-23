@@ -18,7 +18,6 @@ func zstPartPath(dir, stamp string, part int) string {
 
 // write side for dedup and fast path (single file or rotating zstd)
 type lineSink interface {
-	writeLine(line string, m *metrics) error
 	writeBatch(buf []byte, lineCount int, m *metrics) error
 	close() error
 	outputPaths() []string
@@ -33,45 +32,21 @@ type indexedLineSink interface {
 func newLineSink(r *resolved) (lineSink, error) {
 	writeSearchIdx := r.cfg.DestDedup && r.cfg.Compress
 	indexSidecar := r.cfg.DestDedup
-	if !r.cfg.Compress {
-		if indexSidecar {
-			s, err := newOutputSinkWithSidecar(r.cfg.Output, false, false)
-			if err != nil {
-				return nil, err
-			}
-			return s, nil
+
+	// chunked multi-part .zst output
+	if r.cfg.Compress && r.cfg.ZstChunkLines > 0 {
+		stamp := r.cfg.RunStamp
+		if stamp == "" {
+			stamp = r.cfg.RunStarted.Format("20060102")
 		}
-		s, err := newOutputSink(r.cfg.Output, false, false)
-		if err != nil {
-			return nil, err
-		}
-		return s, nil
+		return newChunkedZstdSink(filepath.Dir(r.cfg.Output), stamp, r.cfg.ZstChunkLines, r.cfg.Debug, writeSearchIdx, indexSidecar)
 	}
-	if r.cfg.ZstChunkLines <= 0 {
-		if indexSidecar {
-			s, err := newOutputSinkWithSidecar(r.cfg.Output, true, writeSearchIdx)
-			if err != nil {
-				return nil, err
-			}
-			return s, nil
-		}
-		s, err := newOutputSink(r.cfg.Output, true, writeSearchIdx)
-		if err != nil {
-			return nil, err
-		}
-		return s, nil
+
+	// single output file (plain or single-frame .zst)
+	if indexSidecar {
+		return newOutputSinkWithSidecar(r.cfg.Output, r.cfg.Compress, writeSearchIdx)
 	}
-	chunk := r.cfg.ZstChunkLines
-	dir := filepath.Dir(r.cfg.Output)
-	stamp := r.cfg.RunStamp
-	if stamp == "" {
-		stamp = r.cfg.RunStarted.Format("20060102")
-	}
-	out, err := newChunkedZstdSink(dir, stamp, chunk, r.cfg.Debug, writeSearchIdx, indexSidecar)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	return newOutputSink(r.cfg.Output, r.cfg.Compress, writeSearchIdx)
 }
 
 func sinkOutputPaths(s lineSink) []string {
@@ -81,11 +56,18 @@ func sinkOutputPaths(s lineSink) []string {
 	return s.outputPaths()
 }
 
+// removeOutputFiles discards a failed run's output. It removes each archive plus
+// any sidecars committed for it, so a failed/cancelled run never leaves an orphan
+// .idx pointing at a removed (or partial) archive — a later -od run would
+// otherwise read that sidecar as authoritative.
 func removeOutputFiles(paths []string) {
 	for _, p := range paths {
-		if p != "" {
-			_ = os.Remove(p)
+		if p == "" {
+			continue
 		}
+		_ = os.Remove(p)
+		_ = os.Remove(sidecarPathForArchive(p))
+		_ = os.Remove(searchSidecarPathForArchive(p))
 	}
 }
 
@@ -220,21 +202,6 @@ func (c *chunkedZstdSink) outputPaths() []string {
 	out := make([]string, len(c.paths))
 	copy(out, c.paths)
 	return out
-}
-
-func (c *chunkedZstdSink) writeLine(line string, m *metrics) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.linesInPart >= c.chunkLines {
-		if err := c.rotateLocked(); err != nil {
-			return err
-		}
-	}
-	err := c.cur.writeLine(line, m)
-	if err == nil {
-		c.linesInPart++
-	}
-	return err
 }
 
 func (c *chunkedZstdSink) writeBatch(buf []byte, lineCount int, m *metrics) error {

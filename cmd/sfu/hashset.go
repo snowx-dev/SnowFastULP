@@ -10,17 +10,12 @@ type sortedUint64Set struct {
 	keys []uint64
 }
 
-// sorts and dedups in place, takes ownership of keys
-func (s *sortedUint64Set) Build(keys []uint64) {
-	slices.Sort(keys)
-	s.keys = slices.Compact(keys)
-}
-
 // adoptSorted takes ownership of keys that are ALREADY sorted ascending and
-// deduplicated (e.g. the output of a k-way merge), skipping the Build sort.
+// deduplicated (e.g. the output of a k-way merge) — the only way production
+// populates the set.
 func (s *sortedUint64Set) adoptSorted(keys []uint64) { s.keys = keys }
 
-// O(log n), safe for concurrent readers post-Build
+// O(log n), safe for concurrent readers once the set is populated
 func (s *sortedUint64Set) Contains(k uint64) bool {
 	_, ok := slices.BinarySearch(s.keys, k)
 	return ok

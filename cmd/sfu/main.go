@@ -96,8 +96,8 @@ func main() {
 
 	// `update` / `upgrade`: replace installed sfu+sfs with the latest release.
 	// Handled before cfg load so a bad config can't block self-update.
-	if len(os.Args) > 1 && (os.Args[1] == "update" || os.Args[1] == "upgrade") {
-		if err := selfupdate.Run(os.Args[2:], version.String, os.Stdout); err != nil {
+	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
+		if err != nil {
 			fatalf("%v", err)
 		}
 		return
@@ -394,10 +394,8 @@ func main() {
 	// clean for `sfu in -o ./out/ | grep ...` pipelines. lipgloss strips
 	// styling automatically on non-TTY stderr
 	tw := termWidth()
-	var updateNotice *selfupdate.Notice
-	if !*noUpdateCheck {
-		updateNotice = updateChecker.NoticeForSummary()
-	}
+	// NoticeForSummary returns nil when the check is disabled, so no extra guard.
+	updateNotice := updateChecker.NoticeForSummary()
 	for _, ln := range renderFinalStdoutSummary(time.Since(started), m, r, tw, updateNotice) {
 		fmt.Fprintln(os.Stderr, ln)
 	}

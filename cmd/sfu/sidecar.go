@@ -67,6 +67,11 @@ var sidecarSortMaxKeys = (32 << 20) / sidecarKeyBytes // 32 MiB of keys
 // ~every 256K keys. tests may lower for mid-stream cancel coverage.
 var sidecarUpgradeCancelCheckMask uint64 = 0x3ffff
 
+// sidecarUpgradeOnCancelCheck, when non-nil, is invoked at each cancel-poll
+// during a v2→v3 upgrade (just before ctx is checked). Test-only: lets a test
+// cancel deterministically mid-stream instead of racing a wall-clock sleep.
+var sidecarUpgradeOnCancelCheck func()
+
 var (
 	errSidecarMissing   = errors.New("sidecar: not found")
 	errSidecarMalformed = errors.New("sidecar: malformed header")
@@ -277,6 +282,9 @@ func upgradeSidecarToV3(ctx context.Context, sidecarPath string) (uint64, error)
 	n := 0
 	feed := func(k uint64) error {
 		if sidecarUpgradeCancelCheckMask != 0 && uint64(n)&sidecarUpgradeCancelCheckMask == 0 {
+			if sidecarUpgradeOnCancelCheck != nil {
+				sidecarUpgradeOnCancelCheck()
+			}
 			if cerr := ctx.Err(); cerr != nil {
 				return cerr
 			}
@@ -536,10 +544,6 @@ func mergeKeyRuns(bw *bufio.Writer, runPaths []string) (uint64, error) {
 	return count, nil
 }
 
-// sidecarBucketKeys returns one bucket's keys from a SORTED (v3) sidecar,
-// located by binary search over the on-disk keys (positioned ReadAt, no full
-// read, cross-platform). mask = numBuckets-1; numBuckets must be a power of two
-// (top-bits range partition — see bucketIndex).
 // sidecarReader is an open, header-validated v3 sidecar. A dedup worker keeps
 // ONE open per library sidecar and range-reads many buckets through it, so each
 // sidecar is opened once per worker instead of once per (worker × bucket).
@@ -605,8 +609,16 @@ func (sr *sidecarReader) bucketKeys(bucketIdx, numBuckets int) ([]uint64, error)
 
 	cnt := hiIdx - loIdx
 	raw := make([]byte, cnt*sidecarKeyBytes)
-	if _, rerr := sr.f.ReadAt(raw, sidecarHeaderBytes+loIdx*sidecarKeyBytes); rerr != nil && rerr != io.EOF {
-		return nil, rerr
+	// A full read must return exactly len(raw) bytes. ReadAt may legitimately
+	// report io.EOF when the last byte lands on EOF (last-bucket case), so we
+	// key off the byte count, not the error: a short read means the file was
+	// truncated under us and the tail would silently decode as key 0 — fail loud.
+	got, rerr := sr.f.ReadAt(raw, sidecarHeaderBytes+loIdx*sidecarKeyBytes)
+	if got != len(raw) {
+		if rerr == nil {
+			rerr = io.ErrUnexpectedEOF
+		}
+		return nil, fmt.Errorf("sidecar: short read of bucket %d (%d/%d bytes): %w", bucketIdx, got, len(raw), rerr)
 	}
 	out := make([]uint64, cnt)
 	for i := range out {

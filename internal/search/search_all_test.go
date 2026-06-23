@@ -12,11 +12,10 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/index"
 )
 
-func TestAppendAllLinesSingleBuffer(t *testing.T) {
-	text := []byte("alpha\n\nbeta\r\n")
-	var carry []byte
-	var carryOff int64
-	hits := appendAllLines(nil, &carry, &carryOff, text, 0)
+func TestLineAssemblerMatchAllSingleBuffer(t *testing.T) {
+	var a lineAssembler
+	hits := a.feed(nil, []byte("alpha\n\nbeta\r\n"), 0, matchAllRegion)
+	hits = a.flush(hits, matchAllRegion)
 	if len(hits) != 2 {
 		t.Fatalf("hits = %d, want 2 (empty line skipped)", len(hits))
 	}
@@ -25,26 +24,74 @@ func TestAppendAllLinesSingleBuffer(t *testing.T) {
 	}
 }
 
-func TestAppendAllLinesSplitAcrossSteps(t *testing.T) {
-	var carry []byte
-	var carryOff int64
-	hits := appendAllLines(nil, &carry, &carryOff, []byte("hel"), 0)
-	hits = appendAllLines(hits, &carry, &carryOff, []byte("lo\nworld\n"), 3)
+func TestLineAssemblerMatchAllSplitAcrossSteps(t *testing.T) {
+	var a lineAssembler
+	hits := a.feed(nil, []byte("hel"), 0, matchAllRegion)
+	hits = a.feed(hits, []byte("lo\nworld\n"), 3, matchAllRegion)
+	hits = a.flush(hits, matchAllRegion)
 	if len(hits) != 2 {
 		t.Fatalf("hits = %d, want 2", len(hits))
 	}
 	if hits[0].line != "hello" || hits[1].line != "world" {
 		t.Fatalf("lines = %q, %q", hits[0].line, hits[1].line)
 	}
-	if len(carry) != 0 {
-		t.Fatalf("unexpected carry %q", carry)
+	if hits[0].offset != 0 || hits[1].offset != 6 {
+		t.Fatalf("offsets = %d,%d want 0,6", hits[0].offset, hits[1].offset)
 	}
 }
 
-func TestFlushLineCarryNoTrailingNewline(t *testing.T) {
-	hits := flushLineCarry(nil, []byte("tail"), 42)
+func TestLineAssemblerFlushTrailingLine(t *testing.T) {
+	var a lineAssembler
+	hits := a.feed(nil, []byte("tail"), 42, matchAllRegion)
+	hits = a.flush(hits, matchAllRegion)
 	if len(hits) != 1 || hits[0].line != "tail" || hits[0].offset != 42 {
 		t.Fatalf("hit = %+v", hits)
+	}
+}
+
+// A pattern match whose line straddles a feed seam must be emitted once, whole,
+// with the offset at the true match position — and not before the line completes.
+func TestLineAssemblerPatternAcrossSteps(t *testing.T) {
+	m := newPatternMatcher([]byte("KEY"))
+	proc := patternRegion(&m)
+	var a lineAssembler
+	hits := a.feed(nil, []byte("abK"), 0, proc) // line not terminated yet
+	if len(hits) != 0 {
+		t.Fatalf("emitted before line completed: %+v", hits)
+	}
+	hits = a.feed(hits, []byte("EYcd\n"), 3, proc)
+	hits = a.flush(hits, proc)
+	if len(hits) != 1 || hits[0].line != "abKEYcd" {
+		t.Fatalf("hit = %+v, want line abKEYcd", hits)
+	}
+	if hits[0].offset != 2 {
+		t.Fatalf("offset = %d, want 2 (true match position)", hits[0].offset)
+	}
+}
+
+// A newline-free run longer than maxLineBytes is matched on its head, truncated,
+// then the assembler resyncs at the next newline and resumes normal matching —
+// bounding memory without losing later lines.
+func TestLineAssemblerOverflowTruncatesAndResyncs(t *testing.T) {
+	m := newPatternMatcher([]byte("HEAD"))
+	proc := patternRegion(&m)
+	var a lineAssembler
+
+	big := bytes.Repeat([]byte("x"), maxLineBytes+1000) // no newline
+	copy(big[10:], []byte("HEAD"))
+	hits := a.feed(nil, big, 0, proc)
+	if len(hits) != 1 || hits[0].offset != 10 {
+		t.Fatalf("overflow head: hits = %d (want 1 at offset 10)", len(hits))
+	}
+	if len(hits[0].line) != maxLineBytes {
+		t.Fatalf("truncated head len = %d, want %d", len(hits[0].line), maxLineBytes)
+	}
+
+	// remainder of the over-long line, then a clean matchable line
+	hits = a.feed(hits, []byte("yy\nfoo:HEAD:bar\n"), int64(len(big)), proc)
+	hits = a.flush(hits, proc)
+	if len(hits) != 2 || hits[1].line != "foo:HEAD:bar" {
+		t.Fatalf("after resync: hits = %+v", hits)
 	}
 }
 

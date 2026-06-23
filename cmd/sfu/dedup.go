@@ -44,11 +44,9 @@ func newOutputSink(path string, compress bool, writeSearchIdx bool) (*outputSink
 	if err != nil {
 		return nil, err
 	}
-	storePath := path
+	storePath := filepath.Clean(path)
 	if a, aerr := filepath.Abs(path); aerr == nil {
 		storePath = filepath.Clean(a)
-	} else {
-		storePath = filepath.Clean(path)
 	}
 	s := &outputSink{f: f, path: storePath, writeSearchIdx: writeSearchIdx}
 	if compress {
@@ -115,28 +113,6 @@ func (s *outputSink) rotateZstFrameLocked() error {
 	return nil
 }
 
-// line + '\n'. fast path only, multi-worker callers should batch via writeBatch
-func (s *outputSink) writeLine(line string, m *metrics) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n, err := s.bw.WriteString(line)
-	if err != nil {
-		return err
-	}
-	if err := s.bw.WriteByte('\n'); err != nil {
-		return err
-	}
-	written := int64(n) + 1
-	if err := s.noteCompressedWrite(written); err != nil {
-		return err
-	}
-	if m != nil {
-		m.linesUnique.Add(1)
-		m.bytesWritten.Add(written)
-	}
-	return nil
-}
-
 // pre-formatted block of N \n-terminated lines under one mutex acquire.
 // caller must ensure every line ends with '\n'
 func (s *outputSink) writeBatch(buf []byte, lineCount int, m *metrics) error {
@@ -161,9 +137,10 @@ func (s *outputSink) writeBatch(buf []byte, lineCount int, m *metrics) error {
 }
 
 // pre-formatted lines + parallel dedup hashes. hashes and lineCount must match.
-// archive bytes land before sidecar keys so a failed write cannot leave a .idx
-// ahead of the archive. sidecar keys are still under the same mutex as archive
-// bytes so worker interleaving stays aligned with the part each line lands in.
+// Per batch, archive bytes are written before sidecar keys, all under one mutex,
+// so worker interleaving stays aligned with the part each line lands in. (A
+// failed *run* still discards both archive and sidecar together via
+// removeOutputFiles — see pipeline cleanup.)
 func (s *outputSink) writeBatchIndexed(buf []byte, hashes []uint64, lineCount int, m *metrics) error {
 	if len(buf) == 0 {
 		return nil
