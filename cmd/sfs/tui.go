@@ -24,6 +24,15 @@ const (
 	tuiFooterLine2 = "https://snowx.dev"
 )
 
+// Horizontal layout: the content block is indented leftPad on the LEFT and the
+// same on the RIGHT so it sits balanced in the terminal rather than flush
+// against the right edge.
+//
+//	contentWidth  — outer width of the bordered box / bar region.
+//	boxInnerWidth — usable text width inside gradientBox (2 borders + 4 padding).
+func contentWidth(width int) int  { return width - 2*leftPad }
+func boxInnerWidth(width int) int { return contentWidth(width) - 6 }
+
 const (
 	ansiHideCursor = "\033[?25l"
 	ansiShowCursor = "\033[?25h"
@@ -220,35 +229,49 @@ func (f *stderrFrame) draw(lines []string) {
 	drawLines()
 }
 
+func renderHeader(left, right string, width int) string {
+	pad := (width - leftPad) - tuiVisibleWidth(left) - tuiVisibleWidth(right)
+	if pad < 1 {
+		pad = 1
+	}
+	return left + strings.Repeat(" ", pad) + right
+}
+
 func renderInterrupt(elapsed time.Duration, width int) []string {
-	header := fmt.Sprintf("%s %s %s",
-		interruptWarnStyle.Render("[!]"),
-		phaseStyle.Render("INTERRUPTED — cleaning up"),
-		timeStyle.Render(elapsed.Truncate(time.Second).String()))
+	header := renderHeader(
+		interruptWarnStyle.Render("[!]")+"  "+phaseStyle.Render("INTERRUPTED — cleaning up"),
+		timeStyle.Render(elapsed.Truncate(time.Second).String()),
+		width,
+	)
 	inner := []string{
 		"Stopping index and search workers.",
 		"This usually takes a few seconds; please wait.",
 		"",
 		mutedStyle.Render("A second Ctrl+C will force-exit immediately."),
 	}
-	box := gradientBox(inner, width-leftPad, interruptStart, interruptEnd)
+	box := gradientBox(inner, contentWidth(width), interruptStart, interruptEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 	out := append([]string{"", header, ""}, boxLines...)
 	return append(out, renderLiveScreenFooter(width)...)
 }
 
 func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern string) []string {
-	width := termWidth()
-	innerW := width - leftPad
+	return renderFullAt(now, start, m, rates, pattern, termWidth())
+}
+
+func renderFullAt(now, start time.Time, m *search.Metrics, rates uiRates, pattern string, width int) []string {
+	contentW := contentWidth(width)
+	boxInner := boxInnerWidth(width)
 	phase := m.Phase.Load()
 	_, phaseLabel, boxStart, boxEnd, barStart, barEnd := phaseVisuals(phase, m)
 
 	elapsed := now.Sub(start)
 	spinner := spinnerStyle.Render(spinnerFrames[(now.UnixMilli()/100)%int64(len(spinnerFrames))])
-	header := fmt.Sprintf("%s %s %s",
-		spinner,
-		phaseStyle.Render("[sfs] "+phaseLabel),
-		timeStyle.Render(elapsed.Truncate(time.Second).String()))
+	header := renderHeader(
+		indentStr+spinner+"  "+phaseStyle.Render("[sfs] "+phaseLabel),
+		timeStyle.Render(elapsed.Truncate(time.Second).String()),
+		width,
+	)
 
 	archDone := m.ArchivesIndexed.Load()
 	archActive := m.IndexArchivesActive.Load()
@@ -259,7 +282,7 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern 
 	hits := m.Hits.Load()
 
 	inner := []string{renderThroughputRow(phase, rates), renderETARow(phase, rates)}
-	if q := renderQueryLine(pattern, innerW); q != "" {
+	if q := renderQueryLine(pattern, boxInner); q != "" {
 		inner = append(inner, q)
 	}
 	inner = append(inner,
@@ -285,9 +308,9 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern 
 		inner = append(inner, renderLibrarySizeRow(m))
 	}
 
-	box := gradientBox(inner, innerW, boxStart, boxEnd)
+	box := gradientBox(inner, contentW, boxStart, boxEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
-	barLines := renderLabeledProgressBars(phase, m, innerW, barStart, barEnd)
+	barLines := renderLabeledProgressBars(phase, m, contentW, barStart, barEnd)
 
 	// header, box, bar1, bar2, frost tagline footer (blanks between)
 	out := []string{header, ""}
@@ -298,12 +321,14 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern 
 }
 
 func renderFinalSummary(start time.Time, m *search.Metrics, outFile, pattern string, notice *selfupdate.Notice) []string {
-	innerW := termWidth() - leftPad
+	width := termWidth()
+	contentW := contentWidth(width)
+	boxInner := boxInnerWidth(width)
 	elapsed := time.Since(start)
 	scannedDone, scannedTotal := searchBytes(m)
 
 	inner := []string{}
-	if q := renderQueryLine(pattern, innerW); q != "" {
+	if q := renderQueryLine(pattern, boxInner); q != "" {
 		inner = append(inner, q)
 	}
 	inner = append(inner,
@@ -317,13 +342,13 @@ func renderFinalSummary(start time.Time, m *search.Metrics, outFile, pattern str
 			mutedStyle.Render(" / ")+byteStyle.Render(formatBytes(scannedTotal)),
 		renderLibrarySizeRow(m),
 	)
-	box := gradientBox(inner, innerW, gradStart, gradEnd)
+	box := gradientBox(inner, contentW, gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 	out := append([]string{phaseStyle.Render("✓ COMPLETE"), ""}, boxLines...)
 	if footer := renderOutputFooter(outFile, gradStart, gradEnd); len(footer) > 0 {
 		out = append(out, footer...)
 	}
-	return append(out, renderSummaryFooter(termWidth(), notice)...)
+	return append(out, renderSummaryFooter(width, notice)...)
 }
 
 func formatCount(n int64) string {
@@ -545,9 +570,10 @@ func renderSummaryFooter(width int, notice *selfupdate.Notice) []string {
 	if width < 1 {
 		width = tuiDisplayWidth
 	}
+	rowW := width - leftPad
 	right1 := renderFrostTagline(tuiFooterLine1, 0.0, 0.5)
-	line1 := renderFooterRow(renderUpdateNoticeLine(notice), right1, width)
-	line2 := renderFrostTaglineRight(tuiFooterLine2, width, 0.2, 0.7)
+	line1 := renderFooterRow(renderUpdateNoticeLine(notice), right1, rowW)
+	line2 := renderFrostTaglineRight(tuiFooterLine2, rowW, 0.2, 0.7)
 	return []string{"", line1, line2}
 }
 
@@ -555,10 +581,11 @@ func renderLiveScreenFooter(width int) []string {
 	if width < 1 {
 		width = tuiDisplayWidth
 	}
+	right := width - leftPad
 	return []string{
 		"",
-		renderFrostTaglineRight(tuiFooterLine1, width, 0.0, 0.5),
-		renderFrostTaglineRight(tuiFooterLine2, width, 0.2, 0.7),
+		renderFrostTaglineRight(tuiFooterLine1, right, 0.0, 0.5),
+		renderFrostTaglineRight(tuiFooterLine2, right, 0.2, 0.7),
 	}
 }
 

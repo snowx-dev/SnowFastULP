@@ -40,9 +40,9 @@ func TestRenderQueryLineMatchAll(t *testing.T) {
 
 func TestRenderQueryLineTruncatesLong(t *testing.T) {
 	long := strings.Repeat("a", 500)
-	got := renderQueryLine(long, 80)
-	if tuiVisibleWidth(got) > 80 {
-		t.Fatalf("query row width %d exceeds innerW 80", tuiVisibleWidth(got))
+	got := renderQueryLine(long, boxInnerWidth(80))
+	if tuiVisibleWidth(got) > boxInnerWidth(80) {
+		t.Fatalf("query row width %d exceeds innerW %d", tuiVisibleWidth(got), boxInnerWidth(80))
 	}
 	if !strings.Contains(got, "…") {
 		t.Fatalf("expected ellipsis in truncated query, got %q", got)

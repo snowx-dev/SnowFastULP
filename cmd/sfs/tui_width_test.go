@@ -59,3 +59,12 @@ func TestTuiVisibleWidthUnicode(t *testing.T) {
 	}
 	_, _ = utf8.DecodeRuneInString("a")
 }
+
+func TestContentWidthBalanced(t *testing.T) {
+	if got := contentWidth(80); got != 72 {
+		t.Fatalf("contentWidth(80) = %d, want 72", got)
+	}
+	if got := boxInnerWidth(80); got != 66 {
+		t.Fatalf("boxInnerWidth(80) = %d, want 66", got)
+	}
+}

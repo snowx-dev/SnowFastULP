@@ -133,3 +133,40 @@ func TestRenderFinalSummaryShowsOutputOutsideFrame(t *testing.T) {
 		t.Fatalf("missing sfu-style output gutter:\n%s", joined)
 	}
 }
+
+// bars start at col 4, aligned w/ stat rows above; balanced layout leaves a
+// matching 4-col right margin (same as sfu).
+func TestRenderFullBarsAreBalanced(t *testing.T) {
+	m := &search.Metrics{}
+	m.Phase.Store(search.PhaseSearch)
+	m.ArchivesTotal.Store(36)
+	m.ChunksTotal.Store(313)
+	m.BytesScannedTotal.Store(100)
+	m.BytesScanned.Store(29)
+	m.BytesChunkDone.Store(3)
+
+	lines := renderFullAt(time.Now(), time.Now(), m, uiRates{}, "", 80)
+	var bar1, bar2 string
+	for _, ln := range lines {
+		if !strings.HasPrefix(ln, indentStr) {
+			continue
+		}
+		if strings.Contains(ln, "█") || (strings.Contains(ln, "░") && (strings.Contains(ln, "%") || strings.Contains(ln, "----"))) {
+			if bar1 == "" {
+				bar1 = ln
+			} else if bar2 == "" {
+				bar2 = ln
+				break
+			}
+		}
+	}
+	if bar1 == "" || bar2 == "" {
+		t.Fatalf("could not find two progress bars in %d lines", len(lines))
+	}
+	if w := tuiVisibleWidth(bar1); w != 76 {
+		t.Errorf("bar1 visible width = %d, want 76", w)
+	}
+	if w := tuiVisibleWidth(bar1); w > 80-leftPad {
+		t.Errorf("bar1 right edge not balanced: width %d exceeds %d", w, 80-leftPad)
+	}
+}
