@@ -383,7 +383,7 @@ const maxDestBucketKeys = 1 << 30
 // (reused across buckets) so a sidecar is opened once per worker, not per
 // bucket. Returns the merged keys plus the pre-merge gathered count (for the
 // "reading index" progress, which is measured against per-sidecar key totals).
-func gatherDestBucketKeys(readers map[string]*sidecarReader, destSidecars []string, bucketIdx, numBuckets int) (keys []uint64, gathered int, err error) {
+func gatherDestBucketKeys(readers map[string]*sidecarReader, destSidecars []string, bucketIdx, numBuckets int, odm *odMetrics) (keys []uint64, gathered int, err error) {
 	runs := make([][]uint64, 0, len(destSidecars))
 	for _, path := range destSidecars {
 		sr := readers[path]
@@ -402,6 +402,9 @@ func gatherDestBucketKeys(readers map[string]*sidecarReader, destSidecars []stri
 		}
 		runs = append(runs, run)
 		gathered += len(run)
+		if odm != nil {
+			odm.keysLoaded.Add(int64(len(run)))
+		}
 		if int64(gathered) > maxDestBucketKeys {
 			return nil, 0, fmt.Errorf("dest bucket %d exceeds %d keys; increase -buckets for this library size",
 				bucketIdx, maxDestBucketKeys)
@@ -479,14 +482,9 @@ func dedupBucket(ws *dedupWorkState, inputPath string, bucketIdx, numBuckets int
 
 	var destSet sortedUint64Set
 	if len(destSidecars) > 0 {
-		keys, gathered, gerr := gatherDestBucketKeys(destReaders, destSidecars, bucketIdx, numBuckets)
+		keys, _, gerr := gatherDestBucketKeys(destReaders, destSidecars, bucketIdx, numBuckets, odm)
 		if gerr != nil {
 			return gerr
-		}
-		if odm != nil {
-			// "reading index" progress: keys pulled from the library this bucket
-			// (pre-merge count, to match keysTotalEstimate's per-sidecar totals)
-			odm.keysLoaded.Add(int64(gathered))
 		}
 		destSet.adoptSorted(keys) // already sorted + deduped by the k-way merge
 	}

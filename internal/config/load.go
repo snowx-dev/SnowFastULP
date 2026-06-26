@@ -34,6 +34,7 @@ func Load(path string, explicit bool) (File, error) {
 	var raw struct {
 		SFU SFUSection `toml:"sfu"`
 		SFS SFSSection `toml:"sfs"`
+		SFL SFLSection `toml:"sfl"`
 	}
 	if _, err := toml.DecodeFile(path, &raw); err != nil {
 		return File{}, fmt.Errorf("config: parse %s: %w", path, err)
@@ -42,6 +43,9 @@ func Load(path string, explicit bool) (File, error) {
 	if strings.TrimSpace(raw.SFU.O) != "" && strings.TrimSpace(raw.SFU.OD) != "" {
 		return File{}, fmt.Errorf("config: [sfu] cannot set both o and od")
 	}
+	if strings.TrimSpace(raw.SFL.O) != "" && strings.TrimSpace(raw.SFL.OD) != "" {
+		return File{}, fmt.Errorf("config: [sfl] cannot set both o and od")
+	}
 
 	baseDir := filepath.Dir(path)
 	return File{
@@ -49,6 +53,7 @@ func Load(path string, explicit bool) (File, error) {
 		baseDir: baseDir,
 		SFU:     raw.SFU,
 		SFS:     raw.SFS,
+		SFL:     raw.SFL,
 	}, nil
 }
 

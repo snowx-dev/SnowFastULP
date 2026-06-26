@@ -181,7 +181,7 @@ func TestRenderODSummaryLargeCountNotTruncated(t *testing.T) {
 		ArchivesTotal:   3,
 		TotalKeysLoaded: 15_234_567_890_123,
 	}
-	out := strings.Join(renderODSummary(r, 86), "\n")
+	out := strings.Join(renderODSummary(r, nil, 86), "\n")
 	want := formatCount(15_234_567_890_123)
 	if !strings.Contains(out, want) {
 		t.Errorf("recap missing full count %q\nout:\n%s", want, out)
@@ -198,12 +198,30 @@ func TestRenderODSummaryShowsUpgradeComplete(t *testing.T) {
 		TotalKeysLoaded:  1000,
 		ArchivesUpgraded: 3,
 	}
-	out := strings.Join(renderODSummary(r, 86), "\n")
+	out := strings.Join(renderODSummary(r, nil, 86), "\n")
 	if !strings.Contains(out, "Index format upgraded") {
 		t.Errorf("summary missing upgrade line\nout:\n%s", out)
 	}
 	if !strings.Contains(out, "3 parts") {
 		t.Errorf("summary missing part count\nout:\n%s", out)
+	}
+}
+
+func TestRenderODSummaryIncludesNewlyAddedLines(t *testing.T) {
+	r := &resolved{}
+	r.odResult = &odResult{
+		ArchivesTotal:   3,
+		TotalKeysLoaded: 1_000_000,
+	}
+	m := &metrics{}
+	m.linesUnique.Store(42_500)
+	out := strings.Join(renderODSummary(r, m, 86), "\n")
+	want := formatCount(1_042_500)
+	if !strings.Contains(out, want) {
+		t.Errorf("recap should include prior library + new unique lines; want %q\nout:\n%s", want, out)
+	}
+	if strings.Contains(out, formatCount(1_000_000)) {
+		t.Errorf("recap should not show pre-run count alone when new lines were added\nout:\n%s", out)
 	}
 }
 

@@ -787,6 +787,26 @@ func renderRemovedRows(bullets []string, maxInnerWidth int) []string {
 	return rows
 }
 
+// live -od dedup row: full comma-separated key counts, single line when
+// innerW allows else label on row 1 and counts on row 2 (no ellipsis).
+func renderLibraryMatchingRows(done, total int64, innerW int) []string {
+	const label = "Library      " // 13 cells, matches Progress/System rows
+	doneStr := countStyle.Render(formatCount(done))
+	totalStr := countStyle.Render(formatCount(total))
+	countsPart := doneStr + mutedStyle.Render(" / ") + totalStr + mutedStyle.Render(" loaded")
+	singleLineRest := mutedStyle.Render("matching · ") + countsPart
+	labelRendered := labelStyle.Render(label)
+	totalWidth := tuiVisibleWidth(label) + tuiVisibleWidth(singleLineRest)
+	if innerW <= 0 || totalWidth <= innerW {
+		return []string{labelRendered + singleLineRest}
+	}
+	indent := strings.Repeat(" ", tuiVisibleWidth(label))
+	return []string{
+		labelRendered + mutedStyle.Render("matching"),
+		indent + countsPart,
+	}
+}
+
 // chars fmt would use for n in base 10
 func numDigits(n int64) int {
 	if n == 0 {
@@ -1020,12 +1040,7 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 			if done > total {
 				done = total
 			}
-			innerLines = append(innerLines, labelStyle.Render("Library")+"      "+
-				mutedStyle.Render("matching · ")+
-				countStyle.Render(formatLibraryCount(done))+
-				mutedStyle.Render(" / ")+
-				countStyle.Render(formatLibraryCount(total))+
-				mutedStyle.Render(" loaded"))
+			innerLines = append(innerLines, renderLibraryMatchingRows(done, total, innerW)...)
 		}
 	}
 	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
@@ -1148,7 +1163,7 @@ func renderFinalStdoutSummary(elapsed time.Duration, m *metrics, r *resolved, wi
 	// push stats off-screen
 	out = append(out, renderDoneDeletedFooter(r)...)
 	out = append(out, renderDoneLines(elapsed, m, r, width)...)
-	if odLines := renderODSummary(r, width); len(odLines) > 0 {
+	if odLines := renderODSummary(r, m, width); len(odLines) > 0 {
 		out = append(out, odLines...)
 	}
 	out = append(out, renderDoneOutputFooter(r)...)
@@ -1167,10 +1182,20 @@ func pluralizeArchives(n int) string {
 	return fmt.Sprintf("%d archives", n)
 }
 
+// libraryLineCountTotal is the indexed line count across the whole library
+// after this run: prior archives (phase 0) plus unique lines just written.
+func libraryLineCountTotal(res *odResult, m *metrics) int64 {
+	total := int64(res.TotalKeysLoaded)
+	if m != nil {
+		total += m.linesUnique.Load()
+	}
+	return total
+}
+
 // post-run library recap shown below COMPLETE frame when -od used.
 // nil when no odResult or empty library (first -od run).
 // intentionally minimal so multi-billion entry libraries never ellipsise
-func renderODSummary(r *resolved, width int) []string {
+func renderODSummary(r *resolved, m *metrics, width int) []string {
 	if r == nil || r.odResult == nil {
 		return nil
 	}
@@ -1180,7 +1205,7 @@ func renderODSummary(r *resolved, width int) []string {
 	}
 
 	innerLines := []string{
-		uniqueStyle.Render(formatCount(int64(res.TotalKeysLoaded))),
+		uniqueStyle.Render(formatCount(libraryLineCountTotal(res, m))),
 		mutedStyle.Render("lines in library"),
 	}
 	if res.ArchivesUpgraded > 0 {

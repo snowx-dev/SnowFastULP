@@ -664,3 +664,38 @@ func itoaRaw(i int) string {
 	}
 	return string(b[pos:])
 }
+
+func TestGatherDestBucketKeysUpdatesKeysLoadedPerSidecar(t *testing.T) {
+	dir := t.TempDir()
+	arch1 := filepath.Join(dir, "sfu_a.txt.zst")
+	arch2 := filepath.Join(dir, "sfu_b.txt.zst")
+	writeSidecarKeysForTest(t, arch1, []uint64{1, 2, 3})
+	writeSidecarKeysForTest(t, arch2, []uint64{4, 5})
+
+	paths := []string{
+		sidecarPathForArchive(arch1),
+		sidecarPathForArchive(arch2),
+	}
+	odm := &odMetrics{}
+	readers := make(map[string]*sidecarReader)
+	_, gathered, err := gatherDestBucketKeys(readers, paths, 0, 4, odm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gathered != 5 {
+		t.Fatalf("gathered = %d, want 5", gathered)
+	}
+	if got := odm.keysLoaded.Load(); got != 5 {
+		t.Fatalf("keysLoaded = %d, want 5 (per-sidecar ticks)", got)
+	}
+
+	// nil odm must not panic
+	odm.keysLoaded.Store(0)
+	readers2 := make(map[string]*sidecarReader)
+	if _, _, err := gatherDestBucketKeys(readers2, paths, 0, 4, nil); err != nil {
+		t.Fatal(err)
+	}
+	if odm.keysLoaded.Load() != 0 {
+		t.Fatalf("nil odm should not update keysLoaded, got %d", odm.keysLoaded.Load())
+	}
+}

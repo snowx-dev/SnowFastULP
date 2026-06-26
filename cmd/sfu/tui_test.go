@@ -858,10 +858,88 @@ func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
 		t.Fatalf("dedup frame missing read counts:\n%s", out)
 	}
 
+	// large libraries use full comma counts, not compact B suffix
+	r.odMetrics.keysTotalEstimate.Store(3_320_076_168)
+	r.odMetrics.keysLoaded.Store(2_370_000_000)
+	outLarge := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n")
+	for _, want := range []string{"2,370,000,000", "3,320,076,168"} {
+		if !strings.Contains(outLarge, want) {
+			t.Fatalf("dedup frame missing full count %q:\n%s", want, outLarge)
+		}
+	}
+	for _, ln := range strings.Split(outLarge, "\n") {
+		if !strings.Contains(ln, "matching") {
+			continue
+		}
+		if strings.Contains(ln, "B") && !strings.Contains(ln, "Library") {
+			t.Fatalf("library matching row should not use compact counts:\n%s", ln)
+		}
+	}
+
 	// non-od dedup must NOT show the library row
 	plain := strings.Join(renderDedupLines(time.Now(), time.Second, m,
 		&resolved{totalInputs: 1, workers: 1, dedupWorkers: 1, bucketCount: 4}, 0, 0, 0, 0, 86), "\n")
 	if strings.Contains(plain, "Library") {
 		t.Fatalf("non-od dedup should not show Library row:\n%s", plain)
+	}
+}
+
+func TestRenderLibraryMatchingRowsSingleLineAtDefaultWidth(t *testing.T) {
+	done, total := int64(2_370_000_000), int64(3_320_076_168)
+	innerW := boxInnerWidth(86)
+	rows := renderLibraryMatchingRows(done, total, innerW)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row at width 86 inner=%d, got %d:\n%s", innerW, len(rows), strings.Join(rows, "\n"))
+	}
+	joined := rows[0]
+	for _, want := range []string{"matching", "2,370,000,000", "3,320,076,168", "loaded"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in %q", want, joined)
+		}
+	}
+}
+
+func TestRenderLibraryMatchingRowsStacksWhenNarrow(t *testing.T) {
+	done, total := int64(2_370_000_000), int64(3_320_076_168)
+	innerW := boxInnerWidth(60)
+	rows := renderLibraryMatchingRows(done, total, innerW)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 stacked rows at innerW=%d, got %d:\n%s", innerW, len(rows), strings.Join(rows, "\n"))
+	}
+	joined := strings.Join(rows, "\n")
+	for _, want := range []string{"Library", "matching", "2,370,000,000", "3,320,076,168", "loaded"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in stacked layout:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Errorf("stacked layout must not truncate with ellipsis:\n%s", joined)
+	}
+}
+
+func TestRenderDedupLibraryRowFitsWidthWithOD(t *testing.T) {
+	m := &metrics{}
+	r := &resolved{
+		cfg:            pipelineConfig{Output: "out.txt.zst", Compress: true, DestDedup: true},
+		totalInputs:    18 << 30,
+		inputFileCount: 1,
+		workers:        8,
+		dedupWorkers:   4,
+		bucketCount:    256,
+	}
+	r.odMetrics = &odMetrics{}
+	r.odMetrics.keysTotalEstimate.Store(3_320_076_168)
+	r.odMetrics.keysLoaded.Store(2_370_000_000)
+	for _, w := range []int{86, 60} {
+		lines := renderDedupLines(time.Now(), 48*time.Second, m, r, 290.1, 410.0, 240e6, 0, w)
+		for _, ln := range lines {
+			// header badges can exceed width at 60 cols; box + bars must fit
+			if !strings.Contains(ln, "│") && !strings.Contains(ln, "Parsing") && !strings.Contains(ln, "Deduping") {
+				continue
+			}
+			if vw := tuiVisibleWidth(ln); vw > w {
+				t.Errorf("width=%d line visible width %d > %d: %q", w, vw, w, ln)
+			}
+		}
 	}
 }

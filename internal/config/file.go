@@ -9,6 +9,7 @@ type File struct {
 
 	SFU SFUSection `toml:"sfu"`
 	SFS SFSSection `toml:"sfs"`
+	SFL SFLSection `toml:"sfl"`
 }
 
 // SFUSection maps to sfu CLI flags. Input fills positional INPUT_PATH, CLI wins.
@@ -29,6 +30,7 @@ type SFUSection struct {
 	NoEncodingSniff bool   `toml:"no_encoding_sniff"`
 	Debug           bool   `toml:"debug"`
 	DebugReject     bool   `toml:"debug_reject"`
+	NoFastPath      bool   `toml:"no_fast_path"`
 }
 
 // SFSSection maps to sfs CLI flags and default search dir.
@@ -44,6 +46,22 @@ type SFSSection struct {
 	MaxHitsPerChunk *int   `toml:"max_hits_per_chunk"`
 	Limit           *int   `toml:"l"`
 	Since           string `toml:"since"`
+}
+
+// SFLSection maps to sfl CLI flags. Input fills positional INPUT_PATH, CLI wins.
+type SFLSection struct {
+	Input         string `toml:"input"`
+	O             string `toml:"o"`
+	OD            string `toml:"od"`
+	Password      string `toml:"p"`
+	Workers       *int   `toml:"workers"`
+	TempDir       string `toml:"temp_dir"`
+	NoTUI         bool   `toml:"no_tui"`
+	Zst           bool   `toml:"zst"`
+	Del           bool   `toml:"del"`
+	NoURI         bool   `toml:"no_uri"`
+	Debug         bool   `toml:"debug"`
+	NoUpdateCheck bool   `toml:"no_update_check"`
 }
 
 // Path returns the loaded config file path.
@@ -71,4 +89,20 @@ func (f File) ResolvedSFUDir(key string) (string, error) {
 // ResolvedSFSDir returns [sfs].dir resolved against base dir.
 func (f File) ResolvedSFSDir() (string, error) {
 	return ResolvePath(f.baseDir, f.SFS.Dir)
+}
+
+// ResolvedSFLDir returns [sfl].o, [sfl].od or [sfl].input resolved against base dir.
+func (f File) ResolvedSFLDir(key string) (string, error) {
+	var raw string
+	switch key {
+	case "o":
+		raw = f.SFL.O
+	case "od":
+		raw = f.SFL.OD
+	case "input":
+		raw = f.SFL.Input
+	default:
+		return "", fmt.Errorf("config: unknown sfl dir key %q", key)
+	}
+	return ResolvePath(f.baseDir, raw)
 }

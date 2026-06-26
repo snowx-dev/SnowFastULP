@@ -11,6 +11,7 @@ VERSION       ?= 0.1.1-dev
 BUILD_FLAGS   := -trimpath -buildvcs=false -ldflags="-s -w -buildid= -X github.com/snowx-dev/SnowFastULP/internal/version.String=$(VERSION)"
 PKG           := ./cmd/sfu
 PKG_SFS       := ./cmd/sfs
+PKG_SFL       := ./cmd/sfl
 PLATFORMS     := linux/amd64 darwin/arm64 windows/amd64
 BIN_DIR         ?= bin
 RELEASE_BIN_DIR ?= release-bins
@@ -19,15 +20,16 @@ RELEASE_ZIP     ?= SnowFastULP-$(VERSION)-binaries.zip
 DOCKER_IMAGE  ?= sfu:local
 GO_DOCKER_IMAGE ?= golang:1.25-alpine
 
-.PHONY: build build-sfu build-sfs build-all release release-assets release-zip test vet clean checksums \
-	docker-build docker-build-all sync-release-bins docker-run docker-run-sfs help
+.PHONY: build build-sfu build-sfs build-sfl build-all release release-assets release-zip test vet clean checksums demo-record \
+	docker-build docker-build-all sync-release-bins docker-run docker-run-sfs docker-run-sfl help
 
 # Default target: print available targets when invoked as bare `make`.
 help:
 	@echo "Targets:"
-	@echo "  build           Build sfu and sfs for the current platform into ./$(BIN_DIR)/"
+	@echo "  build           Build sfu, sfs, and sfl for the current platform into ./$(BIN_DIR)/"
 	@echo "  build-sfu       Build sfu only"
 	@echo "  build-sfs       Build sfs only"
+	@echo "  build-sfl       Build sfl only"
 	@echo "  build-all       Cross-compile both binaries for primary platforms"
 	@echo "  release         Build primary platforms and ./$(BIN_DIR)/$(RELEASE_ZIP)"
 	@echo "  release-assets  Build flat release downloads into ./$(DIST_DIR)/"
@@ -36,14 +38,15 @@ help:
 	@echo "  checksums       SHA256SUMS for release binaries in ./$(BIN_DIR)/"
 	@echo "  clean           Remove build artifacts"
 	@echo ""
-	@echo "  docker-build      Build a runtime image ($(DOCKER_IMAGE)) with sfu and sfs"
+	@echo "  docker-build      Build a runtime image ($(DOCKER_IMAGE)) with sfu, sfs, and sfl"
 	@echo "  docker-build-all  Build release binaries via Docker; sync ./$(BIN_DIR)/ → ./$(RELEASE_BIN_DIR)/"
 	@echo "  docker-run        Run sfu in a container; pass ARGS=... for sfu args"
 	@echo "  docker-run-sfs    Run sfs in a container; pass ARGS=... for sfs args"
+	@echo "  docker-run-sfl    Run sfl in a container; pass ARGS=... for sfl args"
 	@echo ""
 	@echo "Override VERSION=0.1 to embed a release version in the build."
 
-build: build-sfu build-sfs
+build: build-sfu build-sfs build-sfl
 
 build-sfu:
 	@mkdir -p "$(BIN_DIR)"
@@ -63,6 +66,15 @@ build-sfs:
 	CGO_ENABLED=0 go build $(BUILD_FLAGS) -o "$$out" $(PKG_SFS); \
 	echo "Binary written to: $$out"
 
+build-sfl:
+	@mkdir -p "$(BIN_DIR)"
+	@os=$$(go env GOOS); \
+	ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
+	out="$(BIN_DIR)/sfl$$ext"; \
+	echo "→ $$out"; \
+	CGO_ENABLED=0 go build $(BUILD_FLAGS) -o "$$out" $(PKG_SFL); \
+	echo "Binary written to: $$out"
+
 build-all: clean
 	@mkdir -p "$(BIN_DIR)"
 	@for p in $(PLATFORMS); do \
@@ -70,6 +82,7 @@ build-all: clean
 		ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
 		out_sfu="$(BIN_DIR)/$$os/$$arch/sfu$$ext"; \
 		out_sfs="$(BIN_DIR)/$$os/$$arch/sfs$$ext"; \
+		out_sfl="$(BIN_DIR)/$$os/$$arch/sfl$$ext"; \
 		mkdir -p "$$(dirname "$$out_sfu")"; \
 		echo "→ $$out_sfu"; \
 		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
@@ -77,6 +90,9 @@ build-all: clean
 		echo "→ $$out_sfs"; \
 		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
 			go build $(BUILD_FLAGS) -o "$$out_sfs" $(PKG_SFS) || exit 1; \
+		echo "→ $$out_sfl"; \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
+			go build $(BUILD_FLAGS) -o "$$out_sfl" $(PKG_SFL) || exit 1; \
 	done; \
 	echo "Binaries written under: ./$(BIN_DIR)/"
 
@@ -91,6 +107,9 @@ release-assets: release
 	@cp "$(BIN_DIR)/linux/amd64/sfs" "$(DIST_DIR)/SnowFastSearch-$(VERSION)-linux-amd64"
 	@cp "$(BIN_DIR)/darwin/arm64/sfs" "$(DIST_DIR)/SnowFastSearch-$(VERSION)-macos-arm64"
 	@cp "$(BIN_DIR)/windows/amd64/sfs.exe" "$(DIST_DIR)/SnowFastSearch-$(VERSION)-windows-amd64.exe"
+	@cp "$(BIN_DIR)/linux/amd64/sfl" "$(DIST_DIR)/SnowFastLog-$(VERSION)-linux-amd64"
+	@cp "$(BIN_DIR)/darwin/arm64/sfl" "$(DIST_DIR)/SnowFastLog-$(VERSION)-macos-arm64"
+	@cp "$(BIN_DIR)/windows/amd64/sfl.exe" "$(DIST_DIR)/SnowFastLog-$(VERSION)-windows-amd64.exe"
 	@cp "$(BIN_DIR)/$(RELEASE_ZIP)" "$(DIST_DIR)/$(RELEASE_ZIP)"
 	@cd "$(DIST_DIR)" && sha256sum \
 		SnowFastULP-$(VERSION)-linux-amd64 \
@@ -99,6 +118,9 @@ release-assets: release
 		SnowFastSearch-$(VERSION)-linux-amd64 \
 		SnowFastSearch-$(VERSION)-macos-arm64 \
 		SnowFastSearch-$(VERSION)-windows-amd64.exe \
+		SnowFastLog-$(VERSION)-linux-amd64 \
+		SnowFastLog-$(VERSION)-macos-arm64 \
+		SnowFastLog-$(VERSION)-windows-amd64.exe \
 		"$(RELEASE_ZIP)" > SHA256SUMS
 	@cat "$(DIST_DIR)/SHA256SUMS"
 	@echo "Release downloads: ./$(DIST_DIR)/"
@@ -115,6 +137,8 @@ release-zip:
 test:
 	go test -race ./...
 
+demo-record:
+
 vet:
 	go vet ./...
 	@unformatted=$$(gofmt -l .); \
@@ -130,7 +154,7 @@ checksums:
 		cat SHA256SUMS
 
 clean:
-	@rm -rf sfu sfu.exe sfs sfs.exe "$(DIST_DIR)/" "$(BIN_DIR)/"
+	@rm -rf sfu sfu.exe sfs sfs.exe sfl sfl.exe "$(DIST_DIR)/" "$(BIN_DIR)/"
 
 # ─── Docker ────────────────────────────────────────────────────────────────
 
@@ -154,6 +178,10 @@ sync-release-bins:
 		echo "missing $(BIN_DIR)/linux/amd64/sfs — run make docker-build-all or make release first" >&2; \
 		exit 1; \
 	}
+	@test -f "$(BIN_DIR)/linux/amd64/sfl" || { \
+		echo "missing $(BIN_DIR)/linux/amd64/sfl — run make docker-build-all or make release first" >&2; \
+		exit 1; \
+	}
 	@test -f "$(BIN_DIR)/$(RELEASE_ZIP)" || { \
 		echo "missing $(BIN_DIR)/$(RELEASE_ZIP)" >&2; exit 1; \
 	}
@@ -167,6 +195,9 @@ sync-release-bins:
 	cp -a "$(BIN_DIR)/linux/amd64/sfs" "$(RELEASE_BIN_DIR)/linux/amd64/"
 	cp -a "$(BIN_DIR)/darwin/arm64/sfs" "$(RELEASE_BIN_DIR)/darwin/arm64/"
 	cp -a "$(BIN_DIR)/windows/amd64/sfs.exe" "$(RELEASE_BIN_DIR)/windows/amd64/"
+	cp -a "$(BIN_DIR)/linux/amd64/sfl" "$(RELEASE_BIN_DIR)/linux/amd64/"
+	cp -a "$(BIN_DIR)/darwin/arm64/sfl" "$(RELEASE_BIN_DIR)/darwin/arm64/"
+	cp -a "$(BIN_DIR)/windows/amd64/sfl.exe" "$(RELEASE_BIN_DIR)/windows/amd64/"
 	cp -a "$(BIN_DIR)/SHA256SUMS" "$(BIN_DIR)/$(RELEASE_ZIP)" "$(RELEASE_BIN_DIR)/"
 	@echo "→ synced ./$(BIN_DIR)/ → ./$(RELEASE_BIN_DIR)/ (README.md unchanged)"
 
@@ -179,3 +210,7 @@ docker-run: docker-build
 docker-run-sfs: docker-build
 	docker run --rm \
 		--user "$$(id -u):$$(id -g)" -v "$(PWD):/work" $(DOCKER_IMAGE) sfs $(ARGS)
+
+docker-run-sfl: docker-build
+	docker run --rm \
+		--user "$$(id -u):$$(id -g)" -v "$(PWD):/work" $(DOCKER_IMAGE) sfl $(ARGS)

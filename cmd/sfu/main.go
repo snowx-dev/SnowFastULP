@@ -234,6 +234,7 @@ func main() {
 		Workers:         *workers,
 		DedupWorkers:    *dedupW,
 		Buckets:         *buckets,
+		FastPathOff:     fileCfg.SFU.NoFastPath,
 		Compress:        *zst,
 		ZstChunkLines:   *splitZst,
 		RunStarted:      started,

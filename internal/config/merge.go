@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"os"
 )
 
 // Visited records which CLI flags the user set explicitly.
@@ -151,6 +152,81 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	}
 	if !v.set("since") && f.SFS.Since != "" {
 		*fl.Since = f.SFS.Since
+	}
+	return nil
+}
+
+// SFLFlags holds pointers to sfl flag variables for config merge.
+type SFLFlags struct {
+	O, OD, TempDir, Password *string
+	Workers                  *int
+	NoTUI, Zst, Del, NoURI   *bool
+	Debug, NoUpdateCheck     *bool
+}
+
+// ApplySFL applies unvisited config values to sfl flags.
+// rejects CLI -o vs cfg od (and vice versa) w/ clear msg.
+func (f File) ApplySFL(v Visited, fl SFLFlags) error {
+	cfgPath := f.path
+	if cfgPath == "" {
+		cfgPath = "<config>"
+	}
+	if v.set("o") && f.SFL.OD != "" {
+		return fmt.Errorf("config: -o on CLI conflicts with [sfl].od in %s", cfgPath)
+	}
+	if v.set("od") && f.SFL.O != "" {
+		return fmt.Errorf("config: -od on CLI conflicts with [sfl].o in %s", cfgPath)
+	}
+	if !v.set("o") && f.SFL.O != "" && fl.O != nil {
+		p, err := f.ResolvedSFLDir("o")
+		if err != nil {
+			return err
+		}
+		*fl.O = p
+	}
+	if !v.set("od") && f.SFL.OD != "" && fl.OD != nil {
+		p, err := f.ResolvedSFLDir("od")
+		if err != nil {
+			return err
+		}
+		*fl.OD = p
+	}
+	if !v.set("workers") && f.SFL.Workers != nil && fl.Workers != nil {
+		*fl.Workers = *f.SFL.Workers
+	}
+	if !v.set("temp-dir") && f.SFL.TempDir != "" && fl.TempDir != nil {
+		p, err := ResolvePath(f.baseDir, f.SFL.TempDir)
+		if err != nil {
+			return err
+		}
+		*fl.TempDir = p
+	}
+	if !v.set("p") && f.SFL.Password != "" && fl.Password != nil {
+		p := f.SFL.Password
+		if resolved, err := ResolvePath(f.baseDir, p); err == nil {
+			if _, statErr := os.Stat(resolved); statErr == nil {
+				p = resolved
+			}
+		}
+		*fl.Password = p
+	}
+	if !v.set("no-tui") && f.SFL.NoTUI && fl.NoTUI != nil {
+		*fl.NoTUI = true
+	}
+	if !v.set("zst") && f.SFL.Zst && fl.Zst != nil {
+		*fl.Zst = true
+	}
+	if !v.set("del") && f.SFL.Del && fl.Del != nil {
+		*fl.Del = true
+	}
+	if !v.set("no-uri") && f.SFL.NoURI && fl.NoURI != nil {
+		*fl.NoURI = true
+	}
+	if !v.set("debug") && f.SFL.Debug && fl.Debug != nil {
+		*fl.Debug = true
+	}
+	if !v.set("no-update-check") && f.SFL.NoUpdateCheck && fl.NoUpdateCheck != nil {
+		*fl.NoUpdateCheck = true
 	}
 	return nil
 }

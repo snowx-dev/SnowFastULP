@@ -1,0 +1,409 @@
+package sflog
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"sync/atomic"
+
+	"github.com/cespare/xxhash/v2"
+	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
+)
+
+// errPasswordNotFound marks an archive that no password candidate could open.
+var errPasswordNotFound = errors.New("password not found")
+
+// perKindIssueCap bounds how many concrete example paths we keep per issue kind
+// for the summary; the integer counters stay exact regardless. Keeping a budget
+// per kind ensures important kinds (e.g. password-not-found) always get
+// examples even when another kind is far more frequent.
+const perKindIssueCap = 10
+
+// Engine streams credentials from a discovered worklist through a worker pool
+// into a single fan-in writer that deduplicates and writes ULP lines. Memory is
+// bounded: workers parse in parallel, the writer keeps only a uint64 hash set.
+type Engine struct {
+	Workers   int
+	NoURI     bool
+	Passwords []string
+	Progress  *Progress
+	Debug     func(format string, args ...any)
+}
+
+type workKind int
+
+const (
+	kindFile workKind = iota
+	kindArchive
+)
+
+type workItem struct {
+	path   string
+	kind   workKind
+	weight int64
+	logKey string // identifies the parent "log" unit this item belongs to
+}
+
+// accum holds the concurrent-safe counters and result/issue lists shared by the
+// worker goroutines. The writer owns emitted/duplicate/credential counts.
+type accum struct {
+	filesScanned     atomic.Int64
+	archivesScanned  atomic.Int64
+	skippedFiles     atomic.Int64
+	skippedArchives  atomic.Int64
+	passwordNotFound atomic.Int64
+	parseErrors      atomic.Int64
+	noULP            atomic.Int64
+
+	mu      sync.Mutex
+	issues  []Issue
+	results []SourceResult
+
+	// logRemaining counts unprocessed items per log unit; when a log's last
+	// item finishes, the log is counted done. Guarded by logMu.
+	logMu        sync.Mutex
+	logRemaining map[string]int
+}
+
+// finishLog decrements the item count for a log unit and reports whether that
+// was the unit's final item (so the caller can bump the completed-log count).
+func (a *accum) finishLog(key string) bool {
+	a.logMu.Lock()
+	n := a.logRemaining[key] - 1
+	a.logRemaining[key] = n
+	a.logMu.Unlock()
+	return n == 0
+}
+
+func (a *accum) addIssue(path string, kind IssueKind, err error) {
+	a.mu.Lock()
+	n := 0
+	for i := range a.issues {
+		if a.issues[i].Kind == kind {
+			n++
+		}
+	}
+	if n < perKindIssueCap {
+		a.issues = append(a.issues, Issue{Path: path, Kind: kind, Err: err})
+	}
+	a.mu.Unlock()
+}
+
+func (a *accum) addResult(path string, isArchive, ok bool) {
+	a.mu.Lock()
+	a.results = append(a.results, SourceResult{Path: path, IsArchive: isArchive, OK: ok})
+	a.mu.Unlock()
+}
+
+func (a *accum) snapshotResults() []SourceResult {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]SourceResult, len(a.results))
+	copy(out, a.results)
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+// Run discovers sources under input, extracts credentials concurrently, and
+// writes deduplicated ULP lines to w. It returns aggregate stats and per-source
+// results (used by callers to decide -del eligibility).
+func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractStats, []SourceResult, error) {
+	items, err := buildWorklist(input, e.Progress)
+	if err != nil {
+		return ExtractStats{}, nil, err
+	}
+	var total int64
+	logRemaining := make(map[string]int, len(items))
+	for _, it := range items {
+		total += it.weight
+		logRemaining[it.logKey]++
+	}
+	if e.Progress != nil {
+		e.Progress.setTotal(total)
+		e.Progress.setLogsTotal(int64(len(logRemaining)))
+		e.Progress.setPhase(phaseExtract)
+	}
+
+	workers := e.Workers
+	if workers < 1 {
+		workers = 1
+	}
+
+	// runCtx lets the writer abort the workers: if the output write fails, the
+	// writer stops draining `lines`, so without cancellation workers would
+	// block forever on a full channel. Cancelling unblocks emitAll/feed.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	var acc accum
+	acc.logRemaining = logRemaining
+	jobs := make(chan workItem)
+	lines := make(chan string, 4096)
+
+	var writeStats WriteStats
+	var writeErr error
+	var writerWG sync.WaitGroup
+	writerWG.Add(1)
+	go func() {
+		defer writerWG.Done()
+		writeStats, writeErr = runWriter(lines, w, e.Progress)
+		if writeErr != nil {
+			runCancel()
+		}
+	}()
+
+	var workerWG sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		workerWG.Add(1)
+		go func() {
+			defer workerWG.Done()
+			for it := range jobs {
+				if runCtx.Err() != nil {
+					continue
+				}
+				e.process(runCtx, it, lines, &acc)
+			}
+		}()
+	}
+
+feed:
+	for _, it := range items {
+		select {
+		case <-runCtx.Done():
+			break feed
+		case jobs <- it:
+		}
+	}
+	close(jobs)
+	workerWG.Wait()
+	close(lines)
+	writerWG.Wait()
+
+	if e.Progress != nil {
+		e.Progress.setPhase(phaseDone)
+	}
+
+	stats := ExtractStats{
+		FilesScanned:     int(acc.filesScanned.Load()),
+		ArchivesScanned:  int(acc.archivesScanned.Load()),
+		Logs:             len(logRemaining),
+		Credentials:      writeStats.Seen,
+		Emitted:          writeStats.Emitted,
+		Duplicates:       writeStats.Duplicates,
+		SkippedFiles:     int(acc.skippedFiles.Load()),
+		SkippedArchives:  int(acc.skippedArchives.Load()),
+		PasswordNotFound: int(acc.passwordNotFound.Load()),
+		ParseErrors:      int(acc.parseErrors.Load()),
+		NoULP:            int(acc.noULP.Load()),
+		Issues:           acc.issues,
+	}
+	results := acc.snapshotResults()
+	if writeErr != nil {
+		return stats, results, writeErr
+	}
+	if ctx.Err() != nil {
+		return stats, results, ctx.Err()
+	}
+	return stats, results, nil
+}
+
+func (e *Engine) process(ctx context.Context, it workItem, lines chan<- string, acc *accum) {
+	if e.Progress != nil {
+		e.Progress.setCurrent(it.path)
+	}
+	switch it.kind {
+	case kindArchive:
+		e.processArchive(ctx, it, lines, acc)
+	default:
+		e.processFile(ctx, it, lines, acc)
+	}
+	if acc.finishLog(it.logKey) && e.Progress != nil {
+		e.Progress.addLogDone()
+	}
+}
+
+func (e *Engine) processFile(ctx context.Context, it workItem, lines chan<- string, acc *accum) {
+	acc.filesScanned.Add(1)
+	if e.Progress != nil {
+		e.Progress.addFile()
+	}
+	cr := newCreditor(e.Progress, it.weight, 1)
+	defer cr.finish()
+
+	f, err := os.Open(it.path)
+	if err != nil {
+		acc.skippedFiles.Add(1)
+		acc.addIssue(it.path, IssueOpenError, err)
+		acc.addResult(it.path, false, false)
+		return
+	}
+	unreg := registerAbort(ctx, f)
+	creds, perr := ParseCredentials(countingReader{r: f, c: cr}, it.path)
+	closeErr := f.Close()
+	unreg()
+	if perr != nil || closeErr != nil {
+		acc.skippedFiles.Add(1)
+		acc.parseErrors.Add(1)
+		acc.addIssue(it.path, IssueParseError, firstErr(perr, closeErr))
+		acc.addResult(it.path, false, false)
+		return
+	}
+	e.emitAll(ctx, lines, creds)
+	if len(creds) == 0 {
+		acc.noULP.Add(1)
+		acc.addIssue(it.path, IssueNoULP, nil)
+	}
+	acc.addResult(it.path, false, true)
+	if e.Debug != nil {
+		e.Debug("file %s: %d credentials", it.path, len(creds))
+	}
+}
+
+func (e *Engine) processArchive(ctx context.Context, it workItem, lines chan<- string, acc *accum) {
+	acc.archivesScanned.Add(1)
+	if e.Progress != nil {
+		e.Progress.addArchive()
+	}
+	var collected []Credential
+	emit := func(c Credential) { collected = append(collected, c) }
+	filesScanned, err := readArchiveCredentials(ctx, it.path, e.Passwords, it.weight, e.Progress, emit)
+	acc.filesScanned.Add(int64(filesScanned))
+	if err != nil {
+		acc.skippedArchives.Add(1)
+		if errors.Is(err, errPasswordNotFound) {
+			acc.passwordNotFound.Add(1)
+			acc.addIssue(it.path, IssuePasswordNotFound, err)
+		} else {
+			acc.parseErrors.Add(1)
+			acc.addIssue(it.path, IssueParseError, err)
+		}
+		acc.addResult(it.path, true, false)
+		return
+	}
+	e.emitAll(ctx, lines, collected)
+	if len(collected) == 0 {
+		acc.noULP.Add(1)
+		acc.addIssue(it.path, IssueNoULP, nil)
+	}
+	acc.addResult(it.path, true, true)
+	if e.Debug != nil {
+		e.Debug("archive %s: %d credentials across %d file(s)", it.path, len(collected), filesScanned)
+	}
+}
+
+func (e *Engine) emitAll(ctx context.Context, lines chan<- string, creds []Credential) {
+	for _, c := range creds {
+		select {
+		case <-ctx.Done():
+			return
+		case lines <- FormatULPLine(c, e.NoURI):
+		}
+	}
+}
+
+// runWriter is the single fan-in consumer. It deduplicates by xxhash of the
+// formatted line (matching sfu's dedup primitive) so memory stays at ~8 bytes
+// per unique line rather than the full string.
+func runWriter(lines <-chan string, w io.Writer, p *Progress) (WriteStats, error) {
+	bw := bufio.NewWriter(w)
+	seen := make(map[uint64]struct{}, 1<<14)
+	var stats WriteStats
+	for line := range lines {
+		stats.Seen++
+		h := xxhash.Sum64String(line)
+		if _, ok := seen[h]; ok {
+			stats.Duplicates++
+			p.addDup()
+			continue
+		}
+		seen[h] = struct{}{}
+		if _, err := bw.WriteString(line); err != nil {
+			return stats, err
+		}
+		if err := bw.WriteByte('\n'); err != nil {
+			return stats, err
+		}
+		stats.Emitted++
+		p.addEmitted()
+	}
+	if err := bw.Flush(); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+// buildWorklist scans input once, assigning each source its on-disk weight and
+// log-group key. Progress is credited per discovered source so the SCANNING
+// phase shows live motion instead of a frozen 0%.
+func buildWorklist(input string, prog *Progress) ([]workItem, error) {
+	absRoot, rootIsDir, err := rootMeta(input)
+	if err != nil {
+		return nil, err
+	}
+	var filesP, archivesP []string
+	err = walkSources(input, func(path string, isArchive bool) {
+		if isArchive {
+			archivesP = append(archivesP, path)
+		} else {
+			filesP = append(filesP, path)
+		}
+		prog.addDiscovered()
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(filesP)
+	sort.Strings(archivesP)
+
+	items := make([]workItem, 0, len(filesP)+len(archivesP))
+	for _, f := range filesP {
+		items = append(items, workItem{path: f, kind: kindFile, weight: fileWeight(f), logKey: logGroupKey(absRoot, rootIsDir, f)})
+	}
+	for _, a := range archivesP {
+		items = append(items, workItem{path: a, kind: kindArchive, weight: fileWeight(a), logKey: logGroupKey(absRoot, rootIsDir, a)})
+	}
+	return items, nil
+}
+
+func rootMeta(input string) (absRoot string, isDir bool, err error) {
+	info, err := os.Stat(input)
+	if err != nil {
+		return "", false, err
+	}
+	abs, err := filepath.Abs(input)
+	if err != nil {
+		return "", false, err
+	}
+	return filepath.Clean(abs), info.IsDir(), nil
+}
+
+// registerAbort tracks f with the context's fileabort registry (if any) so a
+// graceful Ctrl-C can close it and unstick a blocked read. The returned func
+// unregisters once the read finishes normally.
+func registerAbort(ctx context.Context, f *os.File) func() {
+	if reg := fileabort.FromContext(ctx); reg != nil {
+		return reg.Register(f)
+	}
+	return func() {}
+}
+
+func fileWeight(path string) int64 {
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+		return fi.Size()
+	}
+	return 1
+}
+
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}

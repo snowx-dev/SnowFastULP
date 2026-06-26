@@ -17,14 +17,15 @@
 **SnowFastULP cleans small to huge ULP txt dumps fast, without filling up your RAM.**  
 
   
-It ships with two small commands:  
+It ships with three small commands:  
 
 - `sfu` cleans ULP/LPU `.txt` files, removes duplicates, and writes clean output.
 - `sfs` searches plain `.txt` files or compressed `.zst` archives.
+- `sfl` extracts stealer logs into ULP lines, from extracted folders or archives.
   
-➡️ **Basically**: download `sfu`, point it at a file or folder, and keep the cleaned result somewhere useful. If you want to search, grab `sfs` too.  
+➡️ **Basically**: download `sfu`, point it at a file or folder, and keep the cleaned result somewhere useful. If you want to search, grab `sfs` too. If you start from raw stealer logs, use `sfl`.  
   
-💡 `sfu` stands for **S**now**F**ast**U**LP, `sfs` stands for **S**now**F**ast**S**earch.  
+💡 `sfu` stands for **S**now**F**ast**U**LP, `sfs` stands for **S**now**F**ast**S**earch, and `sfl` stands for **S**now**F**ast**L**og.  
 
 
 ---
@@ -35,6 +36,7 @@ It ships with two small commands:
 - [Quick start](#-quick-start)
 - [Common flags](#common-flags)
 - [Library mode](#library-mode)
+- [Extracting stealer logs with `sfl`](#extracting-stealer-logs-with-sfl)
 - [Searching with `sfs`](#searching-with-sfs)
 - [Configuration](#configuration)
 - [Install](#install)
@@ -57,12 +59,12 @@ It ships with two small commands:
 
 ## 🌱 Quick start
 
-Download the `SnowFastUlP` and `SnowFastSearch` binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest) + rename them to `sfu` and `sfs`, or [download the binary pack](https://github.com/snowx-dev/SnowFastULP/releases/download/v0.1/SnowFastULP-0.1-binaries.zip) and extract the ones for you. 
+Download the `SnowFastULP`, `SnowFastSearch`, and `SnowFastLog` binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest) + rename them to `sfu`, `sfs`, and `sfl`, or [download the binary pack](https://github.com/snowx-dev/SnowFastULP/releases/download/v0.1/SnowFastULP-0.1-binaries.zip) and extract the ones for you. 
 
 Put the binary somewhere convenient, or run it from the download folder:
 
 ```bash
-chmod +x ./sfu ./sfs
+chmod +x ./sfu ./sfs ./sfl
 ./sfu ./ulp-public-cloud.txt -o ./cleaned/
 ```
 
@@ -82,6 +84,13 @@ Clean a whole folder the same way:
 ```bash
 ./sfs -txt ./cleaned/ "facebook.com:"
 ./sfs -txt ./cleaned/ -o hits.txt "user@example.com"
+```
+
+🧊 Extract raw stealer logs with `sfl`:
+
+```bash
+./sfl ./extracted-log-folder/ -o ./ulp/
+./sfl ./folder-of-archives/ -od ./library/ -p passwords.txt
 ```
 
 Prefer building it yourself? See [Build from source](#build-from-source).
@@ -105,7 +114,7 @@ Later runs using **the same folder** skips lines that are already there, and `sf
 ./sfs ./library "facebook.com:"
 ```
 
-That is enough for the first try. Use `sfu -h` and `sfs -h` when you want the full flag list.
+That is enough for the first try. Use `sfu -h`, `sfs -h`, and `sfl -h` when you want the full flag list.
 
 
 
@@ -117,6 +126,7 @@ That is enough for the first try. Use `sfu -h` and `sfs -h` when you want the fu
 - Plain `.txt` output by default when you use `-o`
 - Optional compressed library output when you use `-od`
 - `sfs` search for both `.txt` dumps and `.zst` archives
+- `sfl` extraction from stealer log folders, archive folders, and passworded zip/rar/7z archives
 - Nice TUI by default, with plain output available for scripts
 
 ## Common flags
@@ -150,6 +160,29 @@ You now have a production grade ULP library 🎉
 - Use `-o` for a one-off clean.
 - Use `-od` for a library you plan to keep and search.
 
+## Extracting stealer logs with `sfl`
+
+`sfl` is for analyst workflows where the input is not already clean ULP. You can point it at:
+
+- one extracted stealer log folder,
+- a folder containing many extracted logs,
+- a single archive,
+- a folder containing archives.
+
+Classic extraction writes ULP text:
+
+```bash
+./sfl ./logs/ -o ./ulp/
+```
+
+Library ingest extracts ULPs, then hands them to the existing `sfu -od` path so dedup and sidecars behave the same as normal library mode:
+
+```bash
+./sfl ./archives/ -od ./library/ -p passwords.txt
+```
+
+`-p` accepts either a literal archive password or a text file with one password per line. Password values are not printed in the summary.
+
 ## Searching with `sfs`
 
 `sfs` searches either plain `.txt` files or compressed `.zst` archives.
@@ -178,7 +211,7 @@ Patterns are literal strings, not regular expressions. Each hit is printed as on
 
 Configuration is optional. CLI flags always win.
 
-Both `sfu` and `sfs` can read a TOML config from:
+`sfu`, `sfs`, and `sfl` can read a TOML config from:
 
 | Source            | When used                                                                                     |
 | ----------------- | --------------------------------------------------------------------------------------------- |
@@ -208,6 +241,7 @@ Builds are reproducible via GitHub Actions, every release is built twice and ver
 ```bash
 go install github.com/snowx-dev/SnowFastULP/cmd/sfu@latest
 go install github.com/snowx-dev/SnowFastULP/cmd/sfs@latest
+go install github.com/snowx-dev/SnowFastULP/cmd/sfl@latest
 ```
 
 ## Build from source
@@ -218,8 +252,8 @@ Common targets:
 
 | Target                              | What you get                                                |
 | ----------------------------------- | ----------------------------------------------------------- |
-| `make build`                        | Build `sfu` and `sfs` for your current OS/arch in `./bin/`. |
-| `make build-sfu` / `make build-sfs` | Build one binary only.                                      |
+| `make build`                        | Build `sfu`, `sfs`, and `sfl` for your current OS/arch in `./bin/`. |
+| `make build-sfu` / `make build-sfs` / `make build-sfl` | Build one binary only.                                      |
 | `make build-all`                    | Cross-compile Linux amd64, macOS arm64, and Windows amd64.  |
 | `make release-assets`               | Create flat release downloads in `./dist/`.                 |
 | `make test`                         | Run unit tests with the race detector.                      |
@@ -230,9 +264,10 @@ Docker targets:
 
 | Target                           | What you get                                             |
 | -------------------------------- | -------------------------------------------------------- |
-| `make docker-build`              | Runtime image (`sfu:local`) with `sfu` and `sfs`.        |
+| `make docker-build`              | Runtime image (`sfu:local`) with `sfu`, `sfs`, and `sfl`. |
 | `make docker-run ARGS='...'`     | Run `sfu` in a container.                                |
 | `make docker-run-sfs ARGS='...'` | Run `sfs` in the same image.                             |
+| `make docker-run-sfl ARGS='...'` | Run `sfl` in the same image.                             |
 | `make docker-build-all`          | Build release binaries via Docker, no local Go required. |
 
 

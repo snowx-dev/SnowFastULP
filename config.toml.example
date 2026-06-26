@@ -63,3 +63,25 @@
 
 # Diagnostics
 # debug = false               # write structured job debug log in CWD.
+
+# ---- sfl (stealer log extraction) ------------------------------------------
+[sfl]
+# I/O — pair these for bare `./sfl` invocation:
+# input = "./logs/"           # extracted log, folder of logs, archive, or archive dir.
+# o     = "./ulp/"            # classic ULP output dir (mutually exclusive with od).
+# od    = "./library/"        # ingest extracted ULPs into an existing sfu library.
+# p     = "passwords.txt"     # archive password or password-list file.
+# del   = false               # after success, delete parsed source archives/files.
+
+# Output format
+# zst    = false              # zstd-compress classic output. od auto-enables zst.
+# no_uri = false              # emit host:login:password (drop URL path/query).
+
+# Concurrency / tuning
+# workers  = 0                # parser/archive worker count (0 = auto).
+# temp_dir = "/var/tmp/sfl"   # temp files for archive fallback / od adapter.
+
+# UX / diagnostics
+# no_tui          = false     # disable live TUI; print plain summary at end.
+# debug           = false     # write structured job debug log in CWD.
+# no_update_check = false     # disable update availability checks.

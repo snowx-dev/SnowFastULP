@@ -216,7 +216,7 @@ func TestRecapShowsLibraryLineCount(t *testing.T) {
 			TotalKeysLoaded: 12_345_678,
 		},
 	}
-	out := strings.Join(renderODSummary(r, 100), "\n")
+	out := strings.Join(renderODSummary(r, nil, 100), "\n")
 	if !strings.Contains(out, "12,345,678") {
 		t.Errorf("recap missing library line count\nout:\n%s", out)
 	}
