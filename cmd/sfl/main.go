@@ -157,6 +157,10 @@ func resolveInputArg(fileCfg config.File, positional []string) string {
 // is always torn down before any further stderr output so frames never
 // interleave.
 func run(cfg runConfig) error {
+	// Keep a redirected summary/log free of ANSI; the live frame and summary
+	// both target stderr, so color follows stderr's TTY status.
+	applyStderrColorProfile()
+
 	ctx, cancel, signaled := signalContext()
 	defer cancel()
 
@@ -180,7 +184,7 @@ func run(cfg runConfig) error {
 	}
 
 	prog := sflog.NewProgress()
-	tuiOff := cfg.NoTUI || !stdoutIsCharDevice()
+	tuiOff := cfg.NoTUI || !stderrIsTTY()
 	monDone := make(chan struct{})
 	var monWG sync.WaitGroup
 	if !tuiOff {
@@ -200,7 +204,17 @@ func run(cfg runConfig) error {
 	}
 	defer stopMonitor()
 
-	eng := buildEngine(cfg, passwords, prog, dbg)
+	// One per-run dir for nested-archive spills (honors -temp-dir). Registered so
+	// a force-exit before the deferred RemoveAll still surfaces it in the manual
+	// cleanup hint; a normal run removes it.
+	spillDir, err := os.MkdirTemp(cfg.TempDir, "sfl-spill-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	ulpengine.RegisterCleanupPath(spillDir)
+	defer os.RemoveAll(spillDir)
+
+	eng := buildEngine(cfg, passwords, prog, dbg, spillDir)
 	stats, results, extractErr := eng.Run(ctx, cfg.Input, snk.w)
 	finalizeErr := snk.finalize(extractErr != nil)
 
@@ -225,24 +239,28 @@ func run(cfg runConfig) error {
 	var (
 		ingestRes *ulpengine.Resolved
 		ingestMet *ulpengine.Metrics
+		libEmpty  bool // -od ran but extraction produced nothing to ingest
 	)
 	if cfg.LibraryDir != "" {
 		if stats.Emitted == 0 {
+			// Nothing to merge: leave the library untouched and report it as a
+			// calm completion (with the issue breakdown), not an error exit.
+			libEmpty = true
 			stopMonitor()
-			snk.cleanup()
-			return fmt.Errorf("no credentials extracted from %s", cfg.Input)
-		}
-		// The same icy frame carries through ingest: the monitor stays up while
-		// the dedup engine runs in-process, then we tear it down for the summary.
-		ingestRes, ingestMet, err = ingestToLibrary(ctx, cfg, snk.ulpPath, prog)
-		stopMonitor()
-		if err != nil {
-			snk.cleanup()
-			if signaled() {
-				printInterruptSummary(cfg)
-				exitWithCode(130)
+		} else {
+			// The same icy frame carries through ingest: the monitor stays up
+			// while the dedup engine runs in-process, then we tear it down for
+			// the summary.
+			ingestRes, ingestMet, err = ingestToLibrary(ctx, cfg, snk.ulpPath, prog)
+			stopMonitor()
+			if err != nil {
+				snk.cleanup()
+				if signaled() {
+					printInterruptSummary(cfg)
+					exitWithCode(130)
+				}
+				return err
 			}
-			return err
 		}
 	} else {
 		stopMonitor()
@@ -263,11 +281,20 @@ func run(cfg runConfig) error {
 	}
 
 	// One cohesive summary: classic (-o) reports the output path; -od reports the
-	// resulting library size from the in-process ingest.
+	// resulting library size from the in-process ingest, or a "library unchanged"
+	// note when nothing was extracted.
 	var summary []string
-	if cfg.LibraryDir != "" {
-		summary = renderIngestSummary(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), stats)
-	} else {
+	switch {
+	case cfg.LibraryDir != "" && libEmpty:
+		summary = renderNoIngestSummary(cfg.LibraryDir, stats)
+	case cfg.LibraryDir != "":
+		var newToLib, alreadyInLib int64
+		if ingestMet != nil {
+			newToLib = ingestMet.LinesUnique.Load()
+			alreadyInLib = ingestMet.LinesSkippedByDest.Load()
+		}
+		summary = renderIngestSummary(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, stats)
+	default:
 		summary = renderFinalSummary(outPath, stats)
 	}
 	for _, ln := range summary {
@@ -373,12 +400,14 @@ func (s *sink) cleanup() {
 	}
 }
 
-func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *debugLogger) *sflog.Engine {
+func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *debugLogger, spillDir string) *sflog.Engine {
 	eng := &sflog.Engine{
-		Workers:   cfg.Workers,
-		NoURI:     cfg.NoURI,
-		Passwords: passwords,
-		Progress:  prog,
+		Workers:          cfg.Workers,
+		NoURI:            cfg.NoURI,
+		Passwords:        passwords,
+		Progress:         prog,
+		TempDir:          spillDir,
+		FollowedByIngest: cfg.LibraryDir != "",
 	}
 	if dbg != nil {
 		eng.Debug = dbg.Event
@@ -395,9 +424,20 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 	m := &ulpengine.Metrics{}
 	var od atomic.Pointer[ulpengine.ODMetrics]
 
+	// lastFrac clamps the bar monotonically. The closure is polled only by the
+	// monitor goroutine, so a plain captured float needs no synchronization.
+	var lastFrac float64
 	prog.BeginIngest(func() sflog.IngestView {
-		return ingestView(m, od.Load(), ulpBytes)
+		v := ingestView(m, od.Load(), ulpBytes)
+		v.Fraction = monotonic(v.Fraction, &lastFrac)
+		return v
 	})
+
+	// Capture the engine's ingest events (shard/dedup phases, -od scan/regen) to
+	// a sibling of sfl's own debug log when -debug is set. nil DebugLog is a no-op
+	// in the engine, so the unconditional pass-through is safe.
+	elog := newIngestDebugLog(cfg)
+	defer elog.Close()
 
 	opts := ulpengine.IngestOptions{
 		ULPPath:    ulpPath,
@@ -406,6 +446,7 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 		TempDir:    cfg.TempDir,
 		NoURI:      cfg.NoURI,
 		RunStarted: startedOrNow(cfg),
+		Debug:      elog,
 		OnResolved: func(r *ulpengine.Resolved) {
 			if r != nil {
 				od.Store(r.OdMetrics)
@@ -414,6 +455,40 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 	}
 	r, err := ulpengine.Ingest(ctx, opts, m)
 	return r, m, err
+}
+
+// monotonic returns the larger of cur and *last, updating *last to that value.
+// It guards the displayed ingest bar against the engine's concurrent phase
+// reorder so the fraction can never visibly reverse.
+func monotonic(cur float64, last *float64) float64 {
+	if cur < *last {
+		return *last
+	}
+	*last = cur
+	return cur
+}
+
+// newIngestDebugLog opens an engine debug log for the in-process ingest next to
+// sfl's own debug log (library dir for -od), or returns nil when -debug is off.
+// A nil *ulpengine.DebugLog is safe to pass and Close.
+func newIngestDebugLog(cfg runConfig) *ulpengine.DebugLog {
+	if !cfg.Debug {
+		return nil
+	}
+	dir := cfg.LibraryDir
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil
+	}
+	path := filepath.Join(dir, "sfl_ingest_debug_"+startedOrNow(cfg).Format("20060102_150405")+".log")
+	elog, err := ulpengine.NewDebugLog(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sfl: ingest debug log disabled: %v\n", err)
+		return nil
+	}
+	return elog
 }
 
 // ingestView snapshots the dedup engine's atomics into the icy INGESTING frame:
@@ -429,39 +504,46 @@ func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64) s
 	}
 }
 
-// ingestProgress maps the engine's phase + byte counters onto a monotonic 0..1
-// bar with weighted segments so the frame keeps moving without overshooting:
-// phase-0 library prep 0-25%, read ULP 25-70%, dedup 70-97%, index 97-100%.
+// ingestProgress maps the engine's phase + byte counters onto a 0..1 bar.
+//
+// The -od pipeline is concurrent and re-orders phases: shard (reading the small
+// ULP) runs alongside phase-0 regen, and m.Phase flips BACK to phasePhase0 after
+// shard while regen drains (see internal/ulpengine/pipeline.go). Keying purely on
+// m.Phase would shoot the bar to ~70% on the fast shard, then snap it back to ~5%
+// for the slow regen. So the pre-dedup region [0.03, 0.65] is driven by the
+// dominant cold-library cost (regen) when present, else by the ULP read, both of
+// which advance monotonically. Dedup owns [0.65, 0.97], index 0.97, done 1.0.
+// The caller's BeginIngest closure also clamps the result monotonically as a
+// belt-and-suspenders against any residual reorder.
 func ingestProgress(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64) (float64, string) {
 	switch m.Phase.Load() {
-	case ulpengine.PhaseInit, ulpengine.PhasePhase0:
-		status := "scanning library…"
-		frac := 0.02
-		if od != nil {
-			if tot := od.RegenBytesTotal.Load(); tot > 0 {
-				status = "rebuilding library index…"
-				frac = 0.02 + 0.23*clampFrac(float64(od.RegenBytesRead.Load())/float64(tot))
-			}
-		}
-		return frac, status
-	case ulpengine.PhaseShard:
-		frac := 0.30
-		if ulpBytes > 0 {
-			frac = 0.25 + 0.45*clampFrac(float64(m.BytesRead.Load())/float64(ulpBytes))
-		}
-		return frac, "reading extracted credentials…"
-	case ulpengine.PhaseDedup:
-		frac := 0.75
-		if tot := m.BucketsBytesTotal.Load(); tot > 0 {
-			frac = 0.70 + 0.27*clampFrac(float64(m.BucketsBytesRead.Load())/float64(tot))
-		}
-		return frac, "merging & deduplicating against library…"
-	case ulpengine.PhaseIndex:
-		return 0.98, "finalizing library index…"
 	case ulpengine.PhaseDone:
 		return 1.0, "done"
+	case ulpengine.PhaseIndex:
+		return 0.97, "finalizing library index…"
+	case ulpengine.PhaseDedup:
+		frac := 0.70
+		if tot := m.BucketsBytesTotal.Load(); tot > 0 {
+			frac = 0.65 + 0.32*clampFrac(float64(m.BucketsBytesRead.Load())/float64(tot))
+		}
+		return frac, "merging & deduplicating against library…"
+	default:
+		// PhaseInit / PhasePhase0 / PhaseShard: the concurrent pre-dedup region.
+		// Regen is the long pole on a cold library and runs concurrently with the
+		// quick shard, so prefer it; ignore the shard's fast climb that would
+		// otherwise invert the bar when m.Phase returns to phasePhase0.
+		if od != nil {
+			if tot := od.RegenBytesTotal.Load(); tot > 0 {
+				return 0.03 + 0.62*clampFrac(float64(od.RegenBytesRead.Load())/float64(tot)),
+					"rebuilding library index…"
+			}
+		}
+		if ulpBytes > 0 {
+			return 0.03 + 0.62*clampFrac(float64(m.BytesRead.Load())/float64(ulpBytes)),
+				"reading extracted credentials…"
+		}
+		return 0.03, "scanning library…"
 	}
-	return 0, "preparing…"
 }
 
 func clampFrac(f float64) float64 {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/muesli/termenv"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"golang.org/x/term"
 )
@@ -122,12 +123,23 @@ func footerLines(width int) []string {
 	}
 }
 
-func stdoutIsCharDevice() bool {
-	fi, err := os.Stdout.Stat()
+// stderrIsTTY reports whether the live frame's target (stderr) is a terminal.
+// The TUI and the summary both render to stderr, so this — not stdout — is what
+// gates colored output and the alt-screen frame (mirrors sfs).
+func stderrIsTTY() bool {
+	fi, err := os.Stderr.Stat()
 	if err != nil {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// applyStderrColorProfile downgrades lipgloss to plain ASCII when stderr is not
+// a terminal, so a redirected summary/log never accumulates ANSI escapes.
+func applyStderrColorProfile() {
+	if !stderrIsTTY() {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
 }
 
 func termWidth() int {
@@ -212,7 +224,7 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 	if wg != nil {
 		defer wg.Done()
 	}
-	frame := stderrFrame{tty: true}
+	frame := stderrFrame{tty: stderrIsTTY()}
 	setTerminalRestore(frame.close)
 	defer clearTerminalRestore()
 	defer frame.close()
@@ -351,35 +363,48 @@ const (
 	phaseDoneVal     = 3 // mirrors sflog phaseDone
 )
 
+// summaryRecap is the shared extraction recap (the two count rows plus any
+// issue lines) reused by every end-of-run summary frame.
+func summaryRecap(stats sflog.ExtractStats) []string {
+	body := []string{
+		fmt.Sprintf("%s logs  ·  %s parsed  ·  %s unique  ·  %s duplicates",
+			formatInt(stats.Logs), formatInt(stats.Credentials), formatInt(stats.Emitted), formatInt(stats.Duplicates)),
+		fmt.Sprintf("%s files scanned  ·  %s archives  ·  %s skipped",
+			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)),
+	}
+	return append(body, issueLines(stats)...)
+}
+
 func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
-	body := []string{
-		fmt.Sprintf("%s logs  ·  %s parsed  ·  %s unique  ·  %s duplicates",
-			formatInt(stats.Logs), formatInt(stats.Credentials), formatInt(stats.Emitted), formatInt(stats.Duplicates)),
-		fmt.Sprintf("%s files scanned  ·  %s archives  ·  %s skipped",
-			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)),
-	}
-	body = append(body, issueLines(stats)...)
-	body = append(body, sflMutedStyle.Render("Output: ")+outPath)
-
+	body := append(summaryRecap(stats), sflMutedStyle.Render("Output: ")+outPath)
 	return frame(title, insetBox(sflBoxStyle, body, width), width)
 }
 
-// renderIngestSummary is the -od completion frame: the same extraction recap
-// plus the resulting library line count and path, so the single icy frame ends
-// the run instead of handing off to sfu's summary.
-func renderIngestSummary(libraryDir string, libraryLines int64, stats sflog.ExtractStats) []string {
+// renderNoIngestSummary is the -od frame when extraction produced no
+// credentials: a calm "done, nothing to do" recap with the library left
+// untouched, rather than an error exit.
+func renderNoIngestSummary(libraryDir string, stats sflog.ExtractStats) []string {
+	width := termWidth()
+	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
+	body := append(summaryRecap(stats),
+		sflMutedStyle.Render("No credentials extracted — library unchanged."),
+		sflMutedStyle.Render("Library: ")+libraryDir,
+	)
+	return frame(title, insetBox(sflBoxStyle, body, width), width)
+}
+
+// renderIngestSummary is the -od completion frame: the same extraction recap,
+// what this run contributed (new vs already-present), and the resulting library
+// line count and path, so the single icy frame ends the run instead of handing
+// off to sfu's summary.
+func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
-	body := []string{
-		fmt.Sprintf("%s logs  ·  %s parsed  ·  %s unique  ·  %s duplicates",
-			formatInt(stats.Logs), formatInt(stats.Credentials), formatInt(stats.Emitted), formatInt(stats.Duplicates)),
-		fmt.Sprintf("%s files scanned  ·  %s archives  ·  %s skipped",
-			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)),
-	}
-	body = append(body, issueLines(stats)...)
-	body = append(body,
+	body := append(summaryRecap(stats),
+		fmt.Sprintf("%s new  ·  %s already in library",
+			sflOkStyle.Render(formatInt(int(newToLib))), sflMutedStyle.Render(formatInt(int(alreadyInLib)))),
 		sflOkStyle.Render(formatInt(int(libraryLines)))+sflMutedStyle.Render(" lines in library"),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
@@ -410,6 +435,10 @@ func issueLines(stats sflog.ExtractStats) []string {
 	if stats.ParseErrors > 0 {
 		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s parse errors", formatInt(stats.ParseErrors)))+
 			exampleSuffix(stats, sflog.IssueParseError, stats.ParseErrors))
+	}
+	if stats.OpenErrors > 0 {
+		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s open errors", formatInt(stats.OpenErrors)))+
+			exampleSuffix(stats, sflog.IssueOpenError, stats.OpenErrors))
 	}
 	if stats.NoULP > 0 {
 		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s sources with no ULP", formatInt(stats.NoULP)))+

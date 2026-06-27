@@ -33,6 +33,13 @@ type Engine struct {
 	Passwords []string
 	Progress  *Progress
 	Debug     func(format string, args ...any)
+	// TempDir is where nested archive members are spilled before being recursed
+	// into. "" falls back to the system temp dir.
+	TempDir string
+	// FollowedByIngest tells Run to leave the tracker in the extract phase
+	// instead of flipping to Done, so an -od caller can hand straight off to the
+	// ingest phase without a transient "COMPLETE" frame.
+	FollowedByIngest bool
 }
 
 type workKind int
@@ -58,6 +65,7 @@ type accum struct {
 	skippedArchives  atomic.Int64
 	passwordNotFound atomic.Int64
 	parseErrors      atomic.Int64
+	openErrors       atomic.Int64
 	noULP            atomic.Int64
 
 	mu      sync.Mutex
@@ -94,9 +102,9 @@ func (a *accum) addIssue(path string, kind IssueKind, err error) {
 	a.mu.Unlock()
 }
 
-func (a *accum) addResult(path string, isArchive, ok bool) {
+func (a *accum) addResult(path string, isArchive, ok, hadIssue bool) {
 	a.mu.Lock()
-	a.results = append(a.results, SourceResult{Path: path, IsArchive: isArchive, OK: ok})
+	a.results = append(a.results, SourceResult{Path: path, IsArchive: isArchive, OK: ok, HadIssue: hadIssue})
 	a.mu.Unlock()
 }
 
@@ -184,7 +192,7 @@ feed:
 	close(lines)
 	writerWG.Wait()
 
-	if e.Progress != nil {
+	if e.Progress != nil && !e.FollowedByIngest {
 		e.Progress.setPhase(phaseDone)
 	}
 
@@ -199,6 +207,7 @@ feed:
 		SkippedArchives:  int(acc.skippedArchives.Load()),
 		PasswordNotFound: int(acc.passwordNotFound.Load()),
 		ParseErrors:      int(acc.parseErrors.Load()),
+		OpenErrors:       int(acc.openErrors.Load()),
 		NoULP:            int(acc.noULP.Load()),
 		Issues:           acc.issues,
 	}
@@ -238,8 +247,9 @@ func (e *Engine) processFile(ctx context.Context, it workItem, lines chan<- stri
 	f, err := os.Open(it.path)
 	if err != nil {
 		acc.skippedFiles.Add(1)
+		acc.openErrors.Add(1)
 		acc.addIssue(it.path, IssueOpenError, err)
-		acc.addResult(it.path, false, false)
+		acc.addResult(it.path, false, false, false)
 		return
 	}
 	unreg := registerAbort(ctx, f)
@@ -250,7 +260,7 @@ func (e *Engine) processFile(ctx context.Context, it workItem, lines chan<- stri
 		acc.skippedFiles.Add(1)
 		acc.parseErrors.Add(1)
 		acc.addIssue(it.path, IssueParseError, firstErr(perr, closeErr))
-		acc.addResult(it.path, false, false)
+		acc.addResult(it.path, false, false, false)
 		return
 	}
 	e.emitAll(ctx, lines, creds)
@@ -258,7 +268,7 @@ func (e *Engine) processFile(ctx context.Context, it workItem, lines chan<- stri
 		acc.noULP.Add(1)
 		acc.addIssue(it.path, IssueNoULP, nil)
 	}
-	acc.addResult(it.path, false, true)
+	acc.addResult(it.path, false, true, false)
 	if e.Debug != nil {
 		e.Debug("file %s: %d credentials", it.path, len(creds))
 	}
@@ -271,8 +281,37 @@ func (e *Engine) processArchive(ctx context.Context, it workItem, lines chan<- s
 	}
 	var collected []Credential
 	emit := func(c Credential) { collected = append(collected, c) }
-	filesScanned, err := readArchiveCredentials(ctx, it.path, e.Passwords, it.weight, e.Progress, emit)
-	acc.filesScanned.Add(int64(filesScanned))
+	// onIssue records a per-member problem (e.g. a nested archive whose password
+	// was not found) without aborting the parent archive or the run. hadIssue
+	// then keeps the source out of -del so un-extracted data is never discarded.
+	// Called only from this worker goroutine, so the plain bool is safe.
+	var hadIssue bool
+	onIssue := func(path string, kind IssueKind, err error) {
+		hadIssue = true
+		switch kind {
+		case IssuePasswordNotFound:
+			acc.passwordNotFound.Add(1)
+		case IssueOpenError:
+			acc.openErrors.Add(1)
+		default:
+			acc.parseErrors.Add(1)
+		}
+		acc.addIssue(path, kind, err)
+	}
+	ec := extractCtx{
+		passwords: e.Passwords,
+		tempDir:   e.TempDir,
+		display:   it.path,
+		emit:      emit,
+		onIssue:   onIssue,
+		p:         e.Progress,
+	}
+	scan, err := readArchiveCredentials(ctx, it.path, ec, it.weight)
+	acc.filesScanned.Add(int64(scan.files))
+	acc.archivesScanned.Add(int64(scan.nestedArchives)) // top-level archive already counted above
+	if e.Progress != nil {
+		e.Progress.addArchives(int64(scan.nestedArchives)) // keep live count == summary
+	}
 	if err != nil {
 		acc.skippedArchives.Add(1)
 		if errors.Is(err, errPasswordNotFound) {
@@ -282,7 +321,7 @@ func (e *Engine) processArchive(ctx context.Context, it workItem, lines chan<- s
 			acc.parseErrors.Add(1)
 			acc.addIssue(it.path, IssueParseError, err)
 		}
-		acc.addResult(it.path, true, false)
+		acc.addResult(it.path, true, false, hadIssue)
 		return
 	}
 	e.emitAll(ctx, lines, collected)
@@ -290,9 +329,10 @@ func (e *Engine) processArchive(ctx context.Context, it workItem, lines chan<- s
 		acc.noULP.Add(1)
 		acc.addIssue(it.path, IssueNoULP, nil)
 	}
-	acc.addResult(it.path, true, true)
+	acc.addResult(it.path, true, true, hadIssue)
 	if e.Debug != nil {
-		e.Debug("archive %s: %d credentials across %d file(s)", it.path, len(collected), filesScanned)
+		e.Debug("archive %s: %d credentials across %d file(s), %d nested archive(s)",
+			it.path, len(collected), scan.files, scan.nestedArchives)
 	}
 }
 

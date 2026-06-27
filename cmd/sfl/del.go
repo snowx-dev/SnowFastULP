@@ -33,7 +33,7 @@ func deleteParsedSources(inputRoot string, results []sflog.SourceResult, protect
 	}
 
 	if !info.IsDir() {
-		if len(results) == 1 && results[0].OK && !isProtected(absRoot, prot) {
+		if len(results) == 1 && results[0].OK && !results[0].HadIssue && !isProtected(absRoot, prot) {
 			if err := os.Remove(absRoot); err != nil {
 				return nil, err
 			}
@@ -69,7 +69,7 @@ func deleteParsedSources(inputRoot string, results []sflog.SourceResult, protect
 			groups[childAbs] = g
 		}
 		g.any = true
-		if !r.OK {
+		if !r.OK || r.HadIssue {
 			g.allOK = false
 		}
 		if childAbs == abs {

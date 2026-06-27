@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,6 +72,58 @@ func TestRunDelRetainsFailedArchiveButDeletesGoodSubfolder(t *testing.T) {
 	}
 	if _, err := os.Stat(badZip); err != nil {
 		t.Fatalf("bad-password archive must be retained: %v", err)
+	}
+}
+
+// A nested archive whose password is missing fails in isolation: the outer
+// archive parses OK but is flagged HadIssue, so -del must retain it rather than
+// discard the un-cracked inner data.
+func TestRunDelRetainsArchiveWithUncrackedNested(t *testing.T) {
+	dir := t.TempDir()
+
+	innerPath := filepath.Join(dir, "inner.zip")
+	writeEncryptedRunZip(t, innerPath, "ice", "victim/Passwords.txt", "URL: a.com\nUSER: u\nPASS: p\n")
+	innerBytes, err := os.ReadFile(innerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(innerPath); err != nil {
+		t.Fatal(err)
+	}
+
+	outer := filepath.Join(dir, "outer.zip")
+	f, err := os.Create(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("v.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(innerBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	pwPath := filepath.Join(dir, "pw.txt")
+	writeFile(t, pwPath, "wrong\n") // lacks "ice"
+	outDir := filepath.Join(dir, "out")
+
+	if err := run(runConfig{
+		Input: outer, OutputDir: outDir, Password: pwPath, Workers: 1, NoTUI: true, DeleteSources: true,
+		Started: time.Date(2026, 6, 26, 21, 13, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(outer); err != nil {
+		t.Fatalf("outer archive with an uncracked nested member must be retained: %v", err)
 	}
 }
 

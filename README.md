@@ -175,13 +175,15 @@ Classic extraction writes ULP text:
 ./sfl ./logs/ -o ./ulp/
 ```
 
-Library ingest extracts ULPs, then hands them to the existing `sfu -od` path so dedup and sidecars behave the same as normal library mode:
+Library ingest extracts ULPs, then merges them into the library in-process using the same dedup and sidecar engine as `sfu -od`, so the result is identical to normal library mode (one cohesive TUI, no subprocess):
 
 ```bash
 ./sfl ./archives/ -od ./library/ -p passwords.txt
 ```
 
 `-p` accepts either a literal archive password or a text file with one password per line. Password values are not printed in the summary.
+
+Archives nested inside archives (a zip-of-zips, a `.7z` holding `.rar` files, etc.) are recursed automatically up to a small depth limit, each nested archive resolving its own password from the same wordlist. A nested archive that can't be opened (wrong password, corrupt) is reported as an issue in the summary and skipped — it never aborts the run.
 
 ## Searching with `sfs`
 

@@ -41,6 +41,10 @@ type SourceResult struct {
 	Path      string
 	IsArchive bool
 	OK        bool
+	// HadIssue is set when the source parsed without a fatal error but recorded
+	// an isolated problem (e.g. a nested archive whose password was not found),
+	// so -del retains it rather than discarding un-extracted data.
+	HadIssue bool
 }
 
 type ExtractStats struct {
@@ -56,6 +60,7 @@ type ExtractStats struct {
 	// granular issue counters for the summary
 	PasswordNotFound int
 	ParseErrors      int
+	OpenErrors       int
 	NoULP            int
 
 	// capped, ordered list of concrete problems (see issueCap)

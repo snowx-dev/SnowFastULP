@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,41 @@ func TestRunUsesPasswordFileForEncryptedZip(t *testing.T) {
 	}
 	if string(got) != "zip.example.com:u:p\n" {
 		t.Fatalf("output = %q", string(got))
+	}
+}
+
+// A -od run that extracts nothing must complete cleanly (exit nil) and leave
+// the library untouched, rather than erroring out.
+func TestRunODEmptyLeavesLibraryUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "logs", "victim")
+	if err := os.MkdirAll(input, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Recognized password file, but no parseable credentials in it.
+	if err := os.WriteFile(filepath.Join(input, "Passwords.txt"), []byte("Browser: Chrome\nProfile: Default\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lib := filepath.Join(dir, "library")
+	if err := os.MkdirAll(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := run(runConfig{
+		Input: filepath.Join(dir, "logs"), LibraryDir: lib, Workers: 1, NoTUI: true, NoUpdateCheck: true,
+		Started: time.Date(2026, 6, 26, 21, 5, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("empty -od run must not error: %v", err)
+	}
+
+	entries, err := os.ReadDir(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".zst") {
+			t.Fatalf("library must be unchanged, found new archive %q", e.Name())
+		}
 	}
 }
 

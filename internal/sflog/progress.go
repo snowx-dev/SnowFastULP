@@ -184,6 +184,14 @@ func (p *Progress) addArchive() {
 		p.archives.Add(1)
 	}
 }
+
+// addArchives credits nested archives discovered while processing one item so
+// the live count matches the final ArchivesScanned (which includes nested).
+func (p *Progress) addArchives(n int64) {
+	if p != nil && n > 0 {
+		p.archives.Add(n)
+	}
+}
 func (p *Progress) addDiscovered() {
 	if p != nil {
 		p.discovered.Add(1)

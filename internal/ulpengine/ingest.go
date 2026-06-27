@@ -31,6 +31,11 @@ type IngestOptions struct {
 	// r.OdMetrics for a live phase-0 progress view. Must not retain r beyond the
 	// call or mutate it.
 	OnResolved func(r *Resolved)
+
+	// Debug, if set, receives the engine's structured ingest events (shard/dedup
+	// phases, -od scan classify/regen/done). The caller owns its lifecycle
+	// (Close it after Ingest returns).
+	Debug *DebugLog
 }
 
 // Ingest merges opts.ULPPath into the library at opts.LibraryDir in-process,
@@ -95,6 +100,7 @@ func Ingest(ctx context.Context, opts IngestOptions, m *Metrics) (*Resolved, err
 		NoURI:         opts.NoURI,
 		DestDedup:     true,
 		DestDedupDir:  outDirAbs,
+		Debug:         opts.Debug,
 	}
 
 	r, err := Resolve(cfg)
