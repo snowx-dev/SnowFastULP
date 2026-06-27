@@ -1,107 +1,90 @@
 package main
 
 import (
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
-func TestRunODInvokesSFUWithGeneratedULP(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-script fake sfu")
-	}
+// TestRunODIngestsGeneratedULP exercises the in-process -od path end to end:
+// sfl extracts the victim log, then merges the generated ULP into the library
+// via ulpengine (no sfu subprocess), producing a single sfu_*.txt.zst archive
+// whose contents match the extracted credential.
+func TestRunODIngestsGeneratedULP(t *testing.T) {
 	dir := t.TempDir()
 	input := filepath.Join(dir, "logs", "victim")
 	if err := os.MkdirAll(input, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(input, "Passwords.txt"), []byte("URL: https://od.example.com/login\nUSER: u\nPASS: p\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(input, "Passwords.txt"),
+		[]byte("URL: https://od.example.com/login\nUSER: u\nPASS: p\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	libDir := filepath.Join(dir, "library")
-	argsPath := filepath.Join(dir, "args.txt")
-	ulpPath := filepath.Join(dir, "ulp.txt")
-	fakeSFU := filepath.Join(dir, "sfu")
-	script := "#!/bin/sh\ncp \"$1\" \"$SFL_TEST_ULP\"\nprintf '%s\\n' \"$@\" > \"$SFL_TEST_ARGS\"\n"
-	if err := os.WriteFile(fakeSFU, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SFL_SFU_BIN", fakeSFU)
-	t.Setenv("SFL_TEST_ARGS", argsPath)
-	t.Setenv("SFL_TEST_ULP", ulpPath)
 
 	if err := run(runConfig{
-		Input: input, LibraryDir: libDir, Workers: 1, NoTUI: true,
+		Input: input, LibraryDir: libDir, Workers: 1, NoTUI: true, NoUpdateCheck: true,
 		Started: time.Date(2026, 6, 26, 21, 2, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	ulp, err := os.ReadFile(ulpPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(ulp) != "od.example.com/login:u:p\n" {
-		t.Fatalf("generated ulp = %q", string(ulp))
-	}
-	args, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	joined := "\n" + string(args)
-	for _, want := range []string{"-od\n" + libDir, "-no-tui"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("sfu args missing %q:\n%s", want, string(args))
-		}
-	}
-}
-
-func TestRunODWithRealSFUCreatesLibraryArchive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds sfu binary")
-	}
-	dir := t.TempDir()
-	sfuBin := filepath.Join(dir, "sfu")
-	if runtime.GOOS == "windows" {
-		sfuBin += ".exe"
-	}
-	build := exec.Command("go", "build", "-o", sfuBin, "./cmd/sfu")
-	build.Dir = filepath.Join("..", "..")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build sfu: %v\n%s", err, out)
-	}
-	t.Setenv("SFL_SFU_BIN", sfuBin)
-
-	input := filepath.Join(dir, "logs", "victim")
-	if err := os.MkdirAll(input, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(input, "Passwords.txt"), []byte("URL: https://real.example.com/login\nUSER: u\nPASS: p\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	libDir := filepath.Join(dir, "library")
-	if err := run(runConfig{
-		Input: input, LibraryDir: libDir, Workers: 1, NoTUI: true, NoUpdateCheck: true,
-		Started: time.Date(2026, 6, 26, 21, 3, 0, 0, time.UTC),
-	}); err != nil {
-		t.Fatal(err)
-	}
 	archives, err := filepath.Glob(filepath.Join(libDir, "sfu_*.txt.zst"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(archives) != 1 {
-		t.Fatalf("archives = %v", archives)
+		t.Fatalf("archives = %v, want exactly one", archives)
 	}
+	if got := readZst(t, archives[0]); got != "od.example.com/login:u:p\n" {
+		t.Fatalf("library archive = %q", got)
+	}
+
 	sidecars, err := filepath.Glob(filepath.Join(libDir, "sfu_dedup_idx", "*.idx"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(sidecars) != 1 {
-		t.Fatalf("sidecars = %v", sidecars)
+		t.Fatalf("sidecars = %v, want exactly one", sidecars)
 	}
+
+	// Cross-boundary cleanup: a successful in-process ingest must leave no engine
+	// scratch (.sfu-tmp-*) in the library nor any sfl decrypted-ULP workdir
+	// (sfl-od-*) in its parent.
+	assertNoLeftovers(t, filepath.Join(libDir, ".sfu-tmp-*"))
+	assertNoLeftovers(t, filepath.Join(dir, "sfl-od-*"))
+}
+
+func assertNoLeftovers(t *testing.T, pattern string) {
+	t.Helper()
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("leftover temp dirs for %q: %v", pattern, matches)
+	}
+}
+
+func readZst(t *testing.T, path string) string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	dec, err := zstd.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+	b, err := io.ReadAll(dec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -27,8 +26,7 @@ func signalContext() (context.Context, context.CancelFunc, func() bool) {
 			return
 		}
 		<-ch
-		fmt.Fprintln(os.Stderr, "force-exit (signal received twice).")
-		exitWithCode(130)
+		forceExit("force-exit (signal received twice).")
 	}()
 	return ctx, cancel, sigFlag.Load
 }

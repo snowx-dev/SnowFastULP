@@ -21,6 +21,17 @@ type Progress struct {
 	logsDone   atomic.Int64
 	current    atomic.Value // string: path of the item being processed
 	phase      atomic.Int32
+	ingestView atomic.Value // func() IngestView, installed by BeginIngest
+}
+
+// IngestView is a live snapshot of an in-process library ingest, rendered by
+// the TUI's INGESTING frame. It is produced by a caller-supplied closure so
+// sflog stays decoupled from the dedup engine that drives the merge.
+type IngestView struct {
+	Fraction float64 // 0..1 overall ingest progress
+	Unique   int64   // credentials newly added to the library
+	Skipped  int64   // credentials already present in the library
+	Status   string  // short phase label ("merging…", etc.)
 }
 
 const (
@@ -103,6 +114,31 @@ func (p *Progress) Logs() int64 {
 	return p.logsDone.Load()
 }
 func (p *Progress) Phase() int32 { return p.phase.Load() }
+
+// BeginIngest flips the tracker into the ingest phase and installs the view
+// provider the live frame polls each tick. Called once, after extraction
+// finishes, by the -od driver.
+func (p *Progress) BeginIngest(view func() IngestView) {
+	if p == nil {
+		return
+	}
+	if view != nil {
+		p.ingestView.Store(view)
+	}
+	p.phase.Store(phaseIngest)
+}
+
+// IngestSnapshot returns the current ingest view and true when an ingest is in
+// flight, or false before BeginIngest installs a provider.
+func (p *Progress) IngestSnapshot() (IngestView, bool) {
+	if p == nil {
+		return IngestView{}, false
+	}
+	if v, ok := p.ingestView.Load().(func() IngestView); ok && v != nil {
+		return v(), true
+	}
+	return IngestView{}, false
+}
 func (p *Progress) Current() string {
 	if p == nil {
 		return ""

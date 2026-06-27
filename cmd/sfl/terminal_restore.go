@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"sync"
+
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
 const ansiResetScroll = "\033[r"
@@ -42,4 +45,15 @@ func restoreTerminal() {
 func exitWithCode(code int) {
 	restoreTerminal()
 	os.Exit(code)
+}
+
+// forceExit handles a hard abort (second Ctrl-C or cleanup timeout): it leaves
+// the alt-screen, then on the normal screen lists any engine/work temp paths
+// that deferred cleanup never got to remove (decrypted ULPs, shard dirs) so the
+// analyst can delete them by hand, prints reason, and exits 130.
+func forceExit(reason string) {
+	restoreTerminal()
+	ulpengine.PrintManualCleanupHint(os.Stderr)
+	fmt.Fprintln(os.Stderr, reason)
+	os.Exit(130)
 }

@@ -283,6 +283,22 @@ func frame(header string, box []string, width int) []string {
 
 func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, spinner string, width int) []string {
 	inner := boxInner(width)
+
+	// Ingest carries the same icy frame so the screen never hands off: a single
+	// bar + "added / already-in-library" counts driven by the dedup engine.
+	if prog.Phase() == phaseIngestVal {
+		iv, _ := prog.IngestSnapshot()
+		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] INGESTING"), elapsed, width)
+		bar := gradientBar(iv.Fraction, inner)
+		counts := fmt.Sprintf("%s added  ·  %s already in library",
+			formatInt(int(iv.Unique)), formatInt(int(iv.Skipped)))
+		body := []string{bar, counts}
+		if iv.Status != "" {
+			body = append(body, sflMutedStyle.Render(iv.Status))
+		}
+		return frame(header, insetBox(sflBoxStyle, body, width), width)
+	}
+
 	scanning := prog.Phase() == phaseDiscoverVal || prog.Total() == 0
 	phase := "EXTRACTING"
 	if prog.Phase() == phaseDoneVal {
@@ -331,6 +347,7 @@ func renderInterrupt(elapsed time.Duration, spinner string, width int) []string 
 
 const (
 	phaseDiscoverVal = 0 // mirrors sflog phaseDiscover
+	phaseIngestVal   = 2 // mirrors sflog phaseIngest
 	phaseDoneVal     = 3 // mirrors sflog phaseDone
 )
 
@@ -346,6 +363,26 @@ func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
 	body = append(body, issueLines(stats)...)
 	body = append(body, sflMutedStyle.Render("Output: ")+outPath)
 
+	return frame(title, insetBox(sflBoxStyle, body, width), width)
+}
+
+// renderIngestSummary is the -od completion frame: the same extraction recap
+// plus the resulting library line count and path, so the single icy frame ends
+// the run instead of handing off to sfu's summary.
+func renderIngestSummary(libraryDir string, libraryLines int64, stats sflog.ExtractStats) []string {
+	width := termWidth()
+	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
+	body := []string{
+		fmt.Sprintf("%s logs  ·  %s parsed  ·  %s unique  ·  %s duplicates",
+			formatInt(stats.Logs), formatInt(stats.Credentials), formatInt(stats.Emitted), formatInt(stats.Duplicates)),
+		fmt.Sprintf("%s files scanned  ·  %s archives  ·  %s skipped",
+			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)),
+	}
+	body = append(body, issueLines(stats)...)
+	body = append(body,
+		sflOkStyle.Render(formatInt(int(libraryLines)))+sflMutedStyle.Render(" lines in library"),
+		sflMutedStyle.Render("Library: ")+libraryDir,
+	)
 	return frame(title, insetBox(sflBoxStyle, body, width), width)
 }
 

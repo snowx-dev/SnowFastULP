@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/snowx-dev/SnowFastULP/internal/fdlimit"
 	"github.com/snowx-dev/SnowFastULP/internal/pathident"
 )
 
@@ -157,7 +158,7 @@ func Resolve(cfg Config) (*Resolved, error) {
 	// FD cap. phase 1 holds B bucket files + stdio/inputs/output (~fdReserve).
 	// macOS default soft is 256, linux 1024. floor at minBuckets
 	fdClamped := false
-	if maxFD, ok := maxOpenFiles(); ok && maxFD > 0 {
+	if maxFD, ok := fdlimit.MaxOpenFiles(); ok && maxFD > 0 {
 		fdCap := maxFD - fdReserve
 		if fdCap < minBuckets {
 			return nil, fmt.Errorf(

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -20,6 +20,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
 
@@ -150,9 +151,11 @@ func resolveInputArg(fileCfg config.File, positional []string) string {
 
 // run drives a full extraction: it sets up signal handling, a live progress
 // monitor, streams credentials through the shared Engine into the selected sink
-// (classic file or, for -od, a temp ULP fed to sfu), then optionally deletes
-// parsed sources and prints the summary. The monitor is always torn down before
-// any further stderr output so frames never interleave.
+// (classic file or, for -od, a temp ULP), then for -od merges that ULP into the
+// library in-process via ulpengine so one icy frame spans scan→extract→ingest.
+// It optionally deletes parsed sources and prints a single summary. The monitor
+// is always torn down before any further stderr output so frames never
+// interleave.
 func run(cfg runConfig) error {
 	ctx, cancel, signaled := signalContext()
 	defer cancel()
@@ -201,9 +204,10 @@ func run(cfg runConfig) error {
 	stats, results, extractErr := eng.Run(ctx, cfg.Input, snk.w)
 	finalizeErr := snk.finalize(extractErr != nil)
 
-	stopMonitor()
-
+	// Extraction/finalize failures tear the live frame down before any stderr so
+	// frames never interleave with the error.
 	if extractErr != nil {
+		stopMonitor()
 		snk.cleanup()
 		if signaled() {
 			printInterruptSummary(cfg)
@@ -212,30 +216,41 @@ func run(cfg runConfig) error {
 		return extractErr
 	}
 	if finalizeErr != nil {
+		stopMonitor()
 		snk.cleanup()
 		return finalizeErr
 	}
 
 	outPath := snk.outPath
+	var (
+		ingestRes *ulpengine.Resolved
+		ingestMet *ulpengine.Metrics
+	)
 	if cfg.LibraryDir != "" {
 		if stats.Emitted == 0 {
+			stopMonitor()
 			snk.cleanup()
 			return fmt.Errorf("no credentials extracted from %s", cfg.Input)
 		}
-		// Hand the screen to sfu: it renders its own merge TUI and the
-		// authoritative library summary, so sfl stays quiet through ingestion.
-		if err := ingestToLibrary(ctx, cfg, snk.ulpPath); err != nil {
+		// The same icy frame carries through ingest: the monitor stays up while
+		// the dedup engine runs in-process, then we tear it down for the summary.
+		ingestRes, ingestMet, err = ingestToLibrary(ctx, cfg, snk.ulpPath, prog)
+		stopMonitor()
+		if err != nil {
 			snk.cleanup()
 			if signaled() {
-				// sfu already printed its own interrupt notice; don't double up.
+				printInterruptSummary(cfg)
 				exitWithCode(130)
 			}
 			return err
 		}
-	} else if stats.Emitted == 0 {
-		// L5: never leave an empty output file behind.
-		_ = os.Remove(snk.outPath)
-		outPath = "(no ULP detected)"
+	} else {
+		stopMonitor()
+		if stats.Emitted == 0 {
+			// L5: never leave an empty output file behind.
+			_ = os.Remove(snk.outPath)
+			outPath = "(no ULP detected)"
+		}
 	}
 	snk.cleanup()
 
@@ -247,12 +262,16 @@ func run(cfg runConfig) error {
 		dbg.Event("del: removed %d source unit(s)", len(deleted))
 	}
 
-	// -od ingestion is summarised by sfu itself; only classic (-o) runs print
-	// sfl's own final summary so the two don't duplicate.
-	if cfg.LibraryDir == "" {
-		for _, ln := range renderFinalSummary(outPath, stats) {
-			fmt.Fprintln(os.Stderr, ln)
-		}
+	// One cohesive summary: classic (-o) reports the output path; -od reports the
+	// resulting library size from the in-process ingest.
+	var summary []string
+	if cfg.LibraryDir != "" {
+		summary = renderIngestSummary(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), stats)
+	} else {
+		summary = renderFinalSummary(outPath, stats)
+	}
+	for _, ln := range summary {
+		fmt.Fprintln(os.Stderr, ln)
 	}
 	return nil
 }
@@ -288,6 +307,9 @@ func openSink(cfg runConfig) (*sink, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Holds the decrypted ULP; if a force-exit skips snk.cleanup the hint
+		// must point the analyst at it for manual removal.
+		ulpengine.RegisterCleanupPath(workDir)
 		ulpPath := filepath.Join(workDir, "sfl_generated_ulp.txt")
 		f, err := os.Create(ulpPath)
 		if err != nil {
@@ -364,36 +386,116 @@ func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *d
 	return eng
 }
 
-func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string) error {
-	if err := os.MkdirAll(cfg.LibraryDir, 0o755); err != nil {
-		return err
+// ingestToLibrary merges the generated ULP into the library in-process via the
+// shared dedup engine, identical to `sfu -od <lib> <ulp>`. It installs an ingest
+// view on prog so the live frame keeps rendering through the merge, and returns
+// the resolved run + metrics so the caller can report the final library size.
+func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *sflog.Progress) (*ulpengine.Resolved, *ulpengine.Metrics, error) {
+	ulpBytes := fileSizeOrZero(ulpPath)
+	m := &ulpengine.Metrics{}
+	var od atomic.Pointer[ulpengine.ODMetrics]
+
+	prog.BeginIngest(func() sflog.IngestView {
+		return ingestView(m, od.Load(), ulpBytes)
+	})
+
+	opts := ulpengine.IngestOptions{
+		ULPPath:    ulpPath,
+		LibraryDir: cfg.LibraryDir,
+		Workers:    cfg.Workers,
+		TempDir:    cfg.TempDir,
+		NoURI:      cfg.NoURI,
+		RunStarted: startedOrNow(cfg),
+		OnResolved: func(r *ulpengine.Resolved) {
+			if r != nil {
+				od.Store(r.OdMetrics)
+			}
+		},
 	}
-	sfu, err := locateSFUBinary()
-	if err != nil {
-		return err
+	r, err := ulpengine.Ingest(ctx, opts, m)
+	return r, m, err
+}
+
+// ingestView snapshots the dedup engine's atomics into the icy INGESTING frame:
+// an overall fraction blended across the engine phases plus added/already-there
+// counts.
+func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64) sflog.IngestView {
+	frac, status := ingestProgress(m, od, ulpBytes)
+	return sflog.IngestView{
+		Fraction: frac,
+		Unique:   m.LinesUnique.Load(),
+		Skipped:  m.LinesSkippedByDest.Load(),
+		Status:   status,
 	}
-	// Let sfu drive its own merge TUI; only force plain output when sfl itself
-	// was asked to run without a TUI. (sfu also auto-disables on a non-TTY.)
-	args := []string{ulpPath, "-od", cfg.LibraryDir}
-	if cfg.NoTUI {
-		args = append(args, "-no-tui")
+}
+
+// ingestProgress maps the engine's phase + byte counters onto a monotonic 0..1
+// bar with weighted segments so the frame keeps moving without overshooting:
+// phase-0 library prep 0-25%, read ULP 25-70%, dedup 70-97%, index 97-100%.
+func ingestProgress(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64) (float64, string) {
+	switch m.Phase.Load() {
+	case ulpengine.PhaseInit, ulpengine.PhasePhase0:
+		status := "scanning library…"
+		frac := 0.02
+		if od != nil {
+			if tot := od.RegenBytesTotal.Load(); tot > 0 {
+				status = "rebuilding library index…"
+				frac = 0.02 + 0.23*clampFrac(float64(od.RegenBytesRead.Load())/float64(tot))
+			}
+		}
+		return frac, status
+	case ulpengine.PhaseShard:
+		frac := 0.30
+		if ulpBytes > 0 {
+			frac = 0.25 + 0.45*clampFrac(float64(m.BytesRead.Load())/float64(ulpBytes))
+		}
+		return frac, "reading extracted credentials…"
+	case ulpengine.PhaseDedup:
+		frac := 0.75
+		if tot := m.BucketsBytesTotal.Load(); tot > 0 {
+			frac = 0.70 + 0.27*clampFrac(float64(m.BucketsBytesRead.Load())/float64(tot))
+		}
+		return frac, "merging & deduplicating against library…"
+	case ulpengine.PhaseIndex:
+		return 0.98, "finalizing library index…"
+	case ulpengine.PhaseDone:
+		return 1.0, "done"
 	}
-	if cfg.NoURI {
-		args = append(args, "-no-uri")
+	return 0, "preparing…"
+}
+
+func clampFrac(f float64) float64 {
+	if f < 0 {
+		return 0
 	}
-	if cfg.Workers > 0 {
-		args = append(args, "-workers", fmt.Sprintf("%d", cfg.Workers))
+	if f > 1 {
+		return 1
 	}
-	if cfg.TempDir != "" {
-		args = append(args, "-temp-dir", cfg.TempDir)
+	return f
+}
+
+// ingestLibraryLines is the indexed line count across the whole library after
+// the ingest: prior archives (loaded in phase 0) plus the unique lines just
+// written. Mirrors sfu's libraryLineCountTotal.
+func ingestLibraryLines(r *ulpengine.Resolved, m *ulpengine.Metrics) int64 {
+	if r == nil || r.OdResult == nil {
+		if m != nil {
+			return m.LinesUnique.Load()
+		}
+		return 0
 	}
-	if cfg.NoUpdateCheck {
-		args = append(args, "-no-update-check")
+	total := int64(r.OdResult.TotalKeysLoaded)
+	if m != nil {
+		total += m.LinesUnique.Load()
 	}
-	cmd := exec.CommandContext(ctx, sfu, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return total
+}
+
+func fileSizeOrZero(path string) int64 {
+	if fi, err := os.Stat(path); err == nil {
+		return fi.Size()
+	}
+	return 0
 }
 
 func startedOrNow(cfg runConfig) time.Time {
@@ -407,26 +509,6 @@ func printInterruptSummary(cfg runConfig) {
 	for _, ln := range renderInterruptSummary(time.Since(startedOrNow(cfg))) {
 		fmt.Fprintln(os.Stderr, ln)
 	}
-}
-
-func locateSFUBinary() (string, error) {
-	if p := strings.TrimSpace(os.Getenv("SFL_SFU_BIN")); p != "" {
-		return p, nil
-	}
-	if exe, err := os.Executable(); err == nil {
-		name := "sfu"
-		if runtime.GOOS == "windows" {
-			name += ".exe"
-		}
-		p := filepath.Join(filepath.Dir(exe), name)
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	if p, err := exec.LookPath("sfu"); err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("sfu binary not found; install sfu next to sfl or set SFL_SFU_BIN")
 }
 
 func createOutputPath(cfg runConfig) (string, error) {

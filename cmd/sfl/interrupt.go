@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
@@ -29,6 +27,5 @@ func watchInterrupt(ctx context.Context, files *fileabort.Registry, signaled fun
 	defer timer.Stop()
 	<-timer.C
 
-	fmt.Fprintln(os.Stderr, "\nforce-exit: interrupted (cleanup timed out)")
-	exitWithCode(130)
+	forceExit("\nforce-exit: interrupted (cleanup timed out)")
 }
