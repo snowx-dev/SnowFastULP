@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/snowx-dev/SnowFastULP/internal/cliargs"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
 func init() {
@@ -54,18 +55,18 @@ func TestIsVersionRequestSfuArgvShapes(t *testing.T) {
 }
 
 func TestEnsureDestDedupMetricsPrePublishesPointers(t *testing.T) {
-	r := &resolved{cfg: pipelineConfig{DestDedup: true}}
-	ensureDestDedupMetrics(r)
-	if r.odMetrics == nil {
+	r := &ulpengine.Resolved{Cfg: ulpengine.Config{DestDedup: true}}
+	ulpengine.EnsureDestDedupMetrics(r)
+	if r.OdMetrics == nil {
 		t.Fatal("odMetrics was not initialized")
 	}
-	if r.outputIdxMetrics == nil {
+	if r.OutputIdxMetrics == nil {
 		t.Fatal("outputIdxMetrics was not initialized")
 	}
-	od := r.odMetrics
-	out := r.outputIdxMetrics
-	ensureDestDedupMetrics(r)
-	if r.odMetrics != od || r.outputIdxMetrics != out {
+	od := r.OdMetrics
+	out := r.OutputIdxMetrics
+	ulpengine.EnsureDestDedupMetrics(r)
+	if r.OdMetrics != od || r.OutputIdxMetrics != out {
 		t.Fatal("ensureDestDedupMetrics replaced already-published metric pointers")
 	}
 }
@@ -100,7 +101,7 @@ func TestDeleteParsedInputsRemovesAndSkipsOutputPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	// path listed as both input and output must not be deleted
-	deleted, err := deleteParsedInputs([]string{in, outKeep}, []string{outKeep})
+	deleted, err := ulpengine.DeleteParsedInputs([]string{in, outKeep}, []string{outKeep})
 	if err != nil {
 		t.Fatal(err)
 	}

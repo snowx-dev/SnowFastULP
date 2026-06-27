@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
 func TestEstimateNeeds(t *testing.T) {
@@ -26,10 +28,10 @@ func TestEstimateNeeds(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r := &resolved{
-				cfg:         pipelineConfig{Compress: c.compress},
-				totalInputs: c.total,
-				useFastPath: c.fastPath,
+			r := &ulpengine.Resolved{
+				Cfg:         ulpengine.Config{Compress: c.compress},
+				TotalInputs: c.total,
+				UseFastPath: c.fastPath,
 			}
 			gotOut, gotTemp := estimateNeeds(r)
 			if gotOut != c.wantOut {
@@ -50,7 +52,7 @@ func TestBuildDiskWarningEmptyWhenEnoughSpace(t *testing.T) {
 }
 
 func TestPreflightCheckProceedsWhenNoWarning(t *testing.T) {
-	r := &resolved{totalInputs: 0}
+	r := &ulpengine.Resolved{TotalInputs: 0}
 	var out bytes.Buffer
 	ok, err := preflightCheck(context.Background(), r, true, strings.NewReader(""), &out)
 	if err != nil {
@@ -83,13 +85,13 @@ func TestPreflightNonInteractiveAutoContinuesWithWarning(t *testing.T) {
 }
 
 // 2^60 bytes vs os.TempDir, always trips the warning branch
-func bigOverflowResolved() *resolved {
+func bigOverflowResolved() *ulpengine.Resolved {
 	tmp := os.TempDir()
-	return &resolved{
-		cfg:         pipelineConfig{Output: filepath.Join(tmp, "sfu-preflight-test-output.txt")},
-		totalInputs: 1 << 60,
-		tempDir:     tmp,
-		useFastPath: true,
+	return &ulpengine.Resolved{
+		Cfg:         ulpengine.Config{Output: filepath.Join(tmp, "sfu-preflight-test-output.txt")},
+		TotalInputs: 1 << 60,
+		TempDir:     tmp,
+		UseFastPath: true,
 	}
 }
 

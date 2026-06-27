@@ -6,13 +6,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
 func TestRenderODFrameDiscoverShowsLegacyHint(t *testing.T) {
-	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseDiscover))
-	m.archivesTotal.Store(5)
-	m.partsUpgradeTotal.Store(12)
+	m := &ulpengine.ODMetrics{}
+	m.Phase.Store(int32(ulpengine.ODPhaseDiscover))
+	m.ArchivesTotal.Store(5)
+	m.PartsUpgradeTotal.Store(12)
 
 	lines := renderODFrame(m, 0, 86)
 	joined := strings.Join(lines, "\n")
@@ -32,12 +34,12 @@ func TestRenderODFrameInactiveYieldsNil(t *testing.T) {
 	if got := renderODFrame(nil, 0, 86); got != nil {
 		t.Errorf("nil odMetrics: want nil, got %v", got)
 	}
-	idle := &odMetrics{}
+	idle := &ulpengine.ODMetrics{}
 	if got := renderODFrame(idle, 0, 86); got != nil {
 		t.Errorf("phaseIdle: want nil, got %v", got)
 	}
-	done := &odMetrics{}
-	done.phase.Store(int32(odPhaseDone))
+	done := &ulpengine.ODMetrics{}
+	done.Phase.Store(int32(ulpengine.ODPhaseDone))
 	if got := renderODFrame(done, 0, 86); got != nil {
 		t.Errorf("phaseDone: want nil, got %v", got)
 	}
@@ -46,15 +48,15 @@ func TestRenderODFrameInactiveYieldsNil(t *testing.T) {
 // regen phase: archive count, X/Y, bytes denom. substring-level
 // checks survive border-rune fiddling
 func TestRenderODFrameRegenContents(t *testing.T) {
-	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseRegen))
-	m.archivesTotal.Store(12)
-	m.archivesNeedRegen.Store(3)
-	m.archivesRegenedDone.Store(1)
-	m.regenBytesTotal.Store(187 * 1024 * 1024 * 1024) // 187 GB
-	m.regenBytesRead.Store(62 * 1024 * 1024 * 1024)
-	m.keysTotalEstimate.Store(1_500_000_000)
-	m.keysLoaded.Store(500_000_000)
+	m := &ulpengine.ODMetrics{}
+	m.Phase.Store(int32(ulpengine.ODPhaseRegen))
+	m.ArchivesTotal.Store(12)
+	m.ArchivesNeedRegen.Store(3)
+	m.ArchivesRegenedDone.Store(1)
+	m.RegenBytesTotal.Store(187 * 1024 * 1024 * 1024) // 187 GB
+	m.RegenBytesRead.Store(62 * 1024 * 1024 * 1024)
+	m.KeysTotalEstimate.Store(1_500_000_000)
+	m.KeysLoaded.Store(500_000_000)
 
 	lines := renderODFrame(m, 0, 86)
 	joined := strings.Join(lines, "\n")
@@ -73,12 +75,12 @@ func TestRenderODFrameRegenContents(t *testing.T) {
 }
 
 func TestRenderODFrameUpgradeContents(t *testing.T) {
-	m := &odMetrics{}
-	m.phase.Store(int32(odPhaseUpgrade))
-	m.archivesTotal.Store(38)
-	m.filesTotal.Store(66)
-	m.partsRegenTotal.Store(56)
-	m.partsRegenDone.Store(39)
+	m := &ulpengine.ODMetrics{}
+	m.Phase.Store(int32(ulpengine.ODPhaseUpgrade))
+	m.ArchivesTotal.Store(38)
+	m.FilesTotal.Store(66)
+	m.PartsRegenTotal.Store(56)
+	m.PartsRegenDone.Store(39)
 
 	lines := renderODFrame(m, 0, 86)
 	joined := strings.Join(lines, "\n")
@@ -103,15 +105,15 @@ func TestRenderODFrameUpgradeContents(t *testing.T) {
 
 // active odMetrics: OD frame stacks between bars and footer
 func TestRenderShardLinesIncludesODFrame(t *testing.T) {
-	r := &resolved{
-		totalInputs: 1 << 30, inputFileCount: 1, workers: 4,
-		dedupWorkers: 2, bucketCount: 64,
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 30, InputFileCount: 1, Workers: 4,
+		DedupWorkers: 2, BucketCount: 64,
 	}
-	r.odMetrics = &odMetrics{}
-	r.odMetrics.phase.Store(int32(odPhaseRegen))
-	r.odMetrics.archivesTotal.Store(5)
+	r.OdMetrics = &ulpengine.ODMetrics{}
+	r.OdMetrics.Phase.Store(int32(ulpengine.ODPhaseRegen))
+	r.OdMetrics.ArchivesTotal.Store(5)
 
-	lines := renderShardLines(time.Now(), time.Second, &metrics{}, r, 100, 100, 1, 1, 0, 86)
+	lines := renderShardLines(time.Now(), time.Second, &ulpengine.Metrics{}, r, 100, 100, 1, 1, 0, 86)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "Destination dedup") {
 		t.Errorf("shard render missing OD frame\nfull:\n%s", joined)
@@ -120,11 +122,11 @@ func TestRenderShardLinesIncludesODFrame(t *testing.T) {
 
 // -od off = zero TUI impact, not even spacer blank line
 func TestRenderShardLinesNoODWhenInactive(t *testing.T) {
-	r := &resolved{
-		totalInputs: 1 << 30, inputFileCount: 1, workers: 4,
-		dedupWorkers: 2, bucketCount: 64,
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 30, InputFileCount: 1, Workers: 4,
+		DedupWorkers: 2, BucketCount: 64,
 	}
-	lines := renderShardLines(time.Now(), time.Second, &metrics{}, r, 100, 100, 1, 1, 0, 86)
+	lines := renderShardLines(time.Now(), time.Second, &ulpengine.Metrics{}, r, 100, 100, 1, 1, 0, 86)
 	joined := strings.Join(lines, "\n")
 	if strings.Contains(joined, "Destination dedup") {
 		t.Errorf("non-od run leaked OD frame into TUI\nfull:\n%s", joined)
@@ -133,12 +135,12 @@ func TestRenderShardLinesNoODWhenInactive(t *testing.T) {
 
 // OD library recap must follow main COMPLETE stats frame
 func TestRenderFinalStdoutSummaryODBlockOrder(t *testing.T) {
-	r := &resolved{
-		totalInputs: 1 << 30, inputFileCount: 1, workers: 4,
-		dedupWorkers: 2, bucketCount: 64,
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 30, InputFileCount: 1, Workers: 4,
+		DedupWorkers: 2, BucketCount: 64,
 	}
-	r.cfg.DestDedup = true
-	r.odResult = &odResult{
+	r.Cfg.DestDedup = true
+	r.OdResult = &ulpengine.ODResult{
 		ArchivesTotal:   5,
 		ArchivesFresh:   3,
 		ArchivesRegen:   2,
@@ -147,7 +149,7 @@ func TestRenderFinalStdoutSummaryODBlockOrder(t *testing.T) {
 	}
 	r.OutputPaths = []string{filepath.Join(t.TempDir(), "sfu_xyz.txt.zst")}
 
-	out := renderFinalStdoutSummary(60*time.Second, &metrics{}, r, 86, nil)
+	out := renderFinalStdoutSummary(60*time.Second, &ulpengine.Metrics{}, r, 86, nil)
 	joined := strings.Join(out, "\n")
 
 	odIdx := strings.Index(joined, "lines in library")
@@ -176,8 +178,8 @@ func TestRenderFinalStdoutSummaryODBlockOrder(t *testing.T) {
 
 // library line count on its own row, never ellipsised
 func TestRenderODSummaryLargeCountNotTruncated(t *testing.T) {
-	r := &resolved{}
-	r.odResult = &odResult{
+	r := &ulpengine.Resolved{}
+	r.OdResult = &ulpengine.ODResult{
 		ArchivesTotal:   3,
 		TotalKeysLoaded: 15_234_567_890_123,
 	}
@@ -192,8 +194,8 @@ func TestRenderODSummaryLargeCountNotTruncated(t *testing.T) {
 }
 
 func TestRenderODSummaryShowsUpgradeComplete(t *testing.T) {
-	r := &resolved{}
-	r.odResult = &odResult{
+	r := &ulpengine.Resolved{}
+	r.OdResult = &ulpengine.ODResult{
 		ArchivesTotal:    2,
 		TotalKeysLoaded:  1000,
 		ArchivesUpgraded: 3,
@@ -208,13 +210,13 @@ func TestRenderODSummaryShowsUpgradeComplete(t *testing.T) {
 }
 
 func TestRenderODSummaryIncludesNewlyAddedLines(t *testing.T) {
-	r := &resolved{}
-	r.odResult = &odResult{
+	r := &ulpengine.Resolved{}
+	r.OdResult = &ulpengine.ODResult{
 		ArchivesTotal:   3,
 		TotalKeysLoaded: 1_000_000,
 	}
-	m := &metrics{}
-	m.linesUnique.Store(42_500)
+	m := &ulpengine.Metrics{}
+	m.LinesUnique.Store(42_500)
 	out := strings.Join(renderODSummary(r, m, 86), "\n")
 	want := formatCount(1_042_500)
 	if !strings.Contains(out, want) {
@@ -227,11 +229,11 @@ func TestRenderODSummaryIncludesNewlyAddedLines(t *testing.T) {
 
 // COMPLETE frame always shows lines read, not just when -od is on
 func TestRenderDoneLinesIncludesLinesRead(t *testing.T) {
-	m := &metrics{}
-	m.linesRead.Store(1_234_567)
-	r := &resolved{
-		totalInputs: 1 << 20, inputFileCount: 2, workers: 1,
-		dedupWorkers: 1, bucketCount: 1,
+	m := &ulpengine.Metrics{}
+	m.LinesRead.Store(1_234_567)
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 20, InputFileCount: 2, Workers: 1,
+		DedupWorkers: 1, BucketCount: 1,
 	}
 	out := strings.Join(renderDoneLines(time.Second, m, r, 86), "\n")
 	if !strings.Contains(out, "1,234,567") {
@@ -244,10 +246,10 @@ func TestRenderDoneLinesIncludesLinesRead(t *testing.T) {
 
 // -del paths print before COMPLETE, summary stays visible at scale
 func TestRenderFinalStdoutSummaryDeletedBeforeComplete(t *testing.T) {
-	r := &resolved{
+	r := &ulpengine.Resolved{
 		DeletedInputPaths: []string{"/data/in/a.txt", "/data/in/b.txt"},
 	}
-	out := strings.Join(renderFinalStdoutSummary(time.Second, &metrics{}, r, 86, nil), "\n")
+	out := strings.Join(renderFinalStdoutSummary(time.Second, &ulpengine.Metrics{}, r, 86, nil), "\n")
 	idxDel := strings.Index(out, "Deleted")
 	idxDone := strings.Index(out, "COMPLETE")
 	if idxDel < 0 || idxDone < 0 {
@@ -260,7 +262,7 @@ func TestRenderFinalStdoutSummaryDeletedBeforeComplete(t *testing.T) {
 
 // -del paths get same gutter as output paths
 func TestRenderDoneDeletedFooterListsAllPaths(t *testing.T) {
-	r := &resolved{}
+	r := &ulpengine.Resolved{}
 	r.DeletedInputPaths = []string{
 		"/data/in/a.txt",
 		"/data/in/b.txt",
@@ -279,15 +281,15 @@ func TestRenderDoneDeletedFooterListsAllPaths(t *testing.T) {
 
 // skipped archive paths must appear in final summary
 func TestRenderODSkippedPathsListed(t *testing.T) {
-	r := &resolved{totalInputs: 1 << 20, inputFileCount: 1, workers: 1, dedupWorkers: 1, bucketCount: 1}
-	r.cfg.DestDedup = true
-	r.odResult = &odResult{
+	r := &ulpengine.Resolved{TotalInputs: 1 << 20, InputFileCount: 1, Workers: 1, DedupWorkers: 1, BucketCount: 1}
+	r.Cfg.DestDedup = true
+	r.OdResult = &ulpengine.ODResult{
 		ArchivesTotal:       3,
 		ArchivesSkipped:     2,
 		SkippedArchivePaths: []string{"/lib/sfu_a.txt.zst", "/lib/sfu_b.txt.zst"},
 	}
-	out := strings.Join(renderFinalStdoutSummary(time.Second, &metrics{}, r, 86, nil), "\n")
-	for _, p := range r.odResult.SkippedArchivePaths {
+	out := strings.Join(renderFinalStdoutSummary(time.Second, &ulpengine.Metrics{}, r, 86, nil), "\n")
+	for _, p := range r.OdResult.SkippedArchivePaths {
 		if !strings.Contains(out, p) {
 			t.Errorf("skipped archive path %q must appear in summary; got:\n%s", p, out)
 		}
@@ -300,9 +302,9 @@ func TestRenderODSkippedPathsTruncated(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		paths = append(paths, fmt.Sprintf("/lib/sfu_%02d.txt.zst", i))
 	}
-	r := &resolved{totalInputs: 1 << 20, inputFileCount: 1, workers: 1, dedupWorkers: 1, bucketCount: 1}
-	r.cfg.DestDedup = true
-	r.odResult = &odResult{
+	r := &ulpengine.Resolved{TotalInputs: 1 << 20, InputFileCount: 1, Workers: 1, DedupWorkers: 1, BucketCount: 1}
+	r.Cfg.DestDedup = true
+	r.OdResult = &ulpengine.ODResult{
 		ArchivesTotal:       12,
 		ArchivesSkipped:     12,
 		SkippedArchivePaths: paths,
@@ -315,14 +317,14 @@ func TestRenderODSkippedPathsTruncated(t *testing.T) {
 
 // -od skipped lines = DONE Removed row gets "already in library" bullet
 func TestRenderDoneLinesIncludesLibrarySkipped(t *testing.T) {
-	m := &metrics{}
-	m.linesAccepted.Store(100)
-	m.linesUnique.Store(80)
-	m.linesRejected.Store(5)
-	m.linesSkippedByDest.Store(15)
-	r := &resolved{
-		totalInputs: 1 << 20, inputFileCount: 1, workers: 1,
-		dedupWorkers: 1, bucketCount: 1,
+	m := &ulpengine.Metrics{}
+	m.LinesAccepted.Store(100)
+	m.LinesUnique.Store(80)
+	m.LinesRejected.Store(5)
+	m.LinesSkippedByDest.Store(15)
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 20, InputFileCount: 1, Workers: 1,
+		DedupWorkers: 1, BucketCount: 1,
 	}
 	out := renderDoneLines(time.Second, m, r, 86)
 	joined := strings.Join(out, "\n")

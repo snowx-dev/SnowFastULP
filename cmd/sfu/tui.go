@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
 
@@ -515,39 +516,39 @@ func formatRate(bps float64) string {
 
 // labeled pipeline step count. -od = 3 (parse, dedup, output index),
 // else 2 (parse, dedup)
-func tuiPhaseTotal(r *resolved) int {
-	if r != nil && r.cfg.DestDedup {
+func tuiPhaseTotal(r *ulpengine.Resolved) int {
+	if r != nil && r.Cfg.DestDedup {
 		return 3
 	}
 	return 2
 }
 
 // 1-based step label, eg "[2/3 DEDUPING]"
-func renderPhaseTag(r *resolved, step int, label string) string {
+func renderPhaseTag(r *ulpengine.Resolved, step int, label string) string {
 	return renderPhaseTagWithTotal(tuiPhaseTotal(r), step, label)
 }
 
 // step-1 tag while -od library prep runs. parsing still active → PARSING;
 // inputs fully read but sidecar work continues → LIBRARY PREP.
-func renderStep1PhaseTag(r *resolved, m *metrics) string {
-	if r != nil && r.cfg.DestDedup && odPhaseInFlight(r.odMetrics) && shardInputsFullyRead(m, r) {
+func renderStep1PhaseTag(r *ulpengine.Resolved, m *ulpengine.Metrics) string {
+	if r != nil && r.Cfg.DestDedup && ulpengine.ODPhaseInFlight(r.OdMetrics) && shardInputsFullyRead(m, r) {
 		return renderPhaseTag(r, 1, "LIBRARY PREP")
 	}
 	return renderPhaseTag(r, 1, "PARSING")
 }
 
 // muted header badges after the phase tag during dedup.
-func renderDedupHeaderBadges(r *resolved) string {
+func renderDedupHeaderBadges(r *ulpengine.Resolved) string {
 	if r == nil {
 		return ""
 	}
 	var badges []string
-	if r.cfg.DestDedup && r.odMetrics != nil {
-		if total := r.odMetrics.keysTotalEstimate.Load(); total > 0 {
+	if r.Cfg.DestDedup && r.OdMetrics != nil {
+		if total := r.OdMetrics.KeysTotalEstimate.Load(); total > 0 {
 			badges = append(badges, "vs "+formatLibraryCount(total)+" library")
 		}
 	}
-	if r.cfg.Compress {
+	if r.Cfg.Compress {
 		badges = append(badges, "compressing")
 	}
 	if len(badges) == 0 {
@@ -561,14 +562,14 @@ func renderDedupHeaderBadges(r *resolved) string {
 	return out.String()
 }
 
-func shardInputsFullyRead(m *metrics, r *resolved) bool {
+func shardInputsFullyRead(m *ulpengine.Metrics, r *ulpengine.Resolved) bool {
 	if m == nil || r == nil {
 		return false
 	}
-	if ct := m.chunksTotal.Load(); ct > 0 && m.chunksDone.Load() >= ct {
+	if ct := m.ChunksTotal.Load(); ct > 0 && m.ChunksDone.Load() >= ct {
 		return true
 	}
-	if r.totalInputs > 0 && m.bytesRead.Load() >= r.totalInputs {
+	if r.TotalInputs > 0 && m.BytesRead.Load() >= r.TotalInputs {
 		return true
 	}
 	return false
@@ -925,10 +926,10 @@ func renderLiveScreenFooter(width int) []string {
 // layout: blank, header, blank, 4 stat rows, blank, parsing bar,
 // blank, dedup bar, blank, frost tagline footer
 
-func renderShardLines(now time.Time, elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, readBPS, shardBPS, regenBPS float64, width int) []string {
+func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, readBPS, shardBPS, regenBPS float64, width int) []string {
 	pct := 0.0
-	if r.totalInputs > 0 {
-		pct = float64(m.bytesRead.Load()) / float64(r.totalInputs)
+	if r.TotalInputs > 0 {
+		pct = float64(m.BytesRead.Load()) / float64(r.TotalInputs)
 		if pct > 1 {
 			pct = 1
 		}
@@ -936,32 +937,32 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 
 	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderStep1PhaseTag(r, m), elapsed, width)
 
-	chunksDigits := numDigits(m.chunksTotal.Load())
-	workersDigits := numDigits(int64(r.workers))
+	chunksDigits := numDigits(m.ChunksTotal.Load())
+	workersDigits := numDigits(int64(r.Workers))
 
 	// stat rows w/o per-row indentLine, gradientBox owns framing+indent
 	throughput := labelStyle.Render("Throughput") + "   " +
 		"read " + byteStyle.Render(padRight(formatRate(readBPS), rateColWidth)) + "    " +
 		"shard " + byteStyle.Render(padRight(formatRate(shardBPS), rateColWidth))
 	linesInline := labelStyle.Render("Lines") + "        " +
-		countStyle.Render(formatCount(m.linesRead.Load())) + " total " + mutedStyle.Render("·") + " " +
-		acceptStyle.Render(formatCount(m.linesAccepted.Load())) + " accepted " + mutedStyle.Render("·") + " " +
-		renderRejected(m.linesRejected.Load())
+		countStyle.Render(formatCount(m.LinesRead.Load())) + " total " + mutedStyle.Render("·") + " " +
+		acceptStyle.Render(formatCount(m.LinesAccepted.Load())) + " accepted " + mutedStyle.Render("·") + " " +
+		renderRejected(m.LinesRejected.Load())
 	linesStats := []lineStat{
-		{"total", formatCount(m.linesRead.Load()), countStyle},
-		{"accepted", formatCount(m.linesAccepted.Load()), acceptStyle},
-		{"rejected", formatCount(m.linesRejected.Load()), mutedStyle},
+		{"total", formatCount(m.LinesRead.Load()), countStyle},
+		{"accepted", formatCount(m.LinesAccepted.Load()), acceptStyle},
+		{"rejected", formatCount(m.LinesRejected.Load()), mutedStyle},
 	}
-	totalBytesStr := humanBytes(r.totalInputs)
-	readBytesStr := padLeft(humanBytes(m.bytesRead.Load()), len(totalBytesStr))
+	totalBytesStr := humanBytes(r.TotalInputs)
+	readBytesStr := padLeft(humanBytes(m.BytesRead.Load()), len(totalBytesStr))
 	progressRow := labelStyle.Render("Progress") + "     " +
 		byteStyle.Render(readBytesStr) + " / " + byteStyle.Render(totalBytesStr) + "    " +
-		"chunks " + countStyle.Render(fmt.Sprintf("%*d / %d", chunksDigits, m.chunksDone.Load(), m.chunksTotal.Load())) + "    " +
-		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.busyWorkers.Load(), r.workers))
+		"chunks " + countStyle.Render(fmt.Sprintf("%*d / %d", chunksDigits, m.ChunksDone.Load(), m.ChunksTotal.Load())) + "    " +
+		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.Workers))
 	systemRow := labelStyle.Render("System") + "       " +
 		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
 		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct)) + "    " +
-		"buckets " + countStyle.Render(fmt.Sprintf("%d", r.bucketCount))
+		"buckets " + countStyle.Render(fmt.Sprintf("%d", r.BucketCount))
 
 	// gradientBox reserves 2 borders + 4 padding, remaining = inner
 	innerW := boxInnerWidth(width)
@@ -978,21 +979,21 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	out = append(out, "", bars[0], "", bars[1])
 	// optional -od phase 0 frame, nil when no dest-dedup work
 	if r != nil {
-		out = append(out, renderODFrame(r.odMetrics, regenBPS, width)...)
+		out = append(out, renderODFrame(r.OdMetrics, regenBPS, width)...)
 	}
 	out = append(out, renderLiveScreenFooter(width)...)
 	return out
 }
 
-func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, writeBPS, regenBPS float64, width int) []string {
-	bd := m.bucketsDone.Load()
-	bt := m.bucketsTotal.Load()
+func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, writeBPS, regenBPS float64, width int) []string {
+	bd := m.BucketsDone.Load()
+	bt := m.BucketsTotal.Load()
 	pct2 := 0.0
 	// prefer byte-level progress so bar moves smoothly within a bucket
 	// (whole-bucket completions are chunky when N workers start
 	// together). falls back to bucket-count ratio when bytes unknown
-	if bbT := m.bucketsBytesTotal.Load(); bbT > 0 {
-		pct2 = float64(m.bucketsBytesRead.Load()) / float64(bbT)
+	if bbT := m.BucketsBytesTotal.Load(); bbT > 0 {
+		pct2 = float64(m.BucketsBytesRead.Load()) / float64(bbT)
 	} else if bt > 0 {
 		pct2 = float64(bd) / float64(bt)
 	}
@@ -1011,20 +1012,20 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	header := headerLeft + strings.Repeat(" ", headerPad) + headerRight
 
 	bucketsDigits := numDigits(bt)
-	workersDigits := numDigits(int64(r.dedupWorkers))
+	workersDigits := numDigits(int64(r.DedupWorkers))
 
 	throughput := labelStyle.Render("Throughput") + "   " +
 		"write " + byteStyle.Render(padRight(formatRate(writeBPS), rateColWidth))
 	linesInline := labelStyle.Render("Lines") + "        " +
-		uniqueStyle.Render(formatCount(m.linesUnique.Load())) + " unique so far " + mutedStyle.Render("·") + " " +
-		renderRejected(m.linesRejected.Load()) + " " + mutedStyle.Render("(final)")
+		uniqueStyle.Render(formatCount(m.LinesUnique.Load())) + " unique so far " + mutedStyle.Render("·") + " " +
+		renderRejected(m.LinesRejected.Load()) + " " + mutedStyle.Render("(final)")
 	linesStats := []lineStat{
-		{"unique so far", formatCount(m.linesUnique.Load()), uniqueStyle},
-		{"rejected (final)", formatCount(m.linesRejected.Load()), mutedStyle},
+		{"unique so far", formatCount(m.LinesUnique.Load()), uniqueStyle},
+		{"rejected (final)", formatCount(m.LinesRejected.Load()), mutedStyle},
 	}
 	progressRow := labelStyle.Render("Progress") + "     " +
 		"buckets " + countStyle.Render(fmt.Sprintf("%*d / %d", bucketsDigits, bd, bt)) + "    " +
-		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.busyWorkers.Load(), r.dedupWorkers))
+		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.DedupWorkers))
 	systemRow := labelStyle.Render("System") + "       " +
 		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
 		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
@@ -1034,9 +1035,9 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
 	innerLines = append(innerLines, progressRow, systemRow)
 	// -od: live library index scan while each bucket's dest set is loaded
-	if r != nil && r.cfg.DestDedup && r.odMetrics != nil {
-		if total := r.odMetrics.keysTotalEstimate.Load(); total > 0 {
-			done := r.odMetrics.keysLoaded.Load()
+	if r != nil && r.Cfg.DestDedup && r.OdMetrics != nil {
+		if total := r.OdMetrics.KeysTotalEstimate.Load(); total > 0 {
+			done := r.OdMetrics.KeysLoaded.Load()
 			if done > total {
 				done = total
 			}
@@ -1052,21 +1053,21 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	out = append(out, boxLines...)
 	out = append(out, "", bars[0], "", bars[1])
 	if r != nil {
-		out = append(out, renderODFrame(r.odMetrics, regenBPS, width)...)
+		out = append(out, renderODFrame(r.OdMetrics, regenBPS, width)...)
 	}
 	out = append(out, renderLiveScreenFooter(width)...)
 	return out
 }
 
-func outputPathsForUI(r *resolved) []string {
+func outputPathsForUI(r *ulpengine.Resolved) []string {
 	if r == nil {
 		return nil
 	}
 	if len(r.OutputPaths) > 0 {
 		return r.OutputPaths
 	}
-	if strings.TrimSpace(r.cfg.Output) != "" {
-		return []string{r.cfg.Output}
+	if strings.TrimSpace(r.Cfg.Output) != "" {
+		return []string{r.Cfg.Output}
 	}
 	return nil
 }
@@ -1074,13 +1075,13 @@ func outputPathsForUI(r *resolved) []string {
 // final summary bordered block. box sized to (width-leftPad-2) so right
 // edge stays inside the grid after 4-col indent.
 // for full post-success stdout use renderFinalStdoutSummary
-func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) []string {
-	uniq := m.linesUnique.Load()
-	rej := m.linesRejected.Load()
-	skippedByDest := m.linesSkippedByDest.Load()
+func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, width int) []string {
+	uniq := m.LinesUnique.Load()
+	rej := m.LinesRejected.Load()
+	skippedByDest := m.LinesSkippedByDest.Load()
 	// genuine within-run dups = parsed cleanly - unique - library hits.
 	// w/o dest subtraction a -od run double-counts library hits
-	dup := m.linesAccepted.Load() - uniq - skippedByDest
+	dup := m.LinesAccepted.Load() - uniq - skippedByDest
 	if dup < 0 {
 		dup = 0
 	}
@@ -1090,10 +1091,10 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 	// "Output" reports on-disk size. -zst appends "(N.NNx compressed)"
 	// against the byte counter (uncompressed input to encoder). stat
 	// failure falls back to counter
-	outBytes := m.bytesWritten.Load()
+	outBytes := m.BytesWritten.Load()
 	outDisplay := humanBytes(outBytes)
 	var ratioNote string
-	if r.cfg.Compress {
+	if r.Cfg.Compress {
 		paths := outputPathsForUI(r)
 		if len(paths) > 0 {
 			var diskSize int64
@@ -1135,10 +1136,10 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 	removedRows := renderRemovedRows(removedBullets, boxInnerWidth(width))
 
 	innerLines := []string{
-		labelStyle.Render("Input    ") + byteStyle.Render(humanBytes(r.totalInputs)) +
+		labelStyle.Render("Input    ") + byteStyle.Render(humanBytes(r.TotalInputs)) +
 			"  " + mutedStyle.Render("across") + "  " +
-			countStyle.Render(fmt.Sprintf("%d", r.inputFileCount)) + " " + mutedStyle.Render("files"),
-		labelStyle.Render("Lines    ") + countStyle.Render(formatCount(m.linesRead.Load())) +
+			countStyle.Render(fmt.Sprintf("%d", r.InputFileCount)) + " " + mutedStyle.Render("files"),
+		labelStyle.Render("Lines    ") + countStyle.Render(formatCount(m.LinesRead.Load())) +
 			" " + mutedStyle.Render("read"),
 		labelStyle.Render("Output   ") + byteStyle.Render(outDisplay) + mutedStyle.Render(ratioNote),
 		labelStyle.Render("Unique   ") + uniqueStyle.Render(formatCount(uniq)) + " " + mutedStyle.Render("entries"),
@@ -1157,7 +1158,7 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 
 // everything printed post-success on main screen: COMPLETE frame, optional
 // -od library recap, output path row, frost tagline footer
-func renderFinalStdoutSummary(elapsed time.Duration, m *metrics, r *resolved, width int, notice *selfupdate.Notice) []string {
+func renderFinalStdoutSummary(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, width int, notice *selfupdate.Notice) []string {
 	var out []string
 	// -del paths before DONE summary so long delete lists dont
 	// push stats off-screen
@@ -1184,10 +1185,10 @@ func pluralizeArchives(n int) string {
 
 // libraryLineCountTotal is the indexed line count across the whole library
 // after this run: prior archives (phase 0) plus unique lines just written.
-func libraryLineCountTotal(res *odResult, m *metrics) int64 {
+func libraryLineCountTotal(res *ulpengine.ODResult, m *ulpengine.Metrics) int64 {
 	total := int64(res.TotalKeysLoaded)
 	if m != nil {
-		total += m.linesUnique.Load()
+		total += m.LinesUnique.Load()
 	}
 	return total
 }
@@ -1195,11 +1196,11 @@ func libraryLineCountTotal(res *odResult, m *metrics) int64 {
 // post-run library recap shown below COMPLETE frame when -od used.
 // nil when no odResult or empty library (first -od run).
 // intentionally minimal so multi-billion entry libraries never ellipsise
-func renderODSummary(r *resolved, m *metrics, width int) []string {
-	if r == nil || r.odResult == nil {
+func renderODSummary(r *ulpengine.Resolved, m *ulpengine.Metrics, width int) []string {
+	if r == nil || r.OdResult == nil {
 		return nil
 	}
-	res := r.odResult
+	res := r.OdResult
 	if res.ArchivesTotal == 0 {
 		return nil
 	}
@@ -1225,11 +1226,11 @@ func renderODSummary(r *resolved, m *metrics, width int) []string {
 // per-archive skipped paths AFTER alt-screen teardown. stderr writes
 // during phase 0 get wiped, so user has no way to find skipped files
 // w/o -debug. capped at 5, "and N more" trailer
-func renderODSkippedPaths(r *resolved, width int) []string {
-	if r == nil || r.odResult == nil {
+func renderODSkippedPaths(r *ulpengine.Resolved, width int) []string {
+	if r == nil || r.OdResult == nil {
 		return nil
 	}
-	paths := r.odResult.SkippedArchivePaths
+	paths := r.OdResult.SkippedArchivePaths
 	if len(paths) == 0 {
 		return nil
 	}
@@ -1254,7 +1255,7 @@ func renderODSkippedPaths(r *resolved, width int) []string {
 // one row per output file below DONE frame. same label width/colors as
 // inside the box. additional archives align under the first path.
 // paths NOT padOrTrim'd, can span full terminal width
-func renderDoneOutputFooter(r *resolved) []string {
+func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
 	if r == nil {
 		return nil
 	}
@@ -1285,7 +1286,7 @@ func renderDoneOutputFooter(r *resolved) []string {
 }
 
 // one row per -del'd input. same gutter/label column as output footer
-func renderDoneDeletedFooter(r *resolved) []string {
+func renderDoneDeletedFooter(r *ulpengine.Resolved) []string {
 	if r == nil || len(r.DeletedInputPaths) == 0 {
 		return nil
 	}
@@ -1322,11 +1323,11 @@ var interruptWarnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Adap
 //
 // renderPhase0Lines is the primary panel when phase 0 is in flight.
 // shown after parsing finishes while library sidecar work continues.
-func renderPhase0Lines(elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
+func renderPhase0Lines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
 	now := time.Now()
 	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "LIBRARY PREP"), elapsed, width)
 
-	odLines := renderODFrame(r.odMetrics, regenBPS, width)
+	odLines := renderODFrame(r.OdMetrics, regenBPS, width)
 	// renderODFrame leads w/ blank for spacing under main frame.
 	// in phase-0-primary mode the header above already provides it
 	if len(odLines) > 0 && odLines[0] == "" {
@@ -1347,13 +1348,13 @@ func renderPhase0Lines(elapsed time.Duration, m *metrics, r *resolved, ramMB flo
 
 // primary panel during phaseIndex (post-dedup own-output sidecar pass).
 // mirrors renderPhase0Lines so user sees a coherent regen frame across phases
-func renderIndexLines(elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
+func renderIndexLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
 	now := time.Now()
 	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTagWithTotal(3, 3, "INDEXING OUTPUT"), elapsed, width)
 
-	var odMetricsForFrame *odMetrics
+	var odMetricsForFrame *ulpengine.ODMetrics
 	if r != nil {
-		odMetricsForFrame = r.outputIdxMetrics
+		odMetricsForFrame = r.OutputIdxMetrics
 	}
 	odLines := renderODFrame(odMetricsForFrame, regenBPS, width)
 	if len(odLines) > 0 && odLines[0] == "" {
@@ -1398,46 +1399,46 @@ func workerRowCap(termHeight, totalWorkers int) int {
 	return available
 }
 
-func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
+func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string {
 	if m == nil {
 		return nil
 	}
-	phase := odPhase(m.phase.Load())
-	if phase == odPhaseIdle || phase == odPhaseDone {
+	phase := ulpengine.ODPhase(m.Phase.Load())
+	if phase == ulpengine.ODPhaseIdle || phase == ulpengine.ODPhaseDone {
 		return nil
 	}
 
-	archivesTotal := m.archivesTotal.Load()
-	filesTotal := m.filesTotal.Load()
-	archivesNeedRegen := m.archivesNeedRegen.Load()
-	archivesRegenedDone := m.archivesRegenedDone.Load()
-	archivesSkipped := m.archivesSkipped.Load()
-	partsRegenTotal := m.partsRegenTotal.Load()
-	partsRegenDone := m.partsRegenDone.Load()
-	regenBytesTotal := m.regenBytesTotal.Load()
-	regenBytesRead := m.regenBytesRead.Load()
+	archivesTotal := m.ArchivesTotal.Load()
+	filesTotal := m.FilesTotal.Load()
+	archivesNeedRegen := m.ArchivesNeedRegen.Load()
+	archivesRegenedDone := m.ArchivesRegenedDone.Load()
+	archivesSkipped := m.ArchivesSkipped.Load()
+	partsRegenTotal := m.PartsRegenTotal.Load()
+	partsRegenDone := m.PartsRegenDone.Load()
+	regenBytesTotal := m.RegenBytesTotal.Load()
+	regenBytesRead := m.RegenBytesRead.Load()
 	// per-part sidecars finalize inline at end of each task, so no
 	// "streaming done, finalizing sidecars" sub-phase. 100% bytes = done
 
 	var phaseDesc string
 	switch phase {
-	case odPhaseDiscover:
+	case ulpengine.ODPhaseDiscover:
 		phaseDesc = "scanning library"
-		if m.partsUpgradeTotal.Load() > 0 {
+		if m.PartsUpgradeTotal.Load() > 0 {
 			phaseDesc = "scanning library · legacy index detected"
 		}
-	case odPhaseRegen:
+	case ulpengine.ODPhaseRegen:
 		phaseDesc = "indexing archives + writing .idx"
-	case odPhaseUpgrade:
+	case ulpengine.ODPhaseUpgrade:
 		phaseDesc = "upgrading index format (v2→v3)"
-	case odPhaseIndexOwn:
+	case ulpengine.ODPhaseIndexOwn:
 		phaseDesc = "indexing this run's output"
 	}
 
 	// header label flips for post-dedup output-index pass so frame
 	// doesnt claim to be doing dest-dedup work (library long closed)
 	frameTitle := "Destination dedup"
-	if phase == odPhaseIndexOwn {
+	if phase == ulpengine.ODPhaseIndexOwn {
 		frameTitle = "Output index"
 	}
 	headerLine := labelStyle.Render(frameTitle)
@@ -1468,7 +1469,7 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		libRow += " " + mutedStyle.Render("·") + " " +
 			warnStyle.Render(fmt.Sprintf("%d skipped", archivesSkipped))
 	}
-	if phase == odPhaseDiscover && m.partsUpgradeTotal.Load() > 0 {
+	if phase == ulpengine.ODPhaseDiscover && m.PartsUpgradeTotal.Load() > 0 {
 		libRow += " " + mutedStyle.Render("·") + " " +
 			warnStyle.Render("one-time upgrade next")
 	}
@@ -1477,12 +1478,12 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 
 	// phase-specific second row
 	switch phase {
-	case odPhaseDiscover:
-		if m.partsUpgradeTotal.Load() > 0 {
+	case ulpengine.ODPhaseDiscover:
+		if m.PartsUpgradeTotal.Load() > 0 {
 			innerLines = append(innerLines, labelStyle.Render("Note        ")+
 				warnStyle.Render("Legacy index format · in-place upgrade runs once, then skipped"))
 		}
-	case odPhaseRegen, odPhaseIndexOwn:
+	case ulpengine.ODPhaseRegen, ulpengine.ODPhaseIndexOwn:
 		if regenBytesTotal > 0 {
 			innerLines = append(innerLines, labelStyle.Render("Bytes       ")+
 				byteStyle.Render(humanBytes(regenBytesRead))+
@@ -1501,7 +1502,7 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 			innerLines = append(innerLines, labelStyle.Render("Throughput  ")+
 				byteStyle.Render(formatRate(regenBPS))+eta)
 		}
-	case odPhaseUpgrade:
+	case ulpengine.ODPhaseUpgrade:
 		innerLines = append(innerLines,
 			labelStyle.Render("Important   ")+
 				warnStyle.Render("One-time library upgrade — please wait, do not interrupt (Ctrl+C)"),
@@ -1524,10 +1525,10 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 	// rows would sit frozen — there we fall through to a single aggregate bar
 	// below (parts-indexed), like the old routing bar.
 	var workerBars []string
-	if (phase == odPhaseRegen || phase == odPhaseIndexOwn) && regenBytesTotal > 0 {
+	if (phase == ulpengine.ODPhaseRegen || phase == ulpengine.ODPhaseIndexOwn) && regenBytesTotal > 0 {
 		rowWidth := contentWidth(width)
-		cap := workerRowCap(termHeight(), m.workerCount())
-		active := m.activeWorkers(cap)
+		cap := workerRowCap(termHeight(), m.WorkerCount())
+		active := m.ActiveWorkers(cap)
 		// idx marker width must fit the WIDEST displayed index ("[16]"
 		// is 5, "[8]" is 4). otherwise rows 10+ shift right by 1
 		idxW := workerIdxMarkerWidth(len(active))
@@ -1540,13 +1541,13 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 	// falls back to parts-indexed for the upgrade/migration pass (no bytes).
 	var pct float64
 	switch phase {
-	case odPhaseRegen, odPhaseIndexOwn:
+	case ulpengine.ODPhaseRegen, ulpengine.ODPhaseIndexOwn:
 		if regenBytesTotal > 0 {
 			pct = float64(regenBytesRead) / float64(regenBytesTotal)
 		} else if partsRegenTotal > 0 {
 			pct = float64(partsRegenDone) / float64(partsRegenTotal)
 		}
-	case odPhaseUpgrade:
+	case ulpengine.ODPhaseUpgrade:
 		if partsRegenTotal > 0 {
 			pct = float64(partsRegenDone) / float64(partsRegenTotal)
 		}
@@ -1594,16 +1595,16 @@ func workerIdxMarkerWidth(count int) int {
 //
 // name + part padded to fixed left-width so bars start at same column.
 // atomic loads taken once at entry, worst case is stale-by-one-tick "97%"
-func renderWorkerRow(idx int, ws *workerStatus, innerWidth, idxMarkerW int) string {
-	namePtr := ws.archivePath.Load()
+func renderWorkerRow(idx int, ws *ulpengine.WorkerStatus, innerWidth, idxMarkerW int) string {
+	namePtr := ws.ArchivePath.Load()
 	if namePtr == nil {
 		return ""
 	}
 	name := *namePtr
-	partIdx := ws.partIdx.Load()
-	partsTotal := ws.partsTotal.Load()
-	bytesDone := ws.bytesDone.Load()
-	bytesTotal := ws.bytesTotal.Load()
+	partIdx := ws.PartIdx.Load()
+	partsTotal := ws.PartsTotal.Load()
+	bytesDone := ws.BytesDone.Load()
+	bytesTotal := ws.BytesTotal.Load()
 
 	// trim sfu prefix + .txt.zst suffix so part id reads tightly.
 	// falls back to raw name on non-matching convention

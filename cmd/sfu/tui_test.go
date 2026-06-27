@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
 func TestFormatDuration(t *testing.T) {
@@ -88,8 +90,8 @@ func TestHumanBytesNeverExceedsEightVisibleChars(t *testing.T) {
 // -od runs expose 3 labeled steps, plain runs use 2
 func TestRenderPhaseTagCounts(t *testing.T) {
 	now := time.Now()
-	m := &metrics{}
-	base := &resolved{totalInputs: 1, workers: 1, dedupWorkers: 1, bucketCount: 1}
+	m := &ulpengine.Metrics{}
+	base := &ulpengine.Resolved{TotalInputs: 1, Workers: 1, DedupWorkers: 1, BucketCount: 1}
 
 	noOD := strings.Join(renderShardLines(now, time.Second, m, base, 0, 0, 0, 0, 0, 86), "\n")
 	if !strings.Contains(noOD, "[1/2 PARSING]") {
@@ -101,11 +103,11 @@ func TestRenderPhaseTagCounts(t *testing.T) {
 	}
 
 	withOD := *base
-	withOD.cfg.DestDedup = true
-	withOD.odMetrics = &odMetrics{}
-	withOD.odMetrics.phase.Store(int32(odPhaseRegen))
-	withOD.outputIdxMetrics = &odMetrics{}
-	withOD.outputIdxMetrics.phase.Store(int32(odPhaseRegen))
+	withOD.Cfg.DestDedup = true
+	withOD.OdMetrics = &ulpengine.ODMetrics{}
+	withOD.OdMetrics.Phase.Store(int32(ulpengine.ODPhaseRegen))
+	withOD.OutputIdxMetrics = &ulpengine.ODMetrics{}
+	withOD.OutputIdxMetrics.Phase.Store(int32(ulpengine.ODPhaseRegen))
 
 	p0 := strings.Join(renderPhase0Lines(time.Second, m, &withOD, 0, 0, 0, 86), "\n")
 	if !strings.Contains(p0, "[1/3 LIBRARY PREP]") {
@@ -129,43 +131,43 @@ func TestRenderPhaseTagCounts(t *testing.T) {
 }
 
 func TestRenderStep1PhaseTagSwitchesAfterInputsRead(t *testing.T) {
-	r := &resolved{totalInputs: 1000, workers: 1, dedupWorkers: 1, bucketCount: 1}
-	r.cfg.DestDedup = true
-	r.odMetrics = &odMetrics{}
-	r.odMetrics.phase.Store(int32(odPhaseUpgrade))
+	r := &ulpengine.Resolved{TotalInputs: 1000, Workers: 1, DedupWorkers: 1, BucketCount: 1}
+	r.Cfg.DestDedup = true
+	r.OdMetrics = &ulpengine.ODMetrics{}
+	r.OdMetrics.Phase.Store(int32(ulpengine.ODPhaseUpgrade))
 
-	m := &metrics{}
+	m := &ulpengine.Metrics{}
 	if got := renderStep1PhaseTag(r, m); !strings.Contains(got, "PARSING") {
 		t.Errorf("while inputs still reading: want PARSING tag, got %q", got)
 	}
 
-	m.chunksTotal.Store(10)
-	m.chunksDone.Store(10)
+	m.ChunksTotal.Store(10)
+	m.ChunksDone.Store(10)
 	if got := renderStep1PhaseTag(r, m); !strings.Contains(got, "LIBRARY PREP") {
 		t.Errorf("after inputs read w/ od in flight: want LIBRARY PREP tag, got %q", got)
 	}
 
-	r.odMetrics.phase.Store(int32(odPhaseDone))
+	r.OdMetrics.Phase.Store(int32(ulpengine.ODPhaseDone))
 	if got := renderStep1PhaseTag(r, m); !strings.Contains(got, "PARSING") {
 		t.Errorf("after od done: revert to PARSING tag, got %q", got)
 	}
 }
 
 func TestRenderShardLinesFitsWidth(t *testing.T) {
-	m := &metrics{}
-	m.bytesRead.Store(1 << 30)
-	m.chunksDone.Store(42)
-	m.chunksTotal.Store(205)
-	m.linesRead.Store(78_499_000)
-	m.linesAccepted.Store(78_304_811)
-	m.linesRejected.Store(194_189)
-	m.busyWorkers.Store(8)
-	r := &resolved{
-		totalInputs:    18 << 30,
-		inputFileCount: 4,
-		workers:        8,
-		dedupWorkers:   4,
-		bucketCount:    256,
+	m := &ulpengine.Metrics{}
+	m.BytesRead.Store(1 << 30)
+	m.ChunksDone.Store(42)
+	m.ChunksTotal.Store(205)
+	m.LinesRead.Store(78_499_000)
+	m.LinesAccepted.Store(78_304_811)
+	m.LinesRejected.Store(194_189)
+	m.BusyWorkers.Store(8)
+	r := &ulpengine.Resolved{
+		TotalInputs:    18 << 30,
+		InputFileCount: 4,
+		Workers:        8,
+		DedupWorkers:   4,
+		BucketCount:    256,
 	}
 	for _, w := range []int{80, 60} {
 		now := time.Date(2026, 5, 9, 22, 30, 0, 0, time.UTC)
@@ -209,8 +211,8 @@ func findRow(lines []string, needles ...string) string {
 
 // adding a digit to read rate must not shift the "shard" label column
 func TestRenderShardThroughputColumnsAreStable(t *testing.T) {
-	m := &metrics{}
-	r := &resolved{totalInputs: 1 << 30, inputFileCount: 1, workers: 4, dedupWorkers: 2, bucketCount: 64}
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{TotalInputs: 1 << 30, InputFileCount: 1, Workers: 4, DedupWorkers: 2, BucketCount: 64}
 
 	low := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 93e6, 111e6, 0, 80)
 	high := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 999e6, 1234e6, 0, 80)
@@ -230,19 +232,19 @@ func TestRenderShardThroughputColumnsAreStable(t *testing.T) {
 
 // bytes-read, chunks-done, workers cols stay put as values grow
 func TestRenderShardProgressColumnsAreStable(t *testing.T) {
-	r := &resolved{totalInputs: 18 << 30, inputFileCount: 1, workers: 8, dedupWorkers: 4, bucketCount: 256}
+	r := &ulpengine.Resolved{TotalInputs: 18 << 30, InputFileCount: 1, Workers: 8, DedupWorkers: 4, BucketCount: 256}
 
-	mEarly := &metrics{}
-	mEarly.bytesRead.Store(4 * 1 << 30) // 4 GB
-	mEarly.chunksDone.Store(46)
-	mEarly.chunksTotal.Store(205)
-	mEarly.busyWorkers.Store(2)
+	mEarly := &ulpengine.Metrics{}
+	mEarly.BytesRead.Store(4 * 1 << 30) // 4 GB
+	mEarly.ChunksDone.Store(46)
+	mEarly.ChunksTotal.Store(205)
+	mEarly.BusyWorkers.Store(2)
 
-	mLate := &metrics{}
-	mLate.bytesRead.Store(15 * 1 << 30) // 15 GB, diff digit count
-	mLate.chunksDone.Store(199)
-	mLate.chunksTotal.Store(205)
-	mLate.busyWorkers.Store(8)
+	mLate := &ulpengine.Metrics{}
+	mLate.BytesRead.Store(15 * 1 << 30) // 15 GB, diff digit count
+	mLate.ChunksDone.Store(199)
+	mLate.ChunksTotal.Store(205)
+	mLate.BusyWorkers.Store(8)
 
 	early := renderShardLines(time.Now(), time.Second, mEarly, r, 100, 100, 1e6, 1e6, 0, 80)
 	late := renderShardLines(time.Now(), time.Second, mLate, r, 100, 100, 1e6, 1e6, 0, 80)
@@ -262,8 +264,8 @@ func TestRenderShardProgressColumnsAreStable(t *testing.T) {
 
 // bars start at col 4, aligned w/ stat rows above
 func TestRenderShardBarsAreIndented(t *testing.T) {
-	m := &metrics{}
-	r := &resolved{totalInputs: 1 << 30, inputFileCount: 1, workers: 4, dedupWorkers: 2, bucketCount: 64}
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{TotalInputs: 1 << 30, InputFileCount: 1, Workers: 4, DedupWorkers: 2, BucketCount: 64}
 	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
 	// bars above frost footer, identify by indent + glyphs
 	var bar1, bar2 string
@@ -301,9 +303,9 @@ func TestRenderShardBarsAreIndented(t *testing.T) {
 }
 
 func TestRenderMainProgressBarsShowPhaseLabels(t *testing.T) {
-	m := &metrics{}
-	r := &resolved{totalInputs: 1 << 30, inputFileCount: 1, workers: 4, dedupWorkers: 2, bucketCount: 64}
-	m.bytesRead.Store(1 << 29)
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{TotalInputs: 1 << 30, InputFileCount: 1, Workers: 4, DedupWorkers: 2, BucketCount: 64}
+	m.BytesRead.Store(1 << 29)
 
 	parseLines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
 	parseJoined := strings.Join(parseLines, "\n")
@@ -313,9 +315,9 @@ func TestRenderMainProgressBarsShowPhaseLabels(t *testing.T) {
 		}
 	}
 
-	m.bucketsTotal.Store(8)
-	m.bucketsBytesTotal.Store(1000)
-	m.bucketsBytesRead.Store(500)
+	m.BucketsTotal.Store(8)
+	m.BucketsBytesTotal.Store(1000)
+	m.BucketsBytesRead.Store(500)
 	dedupLines := renderDedupLines(time.Now(), time.Second, m, r, 100, 100, 1e6, 0, 80)
 	dedupJoined := strings.Join(dedupLines, "\n")
 	for _, want := range []string{"Parsing", "Deduping", "█", "░", "%"} {
@@ -336,12 +338,12 @@ func TestRejectedIsMuted(t *testing.T) {
 
 // counts >= 1000 always use thousands separators, no K/M/B shorthand
 func TestRenderShardUsesCommasInLineCounts(t *testing.T) {
-	m := &metrics{}
-	m.linesRead.Store(78_499_000)
-	m.linesAccepted.Store(78_304_811)
-	m.linesRejected.Store(194_189)
-	m.bytesRead.Store(1 << 30)
-	r := &resolved{totalInputs: 18 << 30, inputFileCount: 1, workers: 8, dedupWorkers: 4, bucketCount: 256}
+	m := &ulpengine.Metrics{}
+	m.LinesRead.Store(78_499_000)
+	m.LinesAccepted.Store(78_304_811)
+	m.LinesRejected.Store(194_189)
+	m.BytesRead.Store(1 << 30)
+	r := &ulpengine.Resolved{TotalInputs: 18 << 30, InputFileCount: 1, Workers: 8, DedupWorkers: 4, BucketCount: 256}
 	now := time.Now()
 	lines := renderShardLines(now, time.Second, m, r, 320, 540, 1, 1, 0, 80)
 	joined := strings.Join(lines, "\n")
@@ -358,22 +360,22 @@ func TestRenderShardUsesCommasInLineCounts(t *testing.T) {
 }
 
 func TestRenderDedupAndDoneFitsWidth(t *testing.T) {
-	m := &metrics{}
-	m.linesUnique.Store(80_000_000)
-	m.linesAccepted.Store(80_234_000)
-	m.bucketsDone.Store(256)
-	m.bucketsTotal.Store(256)
-	m.bytesWritten.Store(7 << 30)
-	m.linesRejected.Store(14_000_000)
+	m := &ulpengine.Metrics{}
+	m.LinesUnique.Store(80_000_000)
+	m.LinesAccepted.Store(80_234_000)
+	m.BucketsDone.Store(256)
+	m.BucketsTotal.Store(256)
+	m.BytesWritten.Store(7 << 30)
+	m.LinesRejected.Store(14_000_000)
 	// short relative path keeps 80/60-col asserts honest, t.TempDir
 	// would bust the budget
-	r := &resolved{
-		cfg:            pipelineConfig{Output: "out.txt"},
-		totalInputs:    18 << 30,
-		inputFileCount: 3,
-		workers:        8,
-		dedupWorkers:   4,
-		bucketCount:    256,
+	r := &ulpengine.Resolved{
+		Cfg:            ulpengine.Config{Output: "out.txt"},
+		TotalInputs:    18 << 30,
+		InputFileCount: 3,
+		Workers:        8,
+		DedupWorkers:   4,
+		BucketCount:    256,
 	}
 	for _, w := range []int{80, 60} {
 		now := time.Now()
@@ -389,15 +391,15 @@ func TestRenderDedupAndDoneFitsWidth(t *testing.T) {
 
 // DONE block surfaces every metric user expects
 func TestRenderDoneIncludesAllSummaryFields(t *testing.T) {
-	m := &metrics{}
-	m.linesUnique.Store(77_500_000)
-	m.linesAccepted.Store(77_734_000) // unique + 234,000 dups
-	m.linesRejected.Store(166_172)
-	m.bytesWritten.Store(8_800_000_000) // ~8.2 GB
-	r := &resolved{
-		cfg:            pipelineConfig{Output: "./sfu_20260509_abc123.txt"},
-		totalInputs:    10_737_418_240, // 10 GB
-		inputFileCount: 4,
+	m := &ulpengine.Metrics{}
+	m.LinesUnique.Store(77_500_000)
+	m.LinesAccepted.Store(77_734_000) // unique + 234,000 dups
+	m.LinesRejected.Store(166_172)
+	m.BytesWritten.Store(8_800_000_000) // ~8.2 GB
+	r := &ulpengine.Resolved{
+		Cfg:            ulpengine.Config{Output: "./sfu_20260509_abc123.txt"},
+		TotalInputs:    10_737_418_240, // 10 GB
+		InputFileCount: 4,
 	}
 	lines := renderFinalStdoutSummary(102*time.Second, m, r, 80, nil)
 	joined := strings.Join(lines, "\n")
@@ -424,9 +426,9 @@ func TestRenderDoneIncludesAllSummaryFields(t *testing.T) {
 }
 
 func TestRenderFinalStdoutSummaryUpdateNoticeFooter(t *testing.T) {
-	m := &metrics{}
-	m.linesUnique.Store(1)
-	r := &resolved{cfg: pipelineConfig{Output: "./out.txt"}}
+	m := &ulpengine.Metrics{}
+	m.LinesUnique.Store(1)
+	r := &ulpengine.Resolved{Cfg: ulpengine.Config{Output: "./out.txt"}}
 	notice := &selfupdate.Notice{Latest: "0.2.0", Command: "sfu update"}
 	joined := strings.Join(renderFinalStdoutSummary(time.Second, m, r, 86, notice), "\n")
 	for _, want := range []string{"Update available", "v0.2.0", "sfu update", "sfu is open-source", "https://snowx.dev"} {
@@ -437,9 +439,9 @@ func TestRenderFinalStdoutSummaryUpdateNoticeFooter(t *testing.T) {
 }
 
 func TestRenderFinalStdoutSummaryNoNoticeUsesPlainFooter(t *testing.T) {
-	m := &metrics{}
-	m.linesUnique.Store(1)
-	r := &resolved{cfg: pipelineConfig{Output: "./out.txt"}}
+	m := &ulpengine.Metrics{}
+	m.LinesUnique.Store(1)
+	r := &ulpengine.Resolved{Cfg: ulpengine.Config{Output: "./out.txt"}}
 	joined := strings.Join(renderFinalStdoutSummary(time.Second, m, r, 86, nil), "\n")
 	if strings.Contains(joined, "Update available") {
 		t.Fatalf("nil notice should not show update line:\n%s", joined)
@@ -452,36 +454,11 @@ func TestRenderFinalStdoutSummaryNoNoticeUsesPlainFooter(t *testing.T) {
 }
 
 func TestDefaultOutputNameFormat(t *testing.T) {
-	stamp := runStamp(time.Date(2026, 5, 9, 20, 35, 30, 0, time.UTC), "abc123")
+	stamp := ulpengine.RunStamp(time.Date(2026, 5, 9, 20, 35, 30, 0, time.UTC), "abc123")
 	got := defaultOutputName(stamp)
 	want := "sfu_20260509_abc123.txt"
 	if got != want {
 		t.Errorf("defaultOutputName = %q, want %q", got, want)
-	}
-}
-
-// run id length + crockford alphabet only, opsec guarantee
-func TestNewRunIDShape(t *testing.T) {
-	const N = 256
-	seen := make(map[string]struct{}, N)
-	for i := 0; i < N; i++ {
-		id, err := newRunID()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(id) != runIDLen {
-			t.Fatalf("id %q length = %d, want %d", id, len(id), runIDLen)
-		}
-		for _, c := range id {
-			if !strings.ContainsRune(crockfordAlphabet, c) {
-				t.Fatalf("id %q contains non-alphabet char %q", id, c)
-			}
-		}
-		seen[id] = struct{}{}
-	}
-	// 256 draws from 30-bit space, virtually certain to be unique
-	if len(seen) < N-1 {
-		t.Fatalf("got %d unique ids of %d, entropy degraded", len(seen), N)
 	}
 }
 
@@ -557,7 +534,7 @@ func TestWithZstExt(t *testing.T) {
 		{"out.zst", true, "out.zst"},
 	}
 	for _, c := range cases {
-		if got := withZstExt(c.in, c.compress); got != c.want {
+		if got := ulpengine.WithZstExt(c.in, c.compress); got != c.want {
 			t.Errorf("withZstExt(%q, %v) = %q, want %q", c.in, c.compress, got, c.want)
 		}
 	}
@@ -566,17 +543,17 @@ func TestWithZstExt(t *testing.T) {
 // dedup bar prefers byte-level metric over bucket-count ratio so it
 // ticks immediately, not at first bucket completion
 func TestRenderDedupBarUsesByteProgress(t *testing.T) {
-	m := &metrics{}
+	m := &ulpengine.Metrics{}
 	// bucket-count says 0%, byte-count says ~50%
-	m.bucketsTotal.Store(8)
-	m.bucketsDone.Store(0)
-	m.bucketsBytesTotal.Store(1000)
-	m.bucketsBytesRead.Store(500)
-	r := &resolved{
-		cfg:          pipelineConfig{Output: "out.txt"},
-		workers:      4,
-		dedupWorkers: 2,
-		bucketCount:  8,
+	m.BucketsTotal.Store(8)
+	m.BucketsDone.Store(0)
+	m.BucketsBytesTotal.Store(1000)
+	m.BucketsBytesRead.Store(500)
+	r := &ulpengine.Resolved{
+		Cfg:          ulpengine.Config{Output: "out.txt"},
+		Workers:      4,
+		DedupWorkers: 2,
+		BucketCount:  8,
 	}
 	lines := renderDedupLines(time.Now(), time.Second, m, r, 100, 100, 1e6, 0, 80)
 
@@ -610,15 +587,15 @@ func TestRenderDedupBarUsesByteProgress(t *testing.T) {
 
 // inline header badges: compressing, and -od library scale
 func TestRenderDedupHeaderShowsCompressingBadge(t *testing.T) {
-	m := &metrics{}
-	m.bucketsTotal.Store(256)
-	m.bucketsDone.Store(64)
+	m := &ulpengine.Metrics{}
+	m.BucketsTotal.Store(256)
+	m.BucketsDone.Store(64)
 	for _, compress := range []bool{false, true} {
-		r := &resolved{
-			cfg:          pipelineConfig{Output: "out.txt", Compress: compress},
-			workers:      8,
-			dedupWorkers: 4,
-			bucketCount:  256,
+		r := &ulpengine.Resolved{
+			Cfg:          ulpengine.Config{Output: "out.txt", Compress: compress},
+			Workers:      8,
+			DedupWorkers: 4,
+			BucketCount:  256,
 		}
 		now := time.Date(2026, 5, 9, 22, 30, 0, 0, time.UTC)
 		lines := renderDedupLines(now, 90*time.Second, m, r, 200, 100, 240e6, 0, 80)
@@ -636,15 +613,15 @@ func TestRenderDedupHeaderShowsCompressingBadge(t *testing.T) {
 }
 
 func TestRenderDedupHeaderShowsLibraryBadge(t *testing.T) {
-	m := &metrics{}
-	r := &resolved{
-		cfg:          pipelineConfig{Output: "out.txt.zst", Compress: true, DestDedup: true},
-		workers:      8,
-		dedupWorkers: 4,
-		bucketCount:  256,
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{
+		Cfg:          ulpengine.Config{Output: "out.txt.zst", Compress: true, DestDedup: true},
+		Workers:      8,
+		DedupWorkers: 4,
+		BucketCount:  256,
 	}
-	r.odMetrics = &odMetrics{}
-	r.odMetrics.keysTotalEstimate.Store(3_290_076_168)
+	r.OdMetrics = &ulpengine.ODMetrics{}
+	r.OdMetrics.KeysTotalEstimate.Store(3_290_076_168)
 
 	lines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, 0, 86)
 	joined := strings.Join(lines, "\n")
@@ -659,26 +636,37 @@ func TestRenderDedupHeaderShowsLibraryBadge(t *testing.T) {
 func TestRenderDoneShowsCompressionRatio(t *testing.T) {
 	d := t.TempDir()
 	out := filepath.Join(d, "out.txt.zst")
-	sink, err := newOutputSink(out, true, false)
+	m := &ulpengine.Metrics{}
+	// repeated line = dramatic ratio. write a real .zst directly so this TUI
+	// test stays decoupled from the engine's (unexported) output sink; the
+	// DONE ratio note is driven purely by m.BytesWritten vs on-disk size.
+	const N = 200
+	const line = "aaa.example.com:user@example.com:hunter2\n"
+	f, err := os.Create(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &metrics{}
-	// repeated line = dramatic ratio
-	const N = 200
+	enc, err := zstd.NewWriter(f)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < N; i++ {
-		if err := writeLine(sink, "aaa.example.com:user@example.com:hunter2", m); err != nil {
+		if _, err := enc.Write([]byte(line)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := sink.close(); err != nil {
+	if err := enc.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m.BytesWritten.Store(int64(N * len(line)))
 
-	r := &resolved{
-		cfg:            pipelineConfig{Output: out, Compress: true},
-		totalInputs:    1 << 20,
-		inputFileCount: 1,
+	r := &ulpengine.Resolved{
+		Cfg:            ulpengine.Config{Output: out, Compress: true},
+		TotalInputs:    1 << 20,
+		InputFileCount: 1,
 	}
 	lines := renderFinalStdoutSummary(60*time.Second, m, r, 80, nil)
 	joined := strings.Join(lines, "\n")
@@ -699,15 +687,15 @@ func TestRenderDoneOutputFooterListsAllArchivesAligned(t *testing.T) {
 	// short synthetic dir so 86-col budget holds. all parts share parent
 	// so gutter collapses to one Output row + continuations
 	const dir = "/x"
-	r := &resolved{
-		cfg: pipelineConfig{Output: filepath.Join(dir, "sfu_20260509_abc123.txt.zst"), Compress: true},
+	r := &ulpengine.Resolved{
+		Cfg: ulpengine.Config{Output: filepath.Join(dir, "sfu_20260509_abc123.txt.zst"), Compress: true},
 		OutputPaths: []string{
 			filepath.Join(dir, "sfu_20260509_abc123_part1.txt.zst"),
 			filepath.Join(dir, "sfu_20260509_abc123_part2.txt.zst"),
 			filepath.Join(dir, "sfu_20260509_abc123_part3.txt.zst"),
 		},
 	}
-	lines := renderFinalStdoutSummary(time.Second, &metrics{}, r, 80, nil)
+	lines := renderFinalStdoutSummary(time.Second, &ulpengine.Metrics{}, r, 80, nil)
 	joined := strings.Join(lines, "\n")
 	if strings.Contains(joined, "more parts") {
 		t.Fatalf("should list paths explicitly, got:\n%s", joined)
@@ -741,8 +729,8 @@ func TestRenderDoneOutputFooterListsAllArchivesAligned(t *testing.T) {
 func TestRenderDoneOutputFooterPlainLongPath(t *testing.T) {
 	// long suffix built inline, no checked-in personal mount path
 	longPath := filepath.Join(os.TempDir(), strings.Repeat("nest/", 20)+"sfu_20260509-203530.txt")
-	r := &resolved{cfg: pipelineConfig{Output: longPath}}
-	lines := renderFinalStdoutSummary(time.Second, &metrics{}, r, 80, nil)
+	r := &ulpengine.Resolved{Cfg: ulpengine.Config{Output: longPath}}
+	lines := renderFinalStdoutSummary(time.Second, &ulpengine.Metrics{}, r, 80, nil)
 	var pathLine string
 	for _, ln := range lines {
 		if strings.Contains(ln, longPath) {
@@ -843,12 +831,12 @@ func TestTermWidthCapsAt80(t *testing.T) {
 // -od dedup frame shows the brief "reading index" indicator (library keys
 // pulled from the sorted sidecars), replacing the old routing phase.
 func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
-	m := &metrics{}
-	r := &resolved{totalInputs: 1, workers: 1, dedupWorkers: 1, bucketCount: 4}
-	r.cfg.DestDedup = true
-	r.odMetrics = &odMetrics{}
-	r.odMetrics.keysTotalEstimate.Store(1000)
-	r.odMetrics.keysLoaded.Store(250)
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{TotalInputs: 1, Workers: 1, DedupWorkers: 1, BucketCount: 4}
+	r.Cfg.DestDedup = true
+	r.OdMetrics = &ulpengine.ODMetrics{}
+	r.OdMetrics.KeysTotalEstimate.Store(1000)
+	r.OdMetrics.KeysLoaded.Store(250)
 
 	out := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n")
 	if !strings.Contains(out, "matching") || !strings.Contains(out, "loaded") {
@@ -859,8 +847,8 @@ func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
 	}
 
 	// large libraries use full comma counts, not compact B suffix
-	r.odMetrics.keysTotalEstimate.Store(3_320_076_168)
-	r.odMetrics.keysLoaded.Store(2_370_000_000)
+	r.OdMetrics.KeysTotalEstimate.Store(3_320_076_168)
+	r.OdMetrics.KeysLoaded.Store(2_370_000_000)
 	outLarge := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n")
 	for _, want := range []string{"2,370,000,000", "3,320,076,168"} {
 		if !strings.Contains(outLarge, want) {
@@ -878,7 +866,7 @@ func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
 
 	// non-od dedup must NOT show the library row
 	plain := strings.Join(renderDedupLines(time.Now(), time.Second, m,
-		&resolved{totalInputs: 1, workers: 1, dedupWorkers: 1, bucketCount: 4}, 0, 0, 0, 0, 86), "\n")
+		&ulpengine.Resolved{TotalInputs: 1, Workers: 1, DedupWorkers: 1, BucketCount: 4}, 0, 0, 0, 0, 86), "\n")
 	if strings.Contains(plain, "Library") {
 		t.Fatalf("non-od dedup should not show Library row:\n%s", plain)
 	}
@@ -918,18 +906,18 @@ func TestRenderLibraryMatchingRowsStacksWhenNarrow(t *testing.T) {
 }
 
 func TestRenderDedupLibraryRowFitsWidthWithOD(t *testing.T) {
-	m := &metrics{}
-	r := &resolved{
-		cfg:            pipelineConfig{Output: "out.txt.zst", Compress: true, DestDedup: true},
-		totalInputs:    18 << 30,
-		inputFileCount: 1,
-		workers:        8,
-		dedupWorkers:   4,
-		bucketCount:    256,
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{
+		Cfg:            ulpengine.Config{Output: "out.txt.zst", Compress: true, DestDedup: true},
+		TotalInputs:    18 << 30,
+		InputFileCount: 1,
+		Workers:        8,
+		DedupWorkers:   4,
+		BucketCount:    256,
 	}
-	r.odMetrics = &odMetrics{}
-	r.odMetrics.keysTotalEstimate.Store(3_320_076_168)
-	r.odMetrics.keysLoaded.Store(2_370_000_000)
+	r.OdMetrics = &ulpengine.ODMetrics{}
+	r.OdMetrics.KeysTotalEstimate.Store(3_320_076_168)
+	r.OdMetrics.KeysLoaded.Store(2_370_000_000)
 	for _, w := range []int{86, 60} {
 		lines := renderDedupLines(time.Now(), 48*time.Second, m, r, 290.1, 410.0, 240e6, 0, w)
 		for _, ln := range lines {

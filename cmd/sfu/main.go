@@ -17,19 +17,14 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/console"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
 
 // per-run output basename, "sfu_<YYYYMMDD>_<runID>.txt". day-level
-// prefix groups runs in ls w/o leaking time-of-day. chunked zstd
-// sink reuses the stamp for part names
-func defaultBasename(stamp string) string {
-	return "sfu_" + stamp + ".txt"
-}
-
 // default output path, <stamp>.txt in CWD
 func defaultOutputName(stamp string) string {
-	return defaultBasename(stamp)
+	return ulpengine.DefaultBasename(stamp)
 }
 
 // validates output dir flag, empty = CWD. must look like a dir, plain
@@ -59,27 +54,16 @@ func isDirHint(p string) bool {
 	return false
 }
 
-// appends .zst when compress and not already suffixed (case-insensitive)
-func withZstExt(p string, compress bool) string {
-	if !compress {
-		return p
-	}
-	if strings.EqualFold(filepath.Ext(p), ".zst") {
-		return p
-	}
-	return p + ".zst"
-}
-
 func main() {
 	// enable VT processing on Windows so TUI ANSI renders. no-op on Unix
 	console.EnableVT()
 
 	started := time.Now()
-	runID, err := newRunID()
+	runID, err := ulpengine.NewRunID()
 	if err != nil {
 		fatalf("%v", err)
 	}
-	stamp := runStamp(started, runID)
+	stamp := ulpengine.RunStamp(started, runID)
 
 	flag.Usage = func() { printHelp(filepath.Base(os.Args[0]), os.Stderr) }
 
@@ -116,7 +100,7 @@ func main() {
 	tempDir := flag.String("temp-dir", "", "directory for shard temp files (default: same dir as -o)")
 	noTUI := flag.Bool("no-tui", false, "disable live TUI; print plain summary at end")
 	zst := flag.Bool("zst", false, "compress output with zstd (highly efficient and searchable)")
-	splitZst := flag.Int64("split-zst", defaultZstChunkLines, "with -zst: split every N unique lines (default ~1.5GB/part); 0=single archive")
+	splitZst := flag.Int64("split-zst", ulpengine.DefaultZstChunkLines, "with -zst: split every N unique lines (default ~1.5GB/part); 0=single archive")
 	delSrc := flag.Bool("del", false, "after success, delete all parsed input .txt files (irreversible)")
 	noURI := flag.Bool("no-uri", false, "emit host:login:password (drop URL path/query)")
 	loose := flag.Bool("loose", false, "high-recall parser: accepts host:port:user:pw, bare host:user:pw, LPU; less precise output")
@@ -176,7 +160,7 @@ func main() {
 		fatalf("getwd: %v", err)
 	}
 
-	inputs, err := collectInputs(inputArg)
+	inputs, err := ulpengine.CollectInputs(inputArg)
 	if err != nil {
 		fatalf("input: %v", err)
 	}
@@ -211,12 +195,12 @@ func main() {
 	if err != nil {
 		fatalf("resolve output dir: %v", err)
 	}
-	base := defaultBasename(stamp)
+	base := ulpengine.DefaultBasename(stamp)
 
 	// output path = dir + basename + optional .zst. 1 vs N parts decided
 	// later by chunkedZstdSink. multi-part rename only fires when _part2
 	// actually opens, so single-archive runs never carry _part suffix
-	absOut, err := filepath.Abs(filepath.Join(outDirAbs, withZstExt(base, *zst)))
+	absOut, err := filepath.Abs(filepath.Join(outDirAbs, ulpengine.WithZstExt(base, *zst)))
 	if err != nil {
 		fatalf("resolve output: %v", err)
 	}
@@ -227,7 +211,7 @@ func main() {
 		}
 	}
 
-	cfg := pipelineConfig{
+	cfg := ulpengine.Config{
 		Inputs:          inputs,
 		Output:          absOut,
 		TempDir:         *tempDir,
@@ -246,37 +230,37 @@ func main() {
 		DestDedup:       destDedup,
 		DestDedupDir:    outDirAbs,
 	}
-	r, err := resolvePipelineConfig(cfg)
+	r, err := ulpengine.Resolve(cfg)
 	if err != nil {
 		fatalf("config: %v", err)
 	}
-	ensureDestDedupMetrics(r)
+	ulpengine.EnsureDestDedupMetrics(r)
 
-	var dbg *debugLog
-	var rr *rejectRecorder
+	var dbg *ulpengine.DebugLog
+	var rr *ulpengine.RejectRecorder
 	var debugLogPath string
 	if *debug {
-		p, err := debugArtifactPath(cwd, "sfu-debug", ".log", stamp)
+		p, err := ulpengine.DebugArtifactPath(cwd, "sfu-debug", ".log", stamp)
 		if err != nil {
 			fatalf("debug log path: %v", err)
 		}
 		debugLogPath = p
-		dbg, err = newDebugLog(p)
+		dbg, err = ulpengine.NewDebugLog(p)
 		if err != nil {
 			fatalf("debug log: %v", err)
 		}
-		r.cfg.Debug = dbg
+		r.Cfg.Debug = dbg
 	}
 	if *debugReject {
-		p, err := debugArtifactPath(cwd, "sfu-rejected", ".txt", stamp)
+		p, err := ulpengine.DebugArtifactPath(cwd, "sfu-rejected", ".txt", stamp)
 		if err != nil {
 			fatalf("debug-reject path: %v", err)
 		}
-		rr, err = newRejectRecorder(p)
+		rr, err = ulpengine.NewRejectRecorder(p)
 		if err != nil {
 			fatalf("debug-reject: %v", err)
 		}
-		r.cfg.Reject = rr
+		r.Cfg.Reject = rr
 	}
 	defer func() {
 		if dbg != nil {
@@ -289,8 +273,8 @@ func main() {
 
 	binName := filepath.Base(os.Args[0])
 	if dbg != nil {
-		dbg.writeHeader(binName, started, os.Args, inputs, r)
-		dbg.logResolutionRationale(r)
+		dbg.WriteHeader(binName, started, os.Args, inputs, r)
+		dbg.LogResolutionRationale(r)
 		if *debug {
 			fmt.Fprintf(os.Stderr, "debug log: %s\n", debugLogPath)
 		}
@@ -308,9 +292,9 @@ func main() {
 
 	// sweep orphan shard subdirs from crashed runs. best-effort,
 	// failures silent in sweepStaleTempDirs
-	if err := os.MkdirAll(r.tempDir, 0o755); err == nil {
-		if n := sweepStaleTempDirs(r.tempDir, ""); n > 0 {
-			dbg.Event("swept %d orphan temp dir(s) under %s", n, r.tempDir)
+	if err := os.MkdirAll(r.TempDir, 0o755); err == nil {
+		if n := ulpengine.SweepStaleTempDirs(r.TempDir, ""); n > 0 {
+			dbg.Event("swept %d orphan temp dir(s) under %s", n, r.TempDir)
 		}
 	}
 
@@ -333,7 +317,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	m := &metrics{totalInputBytes: r.totalInputs}
+	m := &ulpengine.Metrics{TotalInputBytes: r.TotalInputs}
 
 	doneCh := make(chan struct{})
 	tuiOff := *noTUI || !stdoutIsCharDevice()
@@ -344,7 +328,7 @@ func main() {
 		go monitor(doneCh, started, m, r, signaled, &monitorWG)
 	}
 
-	runErr := run(ctx, r, m)
+	runErr := ulpengine.Run(ctx, r, m)
 
 	close(doneCh)
 
@@ -358,13 +342,13 @@ func main() {
 		// user Ctrl-C = exit 130 + terse msg, not "context canceled"
 		sig := signaled()
 		if dbg != nil {
-			dbg.logTermination(runErr, sig, time.Since(started))
+			dbg.LogTermination(runErr, sig, time.Since(started))
 		}
 		if sig {
 			// reassure a confused user who Ctrl+C'd mid-migration: the dest
 			// library is only ever touched via atomic sidecar renames + a
 			// discarded-on-failure output, so nothing is half-written.
-			if r.cfg.DestDedup {
+			if r.Cfg.DestDedup {
 				fmt.Fprintln(os.Stderr, "\ninterrupted — existing library left intact (no archives modified); safe to re-run.")
 			} else {
 				fmt.Fprintln(os.Stderr, "\ninterrupted")
@@ -377,7 +361,7 @@ func main() {
 
 	if *delSrc {
 		// delete BEFORE logCompletion so outcome lands in same block
-		deleted, err := deleteParsedInputs(inputs, r.OutputPaths)
+		deleted, err := ulpengine.DeleteParsedInputs(inputs, r.OutputPaths)
 		if err != nil {
 			dbg.Event("del: FAILED after removing %d/%d input(s) err=%v", len(deleted), len(inputs), err)
 			fmt.Fprintf(os.Stderr, "sfu: delete inputs: %v\n", err)
@@ -388,7 +372,7 @@ func main() {
 	}
 
 	if dbg != nil {
-		dbg.logCompletion(m, time.Since(started), r)
+		dbg.LogCompletion(m, time.Since(started), r)
 	}
 
 	// DONE block to stderr, alt-screen already left. stderr keeps stdout
@@ -399,18 +383,6 @@ func main() {
 	updateNotice := updateChecker.NoticeForSummary()
 	for _, ln := range renderFinalStdoutSummary(time.Since(started), m, r, tw, updateNotice) {
 		fmt.Fprintln(os.Stderr, ln)
-	}
-}
-
-func ensureDestDedupMetrics(r *resolved) {
-	if r == nil || !r.cfg.DestDedup {
-		return
-	}
-	if r.odMetrics == nil {
-		r.odMetrics = &odMetrics{}
-	}
-	if r.outputIdxMetrics == nil {
-		r.outputIdxMetrics = &odMetrics{}
 	}
 }
 
@@ -457,7 +429,7 @@ func signalContext() (context.Context, context.CancelFunc, func() bool) {
 		if stdoutIsCharDevice() {
 			fmt.Print(ansiShowCursor + altScreenLeave)
 		}
-		printManualCleanupHint(os.Stderr)
+		ulpengine.PrintManualCleanupHint(os.Stderr)
 		fmt.Fprintln(os.Stderr, "force-exit (signal received twice).")
 		os.Exit(130)
 	}()
@@ -467,7 +439,7 @@ func signalContext() (context.Context, context.CancelFunc, func() bool) {
 // live status loop. samples metrics every ~300ms, computes per-tick
 // rates, draws an 80-col block. signaled=true swaps to INTERRUPTED
 // frame. wg.Done fires after frame.close so callers sync on clean exit
-func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, signaled func() bool, wg *sync.WaitGroup) {
+func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *ulpengine.Resolved, signaled func() bool, wg *sync.WaitGroup) {
 	if wg != nil {
 		defer wg.Done()
 	}
@@ -494,23 +466,23 @@ func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, s
 	// track which odMetrics the snapshot came from. phase 0 reads
 	// r.odMetrics, phaseIndex reads r.outputIdxMetrics. reset prev*
 	// on switch so rate row starts cleanly at 0 in new phase
-	var prevRegenSrc *odMetrics
+	var prevRegenSrc *ulpengine.ODMetrics
 
 	draw := func() {
 		now := time.Now()
 		elapsed := now.Sub(started)
-		phase := m.phase.Load()
+		phase := m.Phase.Load()
 		// phaseInit + phaseShard render the same PARSING panel, treat
 		// as one phase for delta math. phasePhase0 keeps own bucket
 		// (OD-specific rates shouldnt bleed into shard panel)
 		normPhase := phase
-		if phase == phaseInit {
-			normPhase = phaseShard
+		if phase == ulpengine.PhaseInit {
+			normPhase = ulpengine.PhaseShard
 		}
 
-		read := m.bytesRead.Load()
-		sh := m.bytesShard.Load()
-		wr := m.bytesWritten.Load()
+		read := m.BytesRead.Load()
+		sh := m.BytesShard.Load()
+		wr := m.BytesWritten.Load()
 
 		var readBPS, shardBPS, writeBPS float64
 		if !prevAt.IsZero() && normPhase == prevNormPhase {
@@ -528,14 +500,14 @@ func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, s
 		// phaseIndex byte counter lives on outputIdxMetrics, phase 0
 		// on odMetrics. pick the right source so the rate row stays
 		// live across both regen phases
-		var regenMetricsForRate *odMetrics
-		if phase == phaseIndex && r.outputIdxMetrics != nil {
-			regenMetricsForRate = r.outputIdxMetrics
-		} else if r.odMetrics != nil {
-			regenMetricsForRate = r.odMetrics
+		var regenMetricsForRate *ulpengine.ODMetrics
+		if phase == ulpengine.PhaseIndex && r.OutputIdxMetrics != nil {
+			regenMetricsForRate = r.OutputIdxMetrics
+		} else if r.OdMetrics != nil {
+			regenMetricsForRate = r.OdMetrics
 		}
 		if regenMetricsForRate != nil {
-			cur := regenMetricsForRate.regenBytesRead.Load()
+			cur := regenMetricsForRate.RegenBytesRead.Load()
 			if !prevRegenAt.IsZero() && prevRegenSrc == regenMetricsForRate {
 				dt := now.Sub(prevRegenAt).Seconds()
 				if dt >= 0.05 {
@@ -560,20 +532,20 @@ func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, s
 
 		var lines []string
 		switch phase {
-		case phasePhase0:
+		case ulpengine.PhasePhase0:
 			// phase 0 has all shard counters at zero. surface just
 			// the OD frame as primary so user sees discovery/regen
 			// progress instead of a frozen 0% bar
 			lines = renderPhase0Lines(elapsed, m, r, ramMB, cpuPct, regenBPS, w)
-		case phaseInit, phaseShard:
+		case ulpengine.PhaseInit, ulpengine.PhaseShard:
 			lines = renderShardLines(now, elapsed, m, r, ramMB, cpuPct, readBPS, shardBPS, regenBPS, w)
-		case phaseDedup:
+		case ulpengine.PhaseDedup:
 			lines = renderDedupLines(now, elapsed, m, r, ramMB, cpuPct, writeBPS, regenBPS, w)
-		case phaseIndex:
+		case ulpengine.PhaseIndex:
 			// post-dedup own-output indexing. dedicated frame so
 			// dedup bar cant sit at 100% while zstd decode runs
 			lines = renderIndexLines(elapsed, m, r, ramMB, cpuPct, regenBPS, w)
-		case phaseDone:
+		case ulpengine.PhaseDone:
 			// DONE is drawn to regular screen in main after alt-screen
 			// leave so it sticks in scrollback. drawing here would
 			// cause a brief flash on exit. return early lets deferred
