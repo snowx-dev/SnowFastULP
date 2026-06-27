@@ -2,7 +2,6 @@ package config
 
 import (
 	"flag"
-	"fmt"
 	"os"
 )
 
@@ -31,26 +30,15 @@ type SFUFlags struct {
 }
 
 // ApplySFU applies unvisited config values to sfu flags.
-// rejects CLI -o vs cfg od (and vice versa) w/ clear msg
 func (f File) ApplySFU(v Visited, fl SFUFlags) error {
-	cfgPath := f.path
-	if cfgPath == "" {
-		cfgPath = "<config>"
-	}
-	if v.set("o") && f.SFU.OD != "" {
-		return fmt.Errorf("config: -o on CLI conflicts with [sfu].od in %s", cfgPath)
-	}
-	if v.set("od") && f.SFU.O != "" {
-		return fmt.Errorf("config: -od on CLI conflicts with [sfu].o in %s", cfgPath)
-	}
-	if !v.set("o") && f.SFU.O != "" {
+	if !v.set("o") && !v.set("od") && f.SFU.O != "" {
 		p, err := f.ResolvedSFUDir("o")
 		if err != nil {
 			return err
 		}
 		*fl.O = p
 	}
-	if !v.set("od") && f.SFU.OD != "" {
+	if !v.set("o") && !v.set("od") && f.SFU.OD != "" {
 		p, err := f.ResolvedSFUDir("od")
 		if err != nil {
 			return err
@@ -165,26 +153,15 @@ type SFLFlags struct {
 }
 
 // ApplySFL applies unvisited config values to sfl flags.
-// rejects CLI -o vs cfg od (and vice versa) w/ clear msg.
 func (f File) ApplySFL(v Visited, fl SFLFlags) error {
-	cfgPath := f.path
-	if cfgPath == "" {
-		cfgPath = "<config>"
-	}
-	if v.set("o") && f.SFL.OD != "" {
-		return fmt.Errorf("config: -o on CLI conflicts with [sfl].od in %s", cfgPath)
-	}
-	if v.set("od") && f.SFL.O != "" {
-		return fmt.Errorf("config: -od on CLI conflicts with [sfl].o in %s", cfgPath)
-	}
-	if !v.set("o") && f.SFL.O != "" && fl.O != nil {
+	if !v.set("o") && !v.set("od") && f.SFL.O != "" && fl.O != nil {
 		p, err := f.ResolvedSFLDir("o")
 		if err != nil {
 			return err
 		}
 		*fl.O = p
 	}
-	if !v.set("od") && f.SFL.OD != "" && fl.OD != nil {
+	if !v.set("o") && !v.set("od") && f.SFL.OD != "" && fl.OD != nil {
 		p, err := f.ResolvedSFLDir("od")
 		if err != nil {
 			return err

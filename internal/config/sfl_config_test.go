@@ -90,7 +90,7 @@ func TestApplySFLResolvesRelativePaths(t *testing.T) {
 	}
 }
 
-func TestApplySFLRejectsCLIOWithConfigOD(t *testing.T) {
+func TestApplySFLCLIOOverridesConfigOD(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte("[sfl]\nod = \"lib\"\n"), 0o644); err != nil {
@@ -101,8 +101,13 @@ func TestApplySFLRejectsCLIOWithConfigOD(t *testing.T) {
 		t.Fatal(err)
 	}
 	o, od := "/cli/out", ""
-	err = f.ApplySFL(config.Visited{"o": true}, config.SFLFlags{O: &o, OD: &od})
-	if err == nil || !strings.Contains(err.Error(), "[sfl].od") {
-		t.Fatalf("expected -o vs [sfl].od conflict; got %v", err)
+	if err := f.ApplySFL(config.Visited{"o": true}, config.SFLFlags{O: &o, OD: &od}); err != nil {
+		t.Fatalf("ApplySFL returned error: %v", err)
+	}
+	if o != "/cli/out" {
+		t.Fatalf("o = %q, want CLI value", o)
+	}
+	if od != "" {
+		t.Fatalf("od = %q, want config value ignored", od)
 	}
 }

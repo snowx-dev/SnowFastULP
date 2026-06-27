@@ -209,7 +209,7 @@ func TestResolvedSFUDirRejectsUnknownKey(t *testing.T) {
 	}
 }
 
-func TestApplySFURejectsCLIOWithConfigOD(t *testing.T) {
+func TestApplySFUCLIOOverridesConfigOD(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte("[sfu]\nod = \"lib\"\n"), 0o644); err != nil {
@@ -221,13 +221,18 @@ func TestApplySFURejectsCLIOWithConfigOD(t *testing.T) {
 	}
 	o, od := "/cli/out", ""
 	v := config.Visited{"o": true}
-	err = f.ApplySFU(v, config.SFUFlags{O: &o, OD: &od})
-	if err == nil || !strings.Contains(err.Error(), "[sfu].od") {
-		t.Fatalf("expected -o vs [sfu].od conflict; got %v", err)
+	if err := f.ApplySFU(v, config.SFUFlags{O: &o, OD: &od}); err != nil {
+		t.Fatalf("ApplySFU returned error: %v", err)
+	}
+	if o != "/cli/out" {
+		t.Fatalf("o = %q, want CLI value", o)
+	}
+	if od != "" {
+		t.Fatalf("od = %q, want config value ignored", od)
 	}
 }
 
-func TestApplySFURejectsCLIODWithConfigO(t *testing.T) {
+func TestApplySFUCLIODOverridesConfigO(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte("[sfu]\no = \"out\"\n"), 0o644); err != nil {
@@ -239,9 +244,14 @@ func TestApplySFURejectsCLIODWithConfigO(t *testing.T) {
 	}
 	o, od := "", "/cli/lib"
 	v := config.Visited{"od": true}
-	err = f.ApplySFU(v, config.SFUFlags{O: &o, OD: &od})
-	if err == nil || !strings.Contains(err.Error(), "[sfu].o") {
-		t.Fatalf("expected -od vs [sfu].o conflict; got %v", err)
+	if err := f.ApplySFU(v, config.SFUFlags{O: &o, OD: &od}); err != nil {
+		t.Fatalf("ApplySFU returned error: %v", err)
+	}
+	if o != "" {
+		t.Fatalf("o = %q, want config value ignored", o)
+	}
+	if od != "/cli/lib" {
+		t.Fatalf("od = %q, want CLI value", od)
 	}
 }
 

@@ -55,9 +55,7 @@
 # j = 0                       # worker goroutines (0 = GOMAXPROCS).
 
 # Advanced tuning
-# decode_step = 1048576       # per dec.Read byte budget. Default 1 MiB tracks
-                               # Skylake-X+ / Zen 4+ / Apple Silicon L2. Lower to
-                               # 262144 (256 KiB) on Broadwell/Haswell/Zen 2-3.
+# decode_step = 1048576       # per dec.Read byte budget. Default 1 MiB.
 # max_hits_per_chunk = 0      # truncate hits per chunk at N (0 = unbounded).
                                # Safety valve for pathological 1-byte queries.
 

@@ -46,7 +46,7 @@ func renderHelp(bin string) string {
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
 		{"-no-update-check", "", "Disable background update availability check."},
-		{"-decode-step", "BYTES", "Per-Read decode budget (default 1048576). Lower (e.g. 262144) on pre-2017 Xeon / Zen 2-3."},
+		{"-decode-step", "BYTES", "Per-Read decode budget (default 1048576)."},
 		{"-max-hits-per-chunk", "N", "Truncate hits per chunk to N (default 0 = unbounded). Safety valve for `:` / `@` -style queries."},
 	}
 

@@ -28,9 +28,8 @@ var hitsPool = sync.Pool{
 
 const (
 	outWin = 1 << 20
-	// max bytes per dec.Read inside searchChunk. 1 MiB matches zindex.cpp,
-	// fits L2 on Skylake-X+/Zen 4+/Apple Silicon. older Broadwell/Haswell
-	// (256 KiB L2) or Zen 2/3 (512 KiB L2) lose ~3%, tune via -decode-step
+	// max bytes per dec.Read inside searchChunk. 1 MiB matches zindex.cpp;
+	// tune via -decode-step only after profiling the target workload.
 	defaultDecodeStep = 1 << 20
 	minDecodeStep     = 4 << 10
 

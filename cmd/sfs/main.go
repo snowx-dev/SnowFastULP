@@ -61,8 +61,7 @@ func main() {
 	workers := flag.Int("j", 0, "worker goroutines (0 = GOMAXPROCS)")
 	debugFlag := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
-	// 1 MiB default tracks per-core L2 on modern uarch.
-	// drop to 256 KiB on Broadwell/Haswell Xeon, Zen 2/3
+	// 1 MiB default matches the search engine default; tune only after profiling.
 	decodeStep := flag.Int("decode-step", 0, "")
 	// per-chunk safety valve vs pathological queries (eg `:` over multi-GiB).
 	// 0 = unbounded, hit = skip rest of chunk + stderr note

@@ -37,6 +37,7 @@ type runConfig struct {
 	NoTUI         bool
 	Debug         bool
 	NoUpdateCheck bool
+	UpdateChecker *selfupdate.Checker
 	Started       time.Time
 }
 
@@ -126,6 +127,8 @@ func main() {
 		NoURI: *noURI, NoTUI: *noTUI, Debug: *debug, NoUpdateCheck: *noUpdateCheck,
 		Started: started,
 	}
+	cfg.UpdateChecker = selfupdate.NewChecker(version.String, os.Args[0], cfg.NoUpdateCheck)
+	cfg.UpdateChecker.Start()
 	if err := run(cfg); err != nil {
 		fatalf("%v", err)
 	}
@@ -284,18 +287,22 @@ func run(cfg runConfig) error {
 	// resulting library size from the in-process ingest, or a "library unchanged"
 	// note when nothing was extracted.
 	var summary []string
+	var updateNotice *selfupdate.Notice
+	if cfg.UpdateChecker != nil {
+		updateNotice = cfg.UpdateChecker.NoticeForSummary()
+	}
 	switch {
 	case cfg.LibraryDir != "" && libEmpty:
-		summary = renderNoIngestSummary(cfg.LibraryDir, stats)
+		summary = renderNoIngestSummaryWithNotice(cfg.LibraryDir, stats, updateNotice)
 	case cfg.LibraryDir != "":
 		var newToLib, alreadyInLib int64
 		if ingestMet != nil {
 			newToLib = ingestMet.LinesUnique.Load()
 			alreadyInLib = ingestMet.LinesSkippedByDest.Load()
 		}
-		summary = renderIngestSummary(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, stats)
+		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, stats, updateNotice)
 	default:
-		summary = renderFinalSummary(outPath, stats)
+		summary = renderFinalSummaryWithNotice(outPath, stats, updateNotice)
 	}
 	for _, ln := range summary {
 		fmt.Fprintln(os.Stderr, ln)

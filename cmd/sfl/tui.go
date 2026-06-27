@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"golang.org/x/term"
 )
@@ -112,15 +113,52 @@ func frostTaglineRight(text string, width int, spanStart, spanEnd float64) strin
 // footerLines is the blank + two right-aligned frost taglines drawn below the
 // box, matching sfs's live/summary footer.
 func footerLines(width int) []string {
+	return summaryFooterLines(width, nil)
+}
+
+func summaryFooterLines(width int, notice *selfupdate.Notice) []string {
 	right := width - sflLeftPad
 	if right < 1 {
 		right = 1
+	}
+	if notice != nil {
+		return []string{
+			"",
+			footerRow(renderUpdateNoticeLine(notice), frostTagline(sflFooterLine1, 0.0, 0.5), right),
+			frostTaglineRight(sflFooterLine2, right, 0.2, 0.7),
+		}
 	}
 	return []string{
 		"",
 		frostTaglineRight(sflFooterLine1, right, 0.0, 0.5),
 		frostTaglineRight(sflFooterLine2, right, 0.2, 0.7),
 	}
+}
+
+func renderUpdateNoticeLine(notice *selfupdate.Notice) string {
+	return sflWarnStyle.Render("Update available: v"+notice.Latest) +
+		sflMutedStyle.Render(" · run: ") +
+		sflTitleStyle.Render(notice.Command)
+}
+
+func footerRow(left, right string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	rw := lipgloss.Width(right)
+	maxLeft := width - rw - 1
+	if maxLeft < 0 {
+		maxLeft = 0
+	}
+	if lipgloss.Width(left) > maxLeft {
+		left = ""
+	}
+	lw := lipgloss.Width(left)
+	gap := width - lw - rw
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 // stderrIsTTY reports whether the live frame's target (stderr) is a terminal.
@@ -288,9 +326,13 @@ func insetBox(style lipgloss.Style, body []string, width int) []string {
 // frame is the shared shape for every render: a blank top margin, the header /
 // title row, a blank separator, the boxed body, then the footer.
 func frame(header string, box []string, width int) []string {
+	return frameWithFooter(header, box, width, footerLines(width))
+}
+
+func frameWithFooter(header string, box []string, width int, footer []string) []string {
 	out := []string{"", header, ""}
 	out = append(out, box...)
-	return append(out, footerLines(width)...)
+	return append(out, footer...)
 }
 
 func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, spinner string, width int) []string {
@@ -376,23 +418,31 @@ func summaryRecap(stats sflog.ExtractStats) []string {
 }
 
 func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
+	return renderFinalSummaryWithNotice(outPath, stats, nil)
+}
+
+func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
 	body := append(summaryRecap(stats), sflMutedStyle.Render("Output: ")+outPath)
-	return frame(title, insetBox(sflBoxStyle, body, width), width)
+	return frameWithFooter(title, insetBox(sflBoxStyle, body, width), width, summaryFooterLines(width, notice))
 }
 
 // renderNoIngestSummary is the -od frame when extraction produced no
 // credentials: a calm "done, nothing to do" recap with the library left
 // untouched, rather than an error exit.
 func renderNoIngestSummary(libraryDir string, stats sflog.ExtractStats) []string {
+	return renderNoIngestSummaryWithNotice(libraryDir, stats, nil)
+}
+
+func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
 	body := append(summaryRecap(stats),
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
-	return frame(title, insetBox(sflBoxStyle, body, width), width)
+	return frameWithFooter(title, insetBox(sflBoxStyle, body, width), width, summaryFooterLines(width, notice))
 }
 
 // renderIngestSummary is the -od completion frame: the same extraction recap,
@@ -400,6 +450,10 @@ func renderNoIngestSummary(libraryDir string, stats sflog.ExtractStats) []string
 // line count and path, so the single icy frame ends the run instead of handing
 // off to sfu's summary.
 func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats) []string {
+	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, stats, nil)
+}
+
+func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
 	body := append(summaryRecap(stats),
@@ -408,7 +462,7 @@ func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib
 		sflOkStyle.Render(formatInt(int(libraryLines)))+sflMutedStyle.Render(" lines in library"),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
-	return frame(title, insetBox(sflBoxStyle, body, width), width)
+	return frameWithFooter(title, insetBox(sflBoxStyle, body, width), width, summaryFooterLines(width, notice))
 }
 
 // renderInterruptSummary is printed on the normal screen after a graceful

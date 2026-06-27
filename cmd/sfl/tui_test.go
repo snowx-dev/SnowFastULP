@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 )
 
@@ -29,6 +30,18 @@ func TestRenderFinalSummaryShowsSnowFastLogStats(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderFinalSummaryUpdateNoticeFooter(t *testing.T) {
+	lines := renderFinalSummaryWithNotice("out/sfl.txt", sflog.ExtractStats{
+		Emitted: 1,
+	}, &selfupdate.Notice{Latest: "9.9.9", Command: "sfl update"})
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"Update available: v9.9.9", "sfl update", "snowx.dev"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("summary missing update notice %q:\n%s", want, joined)
 		}
 	}
 }
