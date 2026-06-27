@@ -328,6 +328,27 @@ func TestRunBucketedRemovesShardSubdirAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestShouldUseFastPathHonorsAbsoluteInputCap(t *testing.T) {
+	mem := memInfo{available: 64 << 30}
+	if shouldUseFastPath((1<<30)+1, mem) {
+		t.Fatal("fast path should be disabled above the absolute input cap")
+	}
+}
+
+func TestShouldUseFastPathAllowsSmallInputUnderMemoryThreshold(t *testing.T) {
+	mem := memInfo{available: 64 << 30}
+	if !shouldUseFastPath(512<<20, mem) {
+		t.Fatal("fast path should be enabled below the absolute cap and memory threshold")
+	}
+}
+
+func TestShouldUseFastPathAllowsInputAtAbsoluteCap(t *testing.T) {
+	mem := memInfo{available: 64 << 30}
+	if !shouldUseFastPath(1<<30, mem) {
+		t.Fatal("fast path should remain enabled at the absolute input cap")
+	}
+}
+
 func TestLargestPow2AtMost(t *testing.T) {
 	cases := map[int]int{
 		0:    0,

@@ -106,7 +106,7 @@ type debugRunInfo struct {
 	patternLen      int
 	workers         int
 	outFile         string
-	silent          bool
+	stream          bool
 	clean           bool
 	cwd             string
 	gomaxprocs      int
@@ -135,7 +135,7 @@ func (d *debugLog) writeHeader(bin string, started time.Time, argv []string, inf
 	d.Printf("patternLen: %d\n", info.patternLen)
 	d.Printf("workers: %d\n", info.workers)
 	d.Printf("output: %s\n", debugOutputDesc(info.outFile))
-	d.Printf("silent: %v\n", info.silent)
+	d.Printf("stream: %v\n", info.stream)
 	d.Printf("clean: %v\n", info.clean)
 	d.Printf("uiMode: %s\n", info.uiMode)
 	d.Printf("stderrTTY: %v\n", info.stderrTTY)

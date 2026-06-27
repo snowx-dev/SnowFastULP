@@ -48,10 +48,11 @@ type Config struct {
 const defaultZstChunkLines int64 = 100_000_000
 
 const (
-	minBuckets         = 64
-	maxBuckets         = 4096
-	fastPathRAMRatio   = 8     // input < MemAvail/8 enables fast path
-	fastPathMinAvailMB = 1_024 // need 1 GiB MemAvail to try
+	minBuckets            = 64
+	maxBuckets            = 4096
+	fastPathRAMRatio      = 8       // input < MemAvail/8 enables fast path
+	fastPathMinAvailMB    = 1_024   // need 1 GiB MemAvail to try
+	maxFastPathInputBytes = 1 << 30 // switch big jobs to worker/bucket path
 
 	// FDs reserved for stdio, walks, current input, sink, runtime.
 	// effective bucket cap = soft_limit - fdReserve, floored to pow2
@@ -226,6 +227,9 @@ func Resolve(cfg Config) (*Resolved, error) {
 func shouldUseFastPath(inputBytes int64, mem memInfo) bool {
 	avail := mem.effectiveAvailable()
 	if inputBytes <= 0 || avail == 0 {
+		return false
+	}
+	if inputBytes > maxFastPathInputBytes {
 		return false
 	}
 	if avail < uint64(fastPathMinAvailMB)*1024*1024 {

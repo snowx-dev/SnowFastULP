@@ -262,6 +262,101 @@ func TestRenderShardProgressColumnsAreStable(t *testing.T) {
 	}
 }
 
+func TestRenderShardLinesShowsByteWeightedChunkProgress(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	m.BytesRead.Store(50)
+	m.ChunksDone.Store(0)
+	m.ChunksTotal.Store(16)
+	r := &ulpengine.Resolved{TotalInputs: 100, InputFileCount: 1, Workers: 8, DedupWorkers: 4, BucketCount: 64}
+
+	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
+	row := findRow(lines, "Progress", "chunks")
+	if row == "" {
+		t.Fatalf("progress row not found in:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(row, "chunks  8.0 / 16") {
+		t.Fatalf("progress row = %q, want byte-weighted chunk progress", row)
+	}
+}
+
+func TestRenderShardLinesShowsFastPathWorkerBusy(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	m.BytesRead.Store(50)
+	m.ChunksDone.Store(0)
+	m.ChunksTotal.Store(1)
+	r := &ulpengine.Resolved{
+		TotalInputs:    100,
+		InputFileCount: 1,
+		UseFastPath:    true,
+		Workers:        8,
+		DedupWorkers:   4,
+		BucketCount:    64,
+	}
+
+	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
+	row := findRow(lines, "Progress", "workers")
+	if row == "" {
+		t.Fatalf("progress row not found in:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(row, "1 / 1 busy") {
+		t.Fatalf("fast-path progress row = %q, want single busy worker", row)
+	}
+	if strings.Contains(row, "0 / 8 busy") {
+		t.Fatalf("fast-path progress row exposed bucket worker pool: %q", row)
+	}
+}
+
+func TestRenderShardLinesMirrorsDedupBarForFastPath(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	m.BytesRead.Store(50)
+	m.ChunksDone.Store(0)
+	m.ChunksTotal.Store(1)
+	r := &ulpengine.Resolved{
+		TotalInputs:    100,
+		InputFileCount: 1,
+		UseFastPath:    true,
+		Workers:        8,
+		DedupWorkers:   4,
+		BucketCount:    64,
+	}
+
+	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
+	parsing := findRow(lines, "Parsing", "50.0%")
+	deduping := findRow(lines, "Deduping", "50.0%")
+	if parsing == "" {
+		t.Fatalf("fast-path parsing bar did not show 50%% progress in:\n%s", strings.Join(lines, "\n"))
+	}
+	if deduping == "" {
+		t.Fatalf("fast-path deduping bar did not mirror parsing progress in:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(deduping, "----") {
+		t.Fatalf("fast-path deduping bar should not be pending: %q", deduping)
+	}
+}
+
+func TestRenderShardLinesKeepsDedupBarPendingForBucketedParsing(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	m.BytesRead.Store(50)
+	m.ChunksDone.Store(0)
+	m.ChunksTotal.Store(16)
+	r := &ulpengine.Resolved{
+		TotalInputs:    100,
+		InputFileCount: 1,
+		Workers:        8,
+		DedupWorkers:   4,
+		BucketCount:    64,
+	}
+
+	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
+	deduping := findRow(lines, "Deduping", "----")
+	if deduping == "" {
+		t.Fatalf("bucketed parsing should keep deduping pending in:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(deduping, "50.0%") {
+		t.Fatalf("bucketed parsing deduping bar should not mirror parse progress: %q", deduping)
+	}
+}
+
 // bars start at col 4, aligned w/ stat rows above
 func TestRenderShardBarsAreIndented(t *testing.T) {
 	m := &ulpengine.Metrics{}

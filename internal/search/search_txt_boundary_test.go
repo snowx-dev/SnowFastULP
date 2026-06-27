@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/search"
 )
@@ -145,6 +146,49 @@ func TestRunTxtManyFilesWorkerPool(t *testing.T) {
 	}
 	if got := metrics.ChunksDone.Load(); got != 32 {
 		t.Fatalf("ChunksDone = %d, want 32", got)
+	}
+}
+
+func TestRunTxtEmitsHitsBeforeWholeFileIsScanned(t *testing.T) {
+	const step = 1 << 20 // mirrors search.defaultDecodeStep
+	dir := t.TempDir()
+	p := filepath.Join(dir, "stream.txt")
+	body := append([]byte("needle-first-line\n"), bytes.Repeat([]byte("filler\n"), step/len("filler\n")*3)...)
+	if err := os.WriteFile(p, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hitCh := make(chan search.Hit)
+	metrics := &search.Metrics{}
+	done := make(chan error, 1)
+	go func() {
+		done <- search.RunTxt(search.TxtConfig{
+			Ctx:        context.Background(),
+			Pattern:    []byte("needle"),
+			Workers:    1,
+			Files:      []string{p},
+			ArchiveOrd: map[string]int{p: 0},
+			Metrics:    metrics,
+			Hits:       hitCh,
+		})
+		close(hitCh)
+	}()
+
+	select {
+	case <-hitCh:
+		if scanned := metrics.BytesScanned.Load(); scanned >= int64(len(body)) {
+			t.Fatalf("first hit emitted after full scan: scanned=%d total=%d", scanned, len(body))
+		}
+	case err := <-done:
+		t.Fatalf("RunTxt returned before first hit: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first streamed hit")
+	}
+
+	for range hitCh {
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

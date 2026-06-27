@@ -34,8 +34,8 @@ func renderHelp(bin string) string {
 
 	primary := []argDef{
 		{"-txt", "", "Search plain .txt files instead of .zst archives (no index)."},
-		{"-o", "FILE", "Write results to this file instead of stdout."},
-		{"-silent", "", "Use plain text output instead of the live screen."},
+		{"-o", "FILE", "Write results to this file instead of the auto-generated CWD file."},
+		{"-s", "", "Stream results to stdout without the live screen."},
 		{"-clean", "", "Strip URL schemes from output lines."},
 		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
 		{"-since", "DUR", "Only search archives modified within DUR, e.g. 7d, 12h, 90m."},
@@ -46,6 +46,7 @@ func renderHelp(bin string) string {
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
 		{"-no-update-check", "", "Disable background update availability check."},
+		{"-silent", "", "Deprecated alias for -s."},
 		{"-decode-step", "BYTES", "Per-Read decode budget (default 1048576)."},
 		{"-max-hits-per-chunk", "N", "Truncate hits per chunk to N (default 0 = unbounded). Safety valve for `:` / `@` -style queries."},
 	}
@@ -70,11 +71,11 @@ func renderHelp(bin string) string {
 	b.WriteString(labelStyle.Render("Usage:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " " +
 		byteStyle.Render("PATTERN") + " " +
-		mutedStyle.Render("[-o FILE]") + "\n")
+		mutedStyle.Render("[-o FILE | -s]") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " " +
 		byteStyle.Render("DIR") + " " +
 		byteStyle.Render("PATTERN") + " " +
-		mutedStyle.Render("[-o FILE]") + "\n")
+		mutedStyle.Render("[-o FILE | -s]") + "\n")
 	b.WriteString(mutedStyle.Render("    Flags may appear before or after the pattern. More flags below: Args for nerds, then Args for devs.") + "\n")
 	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; [sfs].dir for PATTERN-only)") + "\n")
 	b.WriteString(mutedStyle.Render("    PATTERN '*' exports every line (quote it in the shell).") + "\n\n")
@@ -87,9 +88,10 @@ func renderHelp(bin string) string {
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'facebook.com:'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " -txt ./dumps 'user@example'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'user@example'\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'gmail' -s | head\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library '*' -since 5m -o recent.txt\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library -o hits.txt 'user@example'\n")
-	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -o out.txt -silent\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -s\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -o out.txt -clean\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'pattern' -debug\n\n")
 

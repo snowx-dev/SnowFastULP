@@ -15,6 +15,7 @@ import (
 func newSFSTestFS() *flag.FlagSet {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("o", "", "output file")
+	fs.Bool("s", false, "stream")
 	fs.Bool("txt", false, "txt mode")
 	fs.Bool("silent", false, "silent")
 	fs.Bool("clean", false, "clean")
@@ -42,13 +43,13 @@ func TestSplitPositional(t *testing.T) {
 
 func TestSplitPositionalTxtFlag(t *testing.T) {
 	fs := newSFSTestFS()
-	flags, pos := cliargs.SplitPositional([]string{"-txt", "-silent", "pat"}, fs)
+	flags, pos := cliargs.SplitPositional([]string{"-txt", "-s", "pat"}, fs)
 	if len(pos) != 1 || pos[0] != "pat" {
 		t.Fatalf("pos = %v", pos)
 	}
 	hasTxt := false
 	for _, f := range flags {
-		if f == "-txt" || f == "-silent" {
+		if f == "-txt" || f == "-s" {
 			hasTxt = true
 		}
 	}

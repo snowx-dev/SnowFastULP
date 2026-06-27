@@ -297,9 +297,11 @@ func renderFullAt(now, start time.Time, m *search.Metrics, rates uiRates, patter
 		inner = append(inner, labelStyle.Render("Index     ")+byteStyle.Render(formatBytes(done))+
 			mutedStyle.Render(" / ")+byteStyle.Render(formatBytes(total)))
 	} else {
+		chunkProgress, chunkTotal := searchChunkProgress(m)
+		chunkDigits := numDigits(chunkTotal)
 		inner = append(inner,
-			labelStyle.Render("Chunks    ")+countStyle.Render(fmt.Sprintf("%d", m.ChunksDone.Load()))+
-				mutedStyle.Render(" / ")+countStyle.Render(fmt.Sprintf("%d", m.ChunksTotal.Load())),
+			labelStyle.Render("Chunks    ")+countStyle.Render(fmt.Sprintf("%*.1f", chunkDigits+2, chunkProgress))+
+				mutedStyle.Render(" / ")+countStyle.Render(fmt.Sprintf("%d", chunkTotal)),
 			labelStyle.Render("Hits      ")+hitStyle.Render(fmt.Sprintf("%d", hits)),
 		)
 		scannedDone, scannedTotal := searchBytes(m)
@@ -722,18 +724,45 @@ func pendingBar(width int) string {
 }
 
 func searchPercent(m *search.Metrics) float64 {
-	done := m.BytesChunkDone.Load()
-	total := m.BytesScannedTotal.Load()
+	progress, total := searchChunkProgress(m)
 	if total > 0 {
-		if done > total {
-			done = total
-		}
-		return float64(done) / float64(total)
-	}
-	if chunks := m.ChunksTotal.Load(); chunks > 0 {
-		return float64(m.ChunksDone.Load()) / float64(chunks)
+		return progress / float64(total)
 	}
 	return 0
+}
+
+func searchChunkProgress(m *search.Metrics) (float64, int64) {
+	total := m.ChunksTotal.Load()
+	if total <= 0 {
+		return 0, 0
+	}
+	progress := float64(m.ChunksDone.Load())
+	if scannedTotal := m.BytesScannedTotal.Load(); scannedTotal > 0 {
+		scanned := m.BytesScanned.Load()
+		if scanned > scannedTotal {
+			scanned = scannedTotal
+		}
+		byteProgress := float64(scanned) / float64(scannedTotal) * float64(total)
+		if byteProgress > progress {
+			progress = byteProgress
+		}
+	}
+	if progress > float64(total) {
+		progress = float64(total)
+	}
+	return progress, total
+}
+
+func numDigits(n int64) int {
+	if n < 0 {
+		n = -n
+	}
+	digits := 1
+	for n >= 10 {
+		n /= 10
+		digits++
+	}
+	return digits
 }
 
 func indexPercent(m *search.Metrics) float64 {

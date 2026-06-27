@@ -100,7 +100,25 @@ func RunTxt(cfg TxtConfig) error {
 				unreg = reg.Register(f)
 			}
 
-			localHits, err := searchTxtFile(ctx, f, cfg.Pattern, cfg.MatchAll, cfg.Metrics)
+			emit := func(h localHit) error {
+				hit := Hit{
+					ArchiveOrd: t.ord,
+					Archive:    t.path,
+					ChunkID:    0,
+					Offset:     h.offset,
+					Line:       h.line,
+				}
+				select {
+				case cfg.Hits <- hit:
+					if cfg.Metrics != nil {
+						cfg.Metrics.Hits.Add(1)
+					}
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			err = searchTxtFile(ctx, f, cfg.Pattern, cfg.MatchAll, cfg.Metrics, emit)
 			if unreg != nil {
 				unreg()
 			}
@@ -108,27 +126,6 @@ func RunTxt(cfg TxtConfig) error {
 
 			if err != nil && cfg.OnFileError != nil {
 				cfg.OnFileError(t.path, err)
-			}
-			if err == nil {
-				for _, h := range localHits {
-					hit := Hit{
-						ArchiveOrd: t.ord,
-						Archive:    t.path,
-						ChunkID:    0,
-						Offset:     h.offset,
-						Line:       h.line,
-					}
-					if ctx.Err() != nil {
-						break
-					}
-					select {
-					case cfg.Hits <- hit:
-						if cfg.Metrics != nil {
-							cfg.Metrics.Hits.Add(1)
-						}
-					case <-ctx.Done():
-					}
-				}
 			}
 			bumpFile(fileBytes)
 			markFileDone(t.ord)
@@ -166,7 +163,7 @@ func RunTxt(cfg TxtConfig) error {
 // complete lines across read seams via lineAssembler so a matched line is never
 // truncated at a buffer boundary — no overlap window or on-disk backref needed,
 // and pattern/match-all share one path.
-func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll bool, metrics *Metrics) ([]localHit, error) {
+func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll bool, metrics *Metrics, emit func(localHit) error) error {
 	var process processFn
 	if matchAll {
 		process = matchAllRegion
@@ -182,13 +179,21 @@ func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll boo
 	}
 
 	absOff := int64(0)
-	var hits []localHit
+	hits := make([]localHit, 0, 256)
 	var asm lineAssembler
+	emitHits := func(batch []localHit) error {
+		for _, h := range batch {
+			if err := emit(h); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	for {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
-				return hits, err
+				return err
 			}
 		}
 		readLen := len(buf)
@@ -200,16 +205,20 @@ func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll boo
 			if metrics != nil {
 				metrics.BytesScanned.Add(int64(n))
 			}
-			hits = asm.feed(hits, buf[:n], absOff, process)
+			hits = asm.feed(hits[:0], buf[:n], absOff, process)
 			absOff += int64(n)
+			if err := emitHits(hits); err != nil {
+				return err
+			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return hits, err
+			return err
 		}
 	}
 
-	return asm.flush(hits, process), nil
+	hits = asm.flush(hits[:0], process)
+	return emitHits(hits)
 }

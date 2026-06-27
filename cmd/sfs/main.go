@@ -53,9 +53,10 @@ func main() {
 		fatal("%v", err)
 	}
 
-	outFile := flag.String("o", "", "write results to this file (default: stdout)")
+	outFile := flag.String("o", "", "write results to this file (default: sfs_results_YYYYMMDD-HHMM.txt)")
+	stream := flag.Bool("s", false, "stream results to stdout without the live screen")
 	txtMode := flag.Bool("txt", false, "search plain .txt files instead of .zst archives (no index)")
-	silent := flag.Bool("silent", false, "disable progress UI")
+	silent := flag.Bool("silent", false, "deprecated alias for -s")
 	clean := flag.Bool("clean", false, "strip URL scheme prefixes from output lines")
 	since := flag.String("since", "", "only search archives modified within this window, e.g. 7d, 12h, 90m (default: all)")
 	workers := flag.Int("j", 0, "worker goroutines (0 = GOMAXPROCS)")
@@ -76,7 +77,7 @@ func main() {
 	}
 	visited := config.NewVisited()
 	if err := cfg.ApplySFS(visited, config.SFSFlags{
-		O: outFile, Txt: txtMode, Silent: silent, Clean: clean, J: workers, Debug: debugFlag,
+		O: outFile, Txt: txtMode, Stream: stream, Silent: silent, Clean: clean, J: workers, Debug: debugFlag,
 		DecodeStep: decodeStep, MaxHitsPerChunk: maxHitsPerChunk, Limit: limit, Since: since,
 	}); err != nil {
 		fatal("%v", err)
@@ -154,12 +155,23 @@ func main() {
 		}
 	}
 
-	// dont clobber search target w/ -o, O_TRUNC fires pre-scan
+	started := time.Now()
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal("getwd: %v", err)
+	}
+	streamMode := streamRequested(*stream, *silent)
+	outputMode, err := resolveOutputMode(*outFile, streamMode, cwd, started)
+	if err != nil {
+		fatal("%v", err)
+	}
+	*outFile = outputMode.OutFile
+	streamMode = outputMode.Stream
+	// dont clobber search target w/ -o/default output, O_TRUNC fires pre-scan
 	if err := ensureNoOutputCollision(*outFile, archives); err != nil {
 		fatal("%v", err)
 	}
 
-	started := time.Now()
 	updateChecker := selfupdate.NewChecker(version.String, os.Args[0], *noUpdateCheck)
 	updateChecker.Start()
 	ctx, cancel, signaled := signalContext()
@@ -169,11 +181,7 @@ func main() {
 	ctx = fileabort.WithContext(ctx, files)
 	go watchInterrupt(ctx, files, signaled)
 
-	cwd, err := os.Getwd()
-	if err != nil && *debugFlag {
-		fatal("getwd: %v", err)
-	}
-	uiMode := resolveUIMode(*silent, *outFile)
+	uiMode := resolveUIMode(streamMode, *outFile)
 
 	var dbg *debugLog
 	var debugLogPath string
@@ -202,7 +210,7 @@ func main() {
 		patternLen: len(pattern),
 		workers:    w,
 		outFile:    *outFile,
-		silent:     *silent,
+		stream:     streamMode,
 		clean:      *clean,
 		cwd:        cwd,
 		gomaxprocs: runtime.GOMAXPROCS(0),
@@ -235,7 +243,8 @@ func main() {
 		txtMode:         *txtMode,
 		workers:         w,
 		outFile:         *outFile,
-		silent:          *silent,
+		liveEcho:        !outputMode.Generated,
+		stream:          streamMode,
 		clean:           *clean,
 		decodeStep:      *decodeStep,
 		maxHitsPerChunk: *maxHitsPerChunk,
@@ -260,7 +269,7 @@ func main() {
 	if dbg != nil {
 		dbg.logCompletion(metrics, wall, debugInfo)
 	}
-	if !*silent {
+	if !streamMode {
 		// NoticeForSummary returns nil when the check is disabled, so no extra guard.
 		updateNotice := updateChecker.NoticeForSummary()
 		for _, ln := range renderFinalSummary(started, metrics, *outFile, pattern, updateNotice) {
@@ -277,7 +286,8 @@ type runConfig struct {
 	txtMode         bool
 	workers         int
 	outFile         string
-	silent          bool
+	liveEcho        bool
+	stream          bool
 	clean           bool
 	decodeStep      int
 	maxHitsPerChunk int
@@ -315,7 +325,7 @@ func run(ctx context.Context, cfg runConfig) error {
 		out = f
 	}
 
-	uiMode := resolveUIMode(cfg.silent, cfg.outFile)
+	uiMode := resolveUIMode(cfg.stream, cfg.outFile)
 	var layout *terminalLayout
 	if uiMode == uiFull && stdoutIsTTY() && stderrIsTTY() {
 		layout = &terminalLayout{}
@@ -323,25 +333,15 @@ func run(ctx context.Context, cfg runConfig) error {
 	}
 
 	// Wire the hit output:
-	//   resultWriter — the durable/canonical sink (ordered when -o).
-	//   liveWriter   — an on-screen viewport echo, used only with -o so hits
-	//                  still scroll live while the file stays the source of truth.
-	//   capture      — buffers stdout hits for replay after the alt-screen exits
-	//                  (only when there's no -o; with -o the file is the record).
+	//   resultWriter — the durable/canonical sink (ordered when -o/default file).
+	//   liveWriter   — optional on-screen viewport echo for explicit -o on a TTY.
 	var resultWriter io.Writer = os.Stdout
 	var liveWriter io.Writer
-	var capture *hitCapture
 	switch {
-	case out != nil && layout != nil:
+	case out != nil && layout != nil && cfg.liveEcho:
 		// -o on a TTY: persist to the file, echo hits live on screen separately.
 		resultWriter = out
 		liveWriter = newHitViewportWriter(os.Stdout, layout)
-	case layout != nil:
-		// no -o on a TTY: hits stream into the on-screen viewport; capture so
-		// they survive the alt-screen exit.
-		resultWriter = newHitViewportWriter(os.Stdout, layout)
-		capture = newHitCapture(resultWriter)
-		resultWriter = capture
 	case out != nil:
 		resultWriter = out
 	}
@@ -408,13 +408,9 @@ func run(ctx context.Context, cfg runConfig) error {
 		Signaled: cfg.signaled,
 		Layout:   layout,
 	}, &uiWG)
-	ok := false
 	defer func() {
 		close(uiDone)
 		uiWG.Wait()
-		if ok && capture != nil {
-			capture.ReplayToStdout()
-		}
 		noteMu.Lock()
 		for _, n := range notes {
 			fmt.Fprintln(os.Stderr, n)
@@ -659,7 +655,6 @@ drainHits:
 	if searchErr != nil && !limitReached {
 		return searchErr
 	}
-	ok = true
 	return nil
 }
 

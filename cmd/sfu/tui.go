@@ -275,6 +275,14 @@ func renderMainProgressBars(parsingPct, dedupPct float64, parsingComplete bool, 
 	}
 }
 
+func renderFastPathProgressBars(pct float64, width int) [2]string {
+	body := mainPhaseBarWidth(width)
+	return [2]string{
+		indentSpace + progressBarLabel("Parsing") + gradientBar(pct, body),
+		indentSpace + progressBarLabel("Deduping") + gradientBar(pct, body),
+	}
+}
+
 // width-aware utilities. visible-width math skips SGR escapes so
 // lipgloss-styled strings measure correctly
 
@@ -926,6 +934,34 @@ func renderLiveScreenFooter(width int) []string {
 // layout: blank, header, blank, 4 stat rows, blank, parsing bar,
 // blank, dedup bar, blank, frost tagline footer
 
+func shardWorkerStatus(m *ulpengine.Metrics, r *ulpengine.Resolved) (int64, int64) {
+	if r != nil && r.UseFastPath {
+		if m.ChunksTotal.Load() == 0 || m.ChunksDone.Load() < m.ChunksTotal.Load() {
+			return 1, 1
+		}
+		return 0, 1
+	}
+	return int64(m.BusyWorkers.Load()), int64(r.Workers)
+}
+
+func shardChunkProgress(m *ulpengine.Metrics, r *ulpengine.Resolved) (float64, int64) {
+	total := m.ChunksTotal.Load()
+	if total <= 0 {
+		return 0, 0
+	}
+	progress := float64(m.ChunksDone.Load())
+	if r != nil && r.TotalInputs > 0 {
+		byteProgress := float64(m.BytesRead.Load()) / float64(r.TotalInputs) * float64(total)
+		if byteProgress > progress {
+			progress = byteProgress
+		}
+	}
+	if progress > float64(total) {
+		progress = float64(total)
+	}
+	return progress, total
+}
+
 func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, readBPS, shardBPS, regenBPS float64, width int) []string {
 	pct := 0.0
 	if r.TotalInputs > 0 {
@@ -938,7 +974,9 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderStep1PhaseTag(r, m), elapsed, width)
 
 	chunksDigits := numDigits(m.ChunksTotal.Load())
-	workersDigits := numDigits(int64(r.Workers))
+	chunkProgress, chunksTotal := shardChunkProgress(m, r)
+	busyWorkers, workerTotal := shardWorkerStatus(m, r)
+	workersDigits := numDigits(workerTotal)
 
 	// stat rows w/o per-row indentLine, gradientBox owns framing+indent
 	throughput := labelStyle.Render("Throughput") + "   " +
@@ -957,8 +995,8 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	readBytesStr := padLeft(humanBytes(m.BytesRead.Load()), len(totalBytesStr))
 	progressRow := labelStyle.Render("Progress") + "     " +
 		byteStyle.Render(readBytesStr) + " / " + byteStyle.Render(totalBytesStr) + "    " +
-		"chunks " + countStyle.Render(fmt.Sprintf("%*d / %d", chunksDigits, m.ChunksDone.Load(), m.ChunksTotal.Load())) + "    " +
-		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.Workers))
+		"chunks " + countStyle.Render(fmt.Sprintf("%*.1f / %d", chunksDigits+2, chunkProgress, chunksTotal)) + "    " +
+		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, busyWorkers, workerTotal))
 	systemRow := labelStyle.Render("System") + "       " +
 		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
 		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct)) + "    " +
@@ -973,6 +1011,9 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	bars := renderMainProgressBars(pct, 0, false, width)
+	if r != nil && r.UseFastPath {
+		bars = renderFastPathProgressBars(pct, width)
+	}
 
 	out := []string{"", header, ""}
 	out = append(out, boxLines...)

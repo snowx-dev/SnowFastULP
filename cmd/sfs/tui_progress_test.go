@@ -106,6 +106,21 @@ func TestRenderFullSearchShowsLabeledProgressBars(t *testing.T) {
 	}
 }
 
+func TestRenderFullSearchShowsByteWeightedChunkProgress(t *testing.T) {
+	m := &search.Metrics{}
+	m.Phase.Store(search.PhaseSearch)
+	m.ArchivesTotal.Store(1)
+	m.ChunksTotal.Store(16)
+	m.ChunksDone.Store(0)
+	m.BytesScannedTotal.Store(100)
+	m.BytesScanned.Store(50)
+
+	joined := strings.Join(renderFull(time.Now(), time.Now(), m, uiRates{}, ""), "\n")
+	if !strings.Contains(joined, "Chunks") || !strings.Contains(joined, "8.0 / 16") {
+		t.Fatalf("missing byte-weighted chunk progress:\n%s", joined)
+	}
+}
+
 func TestRenderFullHidesOutputPathDuringRun(t *testing.T) {
 	m := &search.Metrics{}
 	m.Phase.Store(search.PhaseSearch)

@@ -95,6 +95,7 @@ func (f File) ApplySFU(v Visited, fl SFUFlags) error {
 type SFSFlags struct {
 	O               *string
 	Txt             *bool
+	Stream          *bool
 	Silent          *bool
 	Clean           *bool
 	J               *int
@@ -117,8 +118,11 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	if !v.set("txt") && f.SFS.Txt {
 		*fl.Txt = true
 	}
-	if !v.set("silent") && f.SFS.Silent {
-		*fl.Silent = true
+	if !v.set("s") && !v.set("silent") && f.SFS.Stream {
+		setSFSStreamFlag(fl)
+	}
+	if !v.set("s") && !v.set("silent") && f.SFS.Silent {
+		setSFSStreamFlag(fl)
 	}
 	if !v.set("clean") && f.SFS.Clean {
 		*fl.Clean = true
@@ -142,6 +146,16 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 		*fl.Since = f.SFS.Since
 	}
 	return nil
+}
+
+func setSFSStreamFlag(fl SFSFlags) {
+	if fl.Stream != nil {
+		*fl.Stream = true
+		return
+	}
+	if fl.Silent != nil {
+		*fl.Silent = true
+	}
 }
 
 // SFLFlags holds pointers to sfl flag variables for config merge.

@@ -42,11 +42,12 @@
 [sfs]
 # I/O
 # dir    = "./library/"       # default search dir when no positional given.
-# o      = "./results.txt"    # write results to file (default: stdout).
+# o      = "./results.txt"    # write results to this file (default: CWD sfs_results_*.txt).
+# stream = false              # stream results to stdout instead of writing a result file.
 # txt    = false              # search plain .txt files instead of .zst archives
                                # (skips the index path; slower but no preindex needed).
 # clean  = false              # strip URL scheme prefixes from output lines.
-# silent = false              # disable progress UI.
+# silent = false              # deprecated alias for stream.
 # l      = 0                  # stop after N total hits, then exit (0 = unlimited).
 # since  = "7d"               # only search archives modified within this window
                                # (mtime-based; e.g. 7d, 12h, 90m). Default: all.

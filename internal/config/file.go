@@ -38,6 +38,7 @@ type SFSSection struct {
 	Dir             string `toml:"dir"`
 	Txt             bool   `toml:"txt"`
 	O               string `toml:"o"`
+	Stream          bool   `toml:"stream"`
 	Silent          bool   `toml:"silent"`
 	Clean           bool   `toml:"clean"`
 	J               *int   `toml:"j"`
