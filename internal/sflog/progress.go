@@ -2,6 +2,7 @@ package sflog
 
 import (
 	"io"
+	"sync"
 	"sync/atomic"
 )
 
@@ -22,6 +23,55 @@ type Progress struct {
 	current    atomic.Value // string: path of the item being processed
 	phase      atomic.Int32
 	ingestView atomic.Value // func() IngestView, installed by BeginIngest
+
+	// workers is the per-engine-worker live status registry the TUI reads to
+	// render concurrent activity. Sized once by SetWorkers; guarded by
+	// workersMu only for the slice header (resize), slot fields are atomic.
+	workersMu sync.RWMutex
+	workers   []workerSlot
+}
+
+// WorkerStage labels what an extraction worker is doing right now. It is
+// surfaced per-slot in the live TUI so the user sees many things happening at
+// once even when the byte bar moves slowly.
+type WorkerStage int32
+
+const (
+	StageIdle WorkerStage = iota
+	StageOpening
+	StageTestingPassword
+	StageExtracting
+	StageParsing
+)
+
+func (s WorkerStage) String() string {
+	switch s {
+	case StageOpening:
+		return "opening"
+	case StageTestingPassword:
+		return "testing password"
+	case StageExtracting:
+		return "extracting"
+	case StageParsing:
+		return "parsing"
+	default:
+		return ""
+	}
+}
+
+// ActiveWorker is a snapshot of one busy worker slot for the TUI panel.
+type ActiveWorker struct {
+	Index int
+	Path  string
+	Stage WorkerStage
+}
+
+// workerSlot is one engine worker's live status. A nil path pointer means the
+// slot is idle. atomic.Pointer[string] gives lock-free consistent reads (there
+// is no atomic string primitive); a fresh *string is stored per item.
+type workerSlot struct {
+	path  atomic.Pointer[string]
+	stage atomic.Int32
 }
 
 // IngestView is a live snapshot of an in-process library ingest, rendered by
@@ -153,6 +203,90 @@ func (p *Progress) setCurrent(path string) {
 	if p != nil {
 		p.current.Store(path)
 	}
+}
+
+// SetWorkers sizes the active-worker registry to n slots. Called once by the
+// engine after it resolves its worker count; n<=0 leaves the registry empty so
+// the TUI falls back to the single-line current path.
+func (p *Progress) SetWorkers(n int) {
+	if p == nil || n < 0 {
+		return
+	}
+	p.workersMu.Lock()
+	p.workers = make([]workerSlot, n)
+	p.workersMu.Unlock()
+}
+
+// WorkerCount is the number of registered worker slots (0 if SetWorkers was
+// never called).
+func (p *Progress) WorkerCount() int {
+	if p == nil {
+		return 0
+	}
+	p.workersMu.RLock()
+	defer p.workersMu.RUnlock()
+	return len(p.workers)
+}
+
+func (p *Progress) slot(idx int) *workerSlot {
+	if p == nil {
+		return nil
+	}
+	p.workersMu.RLock()
+	defer p.workersMu.RUnlock()
+	if idx < 0 || idx >= len(p.workers) {
+		return nil
+	}
+	return &p.workers[idx]
+}
+
+// setActive marks worker idx busy on path at the given stage.
+func (p *Progress) setActive(idx int, path string, stage WorkerStage) {
+	if s := p.slot(idx); s != nil {
+		s.path.Store(&path)
+		s.stage.Store(int32(stage))
+	}
+}
+
+// setStage updates only the stage of an already-active worker slot.
+func (p *Progress) setStage(idx int, stage WorkerStage) {
+	if s := p.slot(idx); s != nil {
+		s.stage.Store(int32(stage))
+	}
+}
+
+// clearActive marks worker idx idle once it finishes its current item.
+func (p *Progress) clearActive(idx int) {
+	if s := p.slot(idx); s != nil {
+		s.path.Store(nil)
+		s.stage.Store(int32(StageIdle))
+	}
+}
+
+// ActiveWorkers snapshots up to max busy slots, lowest index first, into a
+// fresh slice so the renderer never re-reads the atomics. max<=0 returns nil.
+func (p *Progress) ActiveWorkers(max int) []ActiveWorker {
+	if p == nil || max <= 0 {
+		return nil
+	}
+	p.workersMu.RLock()
+	defer p.workersMu.RUnlock()
+	out := make([]ActiveWorker, 0, min(max, len(p.workers)))
+	for i := range p.workers {
+		ptr := p.workers[i].path.Load()
+		if ptr == nil {
+			continue
+		}
+		out = append(out, ActiveWorker{
+			Index: i,
+			Path:  *ptr,
+			Stage: WorkerStage(p.workers[i].stage.Load()),
+		})
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
 }
 func (p *Progress) setPhase(ph int32) {
 	if p != nil {

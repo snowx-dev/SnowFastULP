@@ -139,6 +139,83 @@ func TestRenderProgressShowsFooter(t *testing.T) {
 	}
 }
 
+func TestRenderSflWorkerPanelShowsConcurrentStages(t *testing.T) {
+	active := []sflog.ActiveWorker{
+		{Index: 0, Path: "/data/@beetraffic 3300 MIX.zip", Stage: sflog.StageTestingPassword},
+		{Index: 1, Path: "/data/Flores Private Cloud 32.rar", Stage: sflog.StageExtracting},
+		{Index: 3, Path: "/data/victim/Passwords.txt", Stage: sflog.StageParsing},
+	}
+	joined := strings.Join(renderSflWorkerPanel(active, 4, 72), "\n")
+	for _, want := range []string{
+		"3 of 4 workers active",
+		"testing password",
+		"extracting",
+		"parsing",
+		"[1]", "[2]", "[4]",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("worker panel missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderSflWorkerRowTruncatesLongPath(t *testing.T) {
+	w := sflog.ActiveWorker{Index: 2, Path: "/very/long/path/" + strings.Repeat("x", 200) + "/Passwords.txt", Stage: sflog.StageExtracting}
+	row := renderSflWorkerRow(w, 60, 4)
+	if !strings.Contains(row, "[3]") {
+		t.Fatalf("row missing 1-based marker: %q", row)
+	}
+	if !strings.Contains(row, "extracting") {
+		t.Fatalf("row missing stage: %q", row)
+	}
+	if len([]rune(row)) > 60+40 { // styled escapes add width; sanity ceiling
+		t.Fatalf("row not truncated to inner width: %d runes", len([]rune(row)))
+	}
+}
+
+func TestSflWorkerRowCap(t *testing.T) {
+	cases := []struct {
+		name          string
+		height, total int
+		want          int
+	}{
+		{"no workers", 50, 0, 0},
+		{"very short term keeps floor", 16, 16, sflMaxWorkerRows},
+		{"floor capped by total", 16, 4, 4},
+		{"mid term below total", 24, 16, 12},
+		{"tall term expands toward total", 60, 16, 16},
+		{"tall term capped at total", 100, 12, 12},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sflWorkerRowCap(tc.height, tc.total); got != tc.want {
+				t.Fatalf("sflWorkerRowCap(%d, %d) = %d, want %d", tc.height, tc.total, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderFinalSummaryReportsSkippedCount(t *testing.T) {
+	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
+		ArchivesScanned:  3,
+		Emitted:          4,
+		SkippedArchives:  2,
+		SkippedFiles:     1,
+		PasswordNotFound: 2,
+		Issues: []sflog.Issue{
+			{Path: "/data/locked.zip", Kind: sflog.IssuePasswordNotFound},
+		},
+	})
+	joined := strings.Join(lines, "\n")
+	// The recap count row must surface the total skipped sources alongside the
+	// per-kind fail lines, so failures are never hidden from the end summary.
+	for _, want := range []string{"3 skipped", "password not found", "locked.zip"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestRenderInterruptShowsCleanupNotice(t *testing.T) {
 	lines := renderInterrupt(0, "/", 80)
 	joined := strings.Join(lines, "\n")

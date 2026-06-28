@@ -38,25 +38,56 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
-func TestFetchSumsParsing(t *testing.T) {
-	// Mirror the on-disk SHA256SUMS format (sha256sum output: "<hex>  <name>").
-	manifest := "" +
-		"aa" + "00" + "112233445566778899aabbccddeeff00112233445566778899aabbccddeeff  SnowFastULP-0.2-linux-amd64\n" +
-		"bb112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00  *SnowFastSearch-0.2-windows-amd64.exe\n" +
-		"\n" + // blank line tolerated
-		"# comment-ish short line\n"
+func TestParseManifestHash(t *testing.T) {
+	sum := sha256.Sum256([]byte("payload"))
+	want := sum[:]
+	got, err := parseManifestHash(hex.EncodeToString(want), "SnowFastULP-0.2-linux-amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("digest = %x, want %x", got, want)
+	}
+	if _, err := parseManifestHash("not-a-hash", "bad"); err == nil {
+		t.Fatal("expected invalid hash error")
+	}
+}
 
-	sums := parseSums([]byte(manifest))
-	if len(sums) != 2 {
-		t.Fatalf("got %d entries, want 2: %v", len(sums), sums)
+func TestPlanUpdatesUsesControlledManifestHashAndURL(t *testing.T) {
+	suffix := mustAssetSuffix(t)
+	latest := "0.2.0"
+	assetName := fmt.Sprintf("SnowFastULP-%s-%s", latest, suffix)
+	payload := []byte("new-sfu")
+	sum := sha256.Sum256(payload)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "sfu"+exeExt())
+	if err := os.WriteFile(target, []byte("old-sfu"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	want, _ := hex.DecodeString("aa00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
-	if got := sums["SnowFastULP-0.2-linux-amd64"]; string(got) != string(want) {
-		t.Errorf("linux digest mismatch: got %x", got)
+
+	manifest := &updateManifest{
+		Version: latest,
+		Assets: map[string]manifestAsset{
+			assetName: {
+				SHA256: hex.EncodeToString(sum[:]),
+				URL:    "https://updates.example/sfu",
+			},
+		},
 	}
-	// Leading '*' (binary-mode marker) must be stripped from the name.
-	if _, ok := sums["SnowFastSearch-0.2-windows-amd64.exe"]; !ok {
-		t.Errorf("windows entry not found (star-prefix not stripped?): %v", sums)
+
+	pending, err := planUpdates(manifest, latest, suffix, dir, exeExt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+	if pending[0].url != "https://updates.example/sfu" {
+		t.Fatalf("url = %q", pending[0].url)
+	}
+	if got := hex.EncodeToString(pending[0].hash); got != manifest.Assets[assetName].SHA256 {
+		t.Fatalf("hash = %s, want %s", got, manifest.Assets[assetName].SHA256)
 	}
 }
 
@@ -67,6 +98,9 @@ func TestProductBasename(t *testing.T) {
 	if got := productBasename("/opt/bin/sfs.exe"); got != "sfs" {
 		t.Fatalf("got %q want sfs", got)
 	}
+	if got := productBasename("/opt/bin/sfl.exe"); got != "sfl" {
+		t.Fatalf("got %q want sfl", got)
+	}
 }
 
 func TestCheckInvokedBinaryName(t *testing.T) {
@@ -75,6 +109,9 @@ func TestCheckInvokedBinaryName(t *testing.T) {
 	}
 	if err := checkInvokedBinaryName("/opt/bin/sfs"); err != nil {
 		t.Fatalf("sfs: %v", err)
+	}
+	if err := checkInvokedBinaryName("/opt/bin/sfl"); err != nil {
+		t.Fatalf("sfl: %v", err)
 	}
 	err := checkInvokedBinaryName("/opt/bin/SnowFastULP-0.1-linux-amd64")
 	if err == nil {
@@ -148,6 +185,33 @@ func TestRunIntegrationUpdatesBothBinaries(t *testing.T) {
 	assertFileContents(t, filepath.Join(dir, "sfs"+exeExt()), string(newSFS))
 }
 
+func TestRunIntegrationUpdatesThreeBinaries(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	newSFU := []byte("#!/bin/sh\necho sfu-0.1.2\n")
+	newSFS := []byte("#!/bin/sh\necho sfs-0.1.2\n")
+	newSFL := []byte("#!/bin/sh\necho sfl-0.1.2\n")
+	srv, _ := startMockReleaseServerWithSFL(t, "0.1.2", suffix, newSFU, newSFS, newSFL)
+	defer srv.Close()
+
+	dir, hooks := installTestBinariesWithSFL(t, "old-sfu", "old-sfs", "old-sfl", "sfl")
+	var buf bytes.Buffer
+	if err := run(nil, "0.1.1", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "updated sfu, sfs, sfl to 0.1.2") {
+		t.Fatalf("output = %q", buf.String())
+	}
+	assertFileContents(t, filepath.Join(dir, "sfu"+exeExt()), string(newSFU))
+	assertFileContents(t, filepath.Join(dir, "sfs"+exeExt()), string(newSFS))
+	assertFileContents(t, filepath.Join(dir, "sfl"+exeExt()), string(newSFL))
+}
+
 func TestRunApplyOrderInvokedBinaryLast(t *testing.T) {
 	suffix, err := assetSuffix()
 	if err != nil {
@@ -188,7 +252,7 @@ func TestRunChecksumMismatchLeavesBinariesUntouched(t *testing.T) {
 	srv, names := startMockReleaseServer(t, "0.1.2", suffix, goodSFU, goodSFS)
 	defer srv.Close()
 
-	// corrupt the sfu payload on the wire while keeping SHA256SUMS honest
+	// Corrupt the sfu payload on the wire while keeping the manifest hash honest.
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/releases/latest":
@@ -197,8 +261,6 @@ func TestRunChecksumMismatchLeavesBinariesUntouched(t *testing.T) {
 			_, _ = w.Write([]byte("tampered"))
 		case "/asset/sfs":
 			_, _ = w.Write(goodSFS)
-		case "/asset/sums":
-			writeMockSums(w, names, goodSFU, goodSFS)
 		default:
 			http.NotFound(w, r)
 		}
@@ -333,14 +395,28 @@ func TestRunReleaseDownloadNameRejected(t *testing.T) {
 }
 
 type mockAssetNames struct {
-	sfu, sfs string
+	sfu, sfs, sfl string
+	sfuHash       string
+	sfsHash       string
+	sflHash       string
 }
 
 func startMockReleaseServer(t *testing.T, version, suffix string, sfuPayload, sfsPayload []byte) (*httptest.Server, mockAssetNames) {
 	t.Helper()
+	return startMockReleaseServerWithSFL(t, version, suffix, sfuPayload, sfsPayload, nil)
+}
+
+func startMockReleaseServerWithSFL(t *testing.T, version, suffix string, sfuPayload, sfsPayload, sflPayload []byte) (*httptest.Server, mockAssetNames) {
+	t.Helper()
 	names := mockAssetNames{
-		sfu: fmt.Sprintf("SnowFastULP-%s-%s", version, suffix),
-		sfs: fmt.Sprintf("SnowFastSearch-%s-%s", version, suffix),
+		sfu:     fmt.Sprintf("SnowFastULP-%s-%s", version, suffix),
+		sfs:     fmt.Sprintf("SnowFastSearch-%s-%s", version, suffix),
+		sfuHash: hexHash(sfuPayload),
+		sfsHash: hexHash(sfsPayload),
+	}
+	if sflPayload != nil {
+		names.sfl = fmt.Sprintf("SnowFastLog-%s-%s", version, suffix)
+		names.sflHash = hexHash(sflPayload)
 	}
 	var baseURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -351,8 +427,12 @@ func startMockReleaseServer(t *testing.T, version, suffix string, sfuPayload, sf
 			_, _ = w.Write(sfuPayload)
 		case "/asset/sfs":
 			_, _ = w.Write(sfsPayload)
-		case "/asset/sums":
-			writeMockSums(w, names, sfuPayload, sfsPayload)
+		case "/asset/sfl":
+			if sflPayload == nil {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(sflPayload)
 		default:
 			http.NotFound(w, r)
 		}
@@ -362,32 +442,37 @@ func startMockReleaseServer(t *testing.T, version, suffix string, sfuPayload, sf
 }
 
 func writeMockReleaseJSON(w http.ResponseWriter, base, version, suffix string, names mockAssetNames) {
-	rel := ghRelease{TagName: "v" + version}
+	manifest := updateManifest{
+		Version: version,
+		Assets:  map[string]manifestAsset{},
+	}
 	if base != "" {
-		rel.Assets = []struct {
-			Name string `json:"name"`
-			URL  string `json:"browser_download_url"`
-		}{
-			{Name: names.sfu, URL: base + "/asset/sfu"},
-			{Name: names.sfs, URL: base + "/asset/sfs"},
-			{Name: sumsAsset, URL: base + "/asset/sums"},
+		manifest.Assets[names.sfu] = manifestAsset{SHA256: names.sfuHash, URL: base + "/asset/sfu"}
+		manifest.Assets[names.sfs] = manifestAsset{SHA256: names.sfsHash, URL: base + "/asset/sfs"}
+		if names.sfl != "" {
+			manifest.Assets[names.sfl] = manifestAsset{SHA256: names.sflHash, URL: base + "/asset/sfl"}
 		}
 	}
-	_ = json.NewEncoder(w).Encode(rel)
+	_ = json.NewEncoder(w).Encode(manifest)
 }
 
-func writeMockSums(w http.ResponseWriter, names mockAssetNames, sfuPayload, sfsPayload []byte) {
-	sfuHash := sha256.Sum256(sfuPayload)
-	sfsHash := sha256.Sum256(sfsPayload)
-	fmt.Fprintf(w, "%x  %s\n%x  %s\n", sfuHash, names.sfu, sfsHash, names.sfs)
+func hexHash(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func installTestBinaries(t *testing.T, sfuContent, sfsContent, invoked string) (string, *testHooks) {
+	t.Helper()
+	return installTestBinariesWithSFL(t, sfuContent, sfsContent, "", invoked)
+}
+
+func installTestBinariesWithSFL(t *testing.T, sfuContent, sfsContent, sflContent, invoked string) (string, *testHooks) {
 	t.Helper()
 	dir := t.TempDir()
 	ext := exeExt()
 	sfuPath := filepath.Join(dir, "sfu"+ext)
 	sfsPath := filepath.Join(dir, "sfs"+ext)
+	sflPath := filepath.Join(dir, "sfl"+ext)
 	mode := os.FileMode(0o755)
 	if runtime.GOOS == "windows" {
 		mode = 0o644
@@ -398,9 +483,17 @@ func installTestBinaries(t *testing.T, sfuContent, sfsContent, invoked string) (
 	if err := os.WriteFile(sfsPath, []byte(sfsContent), mode); err != nil {
 		t.Fatal(err)
 	}
+	if sflContent != "" {
+		if err := os.WriteFile(sflPath, []byte(sflContent), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
 	invokedPath := sfuPath
 	if invoked == "sfs" {
 		invokedPath = sfsPath
+	}
+	if invoked == "sfl" {
+		invokedPath = sflPath
 	}
 	return dir, &testHooks{executablePath: invokedPath}
 }

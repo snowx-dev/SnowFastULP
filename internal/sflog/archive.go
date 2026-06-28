@@ -55,6 +55,17 @@ type extractCtx struct {
 	emit      func(Credential)
 	onIssue   func(path string, kind IssueKind, err error)
 	p         *Progress
+	// setStage (may be nil) publishes this worker's current archive stage to
+	// the live TUI. Copied across recursion so nested members report too.
+	setStage func(WorkerStage)
+}
+
+// stage publishes s to the worker slot if a stage sink is wired (no-op for
+// direct/hermetic callers that don't drive the TUI).
+func (ec extractCtx) stage(s WorkerStage) {
+	if ec.setStage != nil {
+		ec.setStage(s)
+	}
 }
 
 // pendingIssue lets the streaming (rar/7z) readers buffer nested issues and
@@ -191,12 +202,14 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 	// reuse it for all members. yeka/zip handles WinZip AES and legacy ZipCrypto.
 	pw := ""
 	if probe != nil {
+		ec.stage(StageTestingPassword)
 		resolved, ok := resolveZipPassword(probe, ec.passwords)
 		if !ok {
 			return archiveScan{}, errPasswordNotFound
 		}
 		pw = resolved
 	}
+	ec.stage(StageExtracting)
 
 	cr := newCreditor(ec.p, weight, scaleFor(weight, uncompressed))
 	defer cr.finish()
@@ -280,6 +293,7 @@ func readRarCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 		if ctx.Err() != nil {
 			return archiveScan{}, ctx.Err()
 		}
+		ec.stage(StageTestingPassword)
 		f, err := os.Open(diskPath)
 		if err != nil {
 			return archiveScan{}, err
@@ -324,6 +338,7 @@ func readRarCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 }
 
 func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (archiveScan, error) {
+	ec.stage(StageExtracting)
 	var scan archiveScan
 	for {
 		if ctx.Err() != nil {
@@ -378,6 +393,7 @@ func readSevenZipCredentials(ctx context.Context, diskPath string, ec extractCtx
 		if ctx.Err() != nil {
 			return archiveScan{}, ctx.Err()
 		}
+		ec.stage(StageTestingPassword)
 		zr, err := sevenzip.OpenReaderWithPassword(diskPath, pw)
 		if err != nil {
 			lastErr = err // header-encrypted wrong password fails here
@@ -421,6 +437,7 @@ func readSevenZipCredentials(ctx context.Context, diskPath string, ec extractCtx
 }
 
 func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.ReadCloser, cr *creditor) (archiveScan, bool, error) {
+	ec.stage(StageExtracting)
 	var scan archiveScan
 	hadMembers := false
 	for _, f := range zr.File {

@@ -141,6 +141,9 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	if workers < 1 {
 		workers = 1
 	}
+	if e.Progress != nil {
+		e.Progress.SetWorkers(workers)
+	}
 
 	// runCtx lets the writer abort the workers: if the output write fails, the
 	// writer stops draining `lines`, so without cancellation workers would
@@ -168,15 +171,15 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	var workerWG sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		workerWG.Add(1)
-		go func() {
+		go func(workerIdx int) {
 			defer workerWG.Done()
 			for it := range jobs {
 				if runCtx.Err() != nil {
 					continue
 				}
-				e.process(runCtx, it, lines, &acc)
+				e.process(runCtx, workerIdx, it, lines, &acc)
 			}
-		}()
+		}(i)
 	}
 
 feed:
@@ -221,25 +224,28 @@ feed:
 	return stats, results, nil
 }
 
-func (e *Engine) process(ctx context.Context, it workItem, lines chan<- string, acc *accum) {
+func (e *Engine) process(ctx context.Context, idx int, it workItem, lines chan<- string, acc *accum) {
 	if e.Progress != nil {
 		e.Progress.setCurrent(it.path)
+		e.Progress.setActive(idx, it.path, StageOpening)
+		defer e.Progress.clearActive(idx)
 	}
 	switch it.kind {
 	case kindArchive:
-		e.processArchive(ctx, it, lines, acc)
+		e.processArchive(ctx, idx, it, lines, acc)
 	default:
-		e.processFile(ctx, it, lines, acc)
+		e.processFile(ctx, idx, it, lines, acc)
 	}
 	if acc.finishLog(it.logKey) && e.Progress != nil {
 		e.Progress.addLogDone()
 	}
 }
 
-func (e *Engine) processFile(ctx context.Context, it workItem, lines chan<- string, acc *accum) {
+func (e *Engine) processFile(ctx context.Context, idx int, it workItem, lines chan<- string, acc *accum) {
 	acc.filesScanned.Add(1)
 	if e.Progress != nil {
 		e.Progress.addFile()
+		e.Progress.setStage(idx, StageParsing)
 	}
 	cr := newCreditor(e.Progress, it.weight, 1)
 	defer cr.finish()
@@ -274,7 +280,7 @@ func (e *Engine) processFile(ctx context.Context, it workItem, lines chan<- stri
 	}
 }
 
-func (e *Engine) processArchive(ctx context.Context, it workItem, lines chan<- string, acc *accum) {
+func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines chan<- string, acc *accum) {
 	acc.archivesScanned.Add(1)
 	if e.Progress != nil {
 		e.Progress.addArchive()
@@ -305,6 +311,7 @@ func (e *Engine) processArchive(ctx context.Context, it workItem, lines chan<- s
 		emit:      emit,
 		onIssue:   onIssue,
 		p:         e.Progress,
+		setStage:  func(s WorkerStage) { e.Progress.setStage(idx, s) },
 	}
 	scan, err := readArchiveCredentials(ctx, it.path, ec, it.weight)
 	acc.filesScanned.Add(int64(scan.files))

@@ -1,11 +1,11 @@
 // Package selfupdate implements the `update` / `upgrade` CLI subcommand shared
-// by sfu and sfs. It queries the latest GitHub release, verifies the matching
-// platform asset against the published SHA256SUMS, and atomically swaps the
+// by sfu, sfs, and sfl. It queries the SnowFast update manifest, verifies the
+// matching platform asset against the manifest SHA256, and atomically swaps the
 // installed binaries in place.
 //
-// Both binaries ship as a pair from the same release, so a single `update`
-// refreshes whichever of sfu/sfs live alongside the running executable, keeping
-// their versions in lockstep.
+// The binaries ship from the same release, so a single `update` refreshes
+// whichever of sfu/sfs/sfl live alongside the running executable, keeping their
+// versions in lockstep.
 //
 // The atomic swap (including the Windows "can't overwrite a running .exe"
 // rename-aside dance) is delegated to github.com/minio/selfupdate.
@@ -32,17 +32,14 @@ import (
 const (
 	repoOwner = "snowx-dev"
 	repoName  = "SnowFastULP"
-	latestURL = "https://api.github.com/repos/" + repoOwner + "/" + repoName + "/releases/latest"
-
-	// sumsAsset is the checksum manifest published with every release.
-	sumsAsset = "SHA256SUMS"
+	latestURL = "https://sfu-update.snowx.dev/"
 
 	httpTimeout     = 60 * time.Second
 	maxDownloadSize = 64 << 20 // release binaries are ~5 MiB today
 )
 
 // testHooks holds optional overrides used by integration tests in this package.
-// Tests set releaseURL to point fetches at an httptest.Server.
+// Tests set releaseURL to point metadata fetches at an httptest.Server.
 type testHooks struct {
 	releaseURL     string
 	executablePath string
@@ -72,19 +69,22 @@ type product struct {
 	prefix string // release asset prefix (e.g. "SnowFastULP")
 }
 
-// products is the binary pair shipped by each release.
+// products is the binary set shipped by each release.
 var products = []product{
 	{bin: "sfu", prefix: "SnowFastULP"},
 	{bin: "sfs", prefix: "SnowFastSearch"},
+	{bin: "sfl", prefix: "SnowFastLog"},
 }
 
-// ghRelease is the subset of the GitHub release API response we consume.
-type ghRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name string `json:"name"`
-		URL  string `json:"browser_download_url"`
-	} `json:"assets"`
+// updateManifest is the controlled update metadata served from sfu-update.snowx.dev.
+type updateManifest struct {
+	Version string                   `json:"version"`
+	Assets  map[string]manifestAsset `json:"assets"`
+}
+
+type manifestAsset struct {
+	SHA256 string `json:"sha256"`
+	URL    string `json:"url,omitempty"`
 }
 
 type pendingUpdate struct {
@@ -111,7 +111,7 @@ func Run(args []string, currentVersion string, out io.Writer) error {
 // args are the CLI tokens after the program name (os.Args[1:]). It returns
 // handled=true when the update path ran — the caller should then exit — together
 // with the update result; for any other args it returns (false, nil) so the
-// caller proceeds normally. Both sfu and sfs share this dispatch.
+// caller proceeds normally. sfu, sfs, and sfl share this dispatch.
 func Dispatch(args []string, currentVersion string, out io.Writer) (handled bool, err error) {
 	if len(args) == 0 || (args[0] != "update" && args[0] != "upgrade") {
 		return false, nil
@@ -140,15 +140,15 @@ func run(args []string, currentVersion string, out io.Writer, hooks *testHooks) 
 	invokedBin := productBasename(self)
 
 	fmt.Fprintln(out, "checking for updates…")
-	rel, err := fetchLatest(hooks)
+	manifest, err := fetchLatest(hooks)
 	if err != nil {
-		return fmt.Errorf("could not reach the release server: %w", err)
+		return fmt.Errorf("could not reach the update server: %w", err)
 	}
 
-	latest := strings.TrimPrefix(rel.TagName, "v")
+	latest := strings.TrimPrefix(manifest.Version, "v")
 	cur := strings.TrimPrefix(currentVersion, "v")
 	if latest == "" {
-		return fmt.Errorf("latest release has no version tag")
+		return fmt.Errorf("update manifest has no version")
 	}
 	// compareVersions <= 0 means the latest release is not newer than what's
 	// running, so there's nothing to do — and we never silently downgrade.
@@ -159,12 +159,7 @@ func run(args []string, currentVersion string, out io.Writer, hooks *testHooks) 
 
 	ext := exeExt()
 
-	sums, err := fetchSums(rel, hooks)
-	if err != nil {
-		return err
-	}
-
-	pending, err := planUpdates(rel, latest, suffix, dir, ext, sums)
+	pending, err := planUpdates(manifest, latest, suffix, dir, ext)
 	if err != nil {
 		return err
 	}
@@ -254,23 +249,24 @@ func checkInvokedBinaryName(selfPath string) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"this executable is named %q; self-update only works when the binary is named %q or %q\n"+
+		"this executable is named %q; self-update only works when the binary is named %q, %q, or %q\n"+
 			"  rename the release download in %s:\n"+
 			"    SnowFastULP-*  → sfu%s\n"+
 			"    SnowFastSearch-* → sfs%s\n"+
-			"  place sfu and sfs in the same directory, then run: sfu update",
-		filepath.Base(selfPath), products[0].bin, products[1].bin,
-		filepath.Dir(selfPath), exeExt(), exeExt())
+			"    SnowFastLog-* → sfl%s\n"+
+			"  place sfu, sfs, and sfl in the same directory, then run: sfu update",
+		filepath.Base(selfPath), products[0].bin, products[1].bin, products[2].bin,
+		filepath.Dir(selfPath), exeExt(), exeExt(), exeExt())
 }
 
 func errNoUpdateTargets(dir string) error {
 	return fmt.Errorf(
-		"found no installed binaries named sfu%s or sfs%s in %s\n"+
-			"  release downloads use names like SnowFastULP-<version>-linux-amd64 — rename them to sfu%s and sfs%s in the same folder, then re-run update",
-		exeExt(), exeExt(), dir, exeExt(), exeExt())
+		"found no installed binaries named sfu%s, sfs%s, or sfl%s in %s\n"+
+			"  release downloads use names like SnowFastULP-<version>-linux-amd64 — rename them to sfu%s, sfs%s, and sfl%s in the same folder, then re-run update",
+		exeExt(), exeExt(), exeExt(), dir, exeExt(), exeExt(), exeExt())
 }
 
-func planUpdates(rel *ghRelease, latest, suffix, dir, ext string, sums map[string][]byte) ([]pendingUpdate, error) {
+func planUpdates(manifest *updateManifest, latest, suffix, dir, ext string) ([]pendingUpdate, error) {
 	var pending []pendingUpdate
 	for _, p := range products {
 		target := filepath.Join(dir, p.bin+ext)
@@ -279,13 +275,17 @@ func planUpdates(rel *ghRelease, latest, suffix, dir, ext string, sums map[strin
 		}
 
 		assetName := fmt.Sprintf("%s-%s-%s", p.prefix, latest, suffix)
-		url := findAsset(rel, assetName)
-		if url == "" {
-			return nil, fmt.Errorf("release %s has no asset %q for this platform", latest, assetName)
-		}
-		wantHash, ok := sums[assetName]
+		asset, ok := manifest.Assets[assetName]
 		if !ok {
-			return nil, fmt.Errorf("%s missing checksum for %q", sumsAsset, assetName)
+			return nil, fmt.Errorf("update manifest %s has no asset %q for this platform", latest, assetName)
+		}
+		wantHash, err := parseManifestHash(asset.SHA256, assetName)
+		if err != nil {
+			return nil, err
+		}
+		url := asset.URL
+		if url == "" {
+			url = releaseAssetURL(latest, assetName)
 		}
 		pending = append(pending, pendingUpdate{
 			bin:    p.bin,
@@ -443,14 +443,28 @@ func assetSuffix() (string, error) {
 	}
 }
 
-// fetchLatest queries the GitHub API for the most recent published release.
-// Draft and prerelease entries are excluded by the /latest endpoint.
-func fetchLatest(hooks *testHooks) (*ghRelease, error) {
+func releaseAssetURL(version, assetName string) string {
+	return fmt.Sprintf("https://github.com/%s/%s/releases/download/v%s/%s", repoOwner, repoName, version, assetName)
+}
+
+func parseManifestHash(hexDigest, assetName string) ([]byte, error) {
+	digest, err := hex.DecodeString(strings.TrimSpace(hexDigest))
+	if err != nil {
+		return nil, fmt.Errorf("update manifest has invalid sha256 for %q: %w", assetName, err)
+	}
+	if len(digest) != sha256.Size {
+		return nil, fmt.Errorf("update manifest has invalid sha256 length for %q", assetName)
+	}
+	return digest, nil
+}
+
+// fetchLatest queries the controlled SnowFast update manifest.
+func fetchLatest(hooks *testHooks) (*updateManifest, error) {
 	req, err := http.NewRequest(http.MethodGet, hooks.releaseEndpoint(), nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", repoName+"-selfupdate")
 
 	resp, err := httpClient().Do(req)
@@ -465,66 +479,14 @@ func fetchLatest(hooks *testHooks) (*ghRelease, error) {
 		return nil, fmt.Errorf("unexpected status %s", resp.Status)
 	}
 
-	var rel ghRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("malformed release response: %w", err)
+	var manifest updateManifest
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("malformed update manifest: %w", err)
 	}
-	return &rel, nil
-}
-
-// findAsset returns the download URL for the named release asset, or "".
-func findAsset(rel *ghRelease, name string) string {
-	for _, a := range rel.Assets {
-		if a.Name == name {
-			return a.URL
-		}
+	if manifest.Assets == nil {
+		manifest.Assets = map[string]manifestAsset{}
 	}
-	return ""
-}
-
-// fetchSums downloads and parses the release SHA256SUMS manifest into a map of
-// asset name → expected sha256 digest bytes.
-func fetchSums(rel *ghRelease, hooks *testHooks) (map[string][]byte, error) {
-	url := findAsset(rel, sumsAsset)
-	if url == "" {
-		return nil, fmt.Errorf("release has no %s manifest", sumsAsset)
-	}
-	body, err := httpGet(url, hooks)
-	if err != nil {
-		return nil, fmt.Errorf("downloading %s: %w", sumsAsset, err)
-	}
-	defer body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-
-	sums := parseSums(data)
-	if len(sums) == 0 {
-		return nil, fmt.Errorf("%s contained no usable entries", sumsAsset)
-	}
-	return sums, nil
-}
-
-// parseSums parses a sha256sum manifest ("<hex>  <name>" per line) into a map
-// of asset name → digest bytes. Blank/malformed lines are skipped; a leading
-// '*' binary-mode marker on the name is stripped.
-func parseSums(data []byte) map[string][]byte {
-	sums := make(map[string][]byte)
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		digest, derr := hex.DecodeString(fields[0])
-		if derr != nil {
-			continue
-		}
-		name := strings.TrimPrefix(fields[len(fields)-1], "*")
-		sums[name] = digest
-	}
-	return sums
+	return &manifest, nil
 }
 
 // httpGet performs a GET with a sane timeout and returns the response body for

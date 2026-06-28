@@ -104,17 +104,8 @@ func Resolve(cfg Config) (*Resolved, error) {
 		cpuCap = 1
 	}
 
-	workers := cfg.Workers
-	if workers <= 0 {
-		workers = clampInt(cpuCap, 1, 8)
-	}
-	dedup := cfg.DedupWorkers
-	if dedup <= 0 {
-		dedup = clampInt(cpuCap/2, 1, 4)
-		if dedup < 1 {
-			dedup = 1
-		}
-	}
+	workers := resolveParserWorkers(cfg.Workers, cpuCap)
+	dedup := resolveDedupWorkers(cfg.DedupWorkers, cpuCap)
 
 	chunk := cfg.ChunkBytes
 	if chunk <= 0 {
@@ -659,6 +650,26 @@ func CollectInputs(path string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+// resolveParserWorkers picks the phase-1 parser goroutine count. An explicit
+// positive flag wins; otherwise it scales with the box's cores (no hard cap,
+// so stronger machines aren't throttled to 8). cpu is the detected core count.
+func resolveParserWorkers(flag, cpu int) int {
+	if flag > 0 {
+		return flag
+	}
+	return clampInt(cpu, 1, cpu)
+}
+
+// resolveDedupWorkers picks the phase-2 dedup goroutine count. Each dedup
+// worker holds a bucket's dest set in RAM, so it keeps the half-cores ratio,
+// but the ceiling grows with cores instead of a fixed 4.
+func resolveDedupWorkers(flag, cpu int) int {
+	if flag > 0 {
+		return flag
+	}
+	return clampInt(cpu/2, 1, cpu)
 }
 
 func clampInt(n, lo, hi int) int {

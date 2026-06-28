@@ -82,7 +82,7 @@ func renderHelp(bin string) string {
 
 	b.WriteString(labelStyle.Render("Commands:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " update   " +
-		mutedStyle.Render("# upgrade sfu & sfs to the latest release") + "\n\n")
+		mutedStyle.Render("# upgrade sfu, sfs & sfl to the latest release") + "\n\n")
 
 	b.WriteString(labelStyle.Render("Examples:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'facebook.com:'\n")

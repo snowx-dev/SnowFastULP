@@ -138,11 +138,11 @@ func (c *Checker) applyEntry(entry cacheEntry) {
 func (c *Checker) performCheck() cacheEntry {
 	entry := cacheEntry{CheckedAt: time.Now().UTC()}
 
-	rel, err := fetchLatest(c.hooks)
+	manifest, err := fetchLatest(c.hooks)
 	if err != nil {
 		return entry
 	}
-	latest := strings.TrimPrefix(rel.TagName, "v")
+	latest := strings.TrimPrefix(manifest.Version, "v")
 	if latest == "" {
 		return entry
 	}

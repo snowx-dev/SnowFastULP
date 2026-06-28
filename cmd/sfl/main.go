@@ -110,16 +110,7 @@ func main() {
 	if destDedup {
 		*zst = true
 	}
-	w := *workers
-	if w <= 0 {
-		w = runtime.GOMAXPROCS(0)
-		if w > 8 {
-			w = 8
-		}
-		if w < 1 {
-			w = 1
-		}
-	}
+	w := resolveWorkerCount(*workers, runtime.GOMAXPROCS(0))
 
 	cfg := runConfig{
 		Input: inputArg, OutputDir: *out, LibraryDir: *outDedup, Password: *password,
@@ -132,6 +123,19 @@ func main() {
 	if err := run(cfg); err != nil {
 		fatalf("%v", err)
 	}
+}
+
+// resolveWorkerCount picks the parser/archive worker count: an explicit
+// positive flag wins, otherwise it scales with the available cores (no hard
+// cap, so stronger machines parse more archives at once). cpu is GOMAXPROCS.
+func resolveWorkerCount(flag, cpu int) int {
+	if flag > 0 {
+		return flag
+	}
+	if cpu < 1 {
+		return 1
+	}
+	return cpu
 }
 
 func resolveInputArg(fileCfg config.File, positional []string) string {

@@ -59,13 +59,18 @@ It ships with three small commands:
 
 ## 🌱 Quick start
 
-Download the `SnowFastULP`, `SnowFastSearch`, and `SnowFastLog` binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest) + rename them to `sfu`, `sfs`, and `sfl`, or [download the binary pack](https://github.com/snowx-dev/SnowFastULP/releases/download/v0.1/SnowFastULP-0.1-binaries.zip) and extract the ones for you. 
-
-Put the binary somewhere convenient, or run it from the download folder:
+Install `sfu`, `sfs`, and `sfl` with the repo-hosted installer:
 
 ```bash
-chmod +x ./sfu ./sfs ./sfl
-./sfu ./ulp-public-cloud.txt -o ./cleaned/
+curl -fsSL https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.sh | bash
+```
+
+Or download the `SnowFastULP`, `SnowFastSearch`, and `SnowFastLog` binaries for your platform from the [latest GitHub Release](https://github.com/snowx-dev/SnowFastULP/releases/latest), rename them to `sfu`, `sfs`, and `sfl`, and put them somewhere convenient.
+
+Then run:
+
+```bash
+sfu ./ulp-public-cloud.txt -o ./cleaned/
 ```
 
 🔥 That's it 🔥
@@ -75,22 +80,22 @@ chmod +x ./sfu ./sfs ./sfl
 Clean a whole folder the same way:
 
 ```bash
-./sfu ./folder-full-of-dumps/ -o ./cleaned/
+sfu ./folder-full-of-dumps/ -o ./cleaned/
 ```
 
 
 🔍 Search plain text output or raw text dumps with `sfs`:
 
 ```bash
-./sfs -txt ./cleaned/ "facebook.com:"
-./sfs -txt ./cleaned/ -o hits.txt "user@example.com"
+sfs -txt ./cleaned/ "facebook.com:"
+sfs -txt ./cleaned/ -o hits.txt "user@example.com"
 ```
 
 🧊 Extract raw stealer logs with `sfl`:
 
 ```bash
-./sfl ./extracted-log-folder/ -o ./ulp/
-./sfl ./folder-of-archives/ -od ./library/ -p passwords.txt
+sfl ./extracted-log-folder/ -o ./ulp/
+sfl ./folder-of-archives/ -od ./library/ -p passwords.txt
 ```
 
 Prefer building it yourself? See [Build from source](#build-from-source).
@@ -228,7 +233,52 @@ Relative paths in the config file are resolved from the config file's directory.
 
 ## Install
 
-### Download executables
+### Install with curl or PowerShell
+
+The installers resolve the latest version from the SnowFast update manifest at `https://sfu-update.snowx.dev/`, download `sfu`, `sfs`, and `sfl`, verify them against the hashes served from that controlled domain, install them into a user PATH folder, and create a fully commented config file if you do not already have one.
+
+Linux amd64 and macOS arm64:
+If the install directory is not already on PATH, it can update bash, zsh, or fish shell startup files.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.sh | bash
+```
+
+Windows amd64:
+
+```powershell
+irm https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.ps1 | iex
+```
+
+Preview the scripts first if you want to inspect them:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.sh | less
+```
+
+```powershell
+irm https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.ps1 | more
+```
+
+For a Windows dry run:
+
+```powershell
+irm https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1 -DryRun
+```
+
+The installer prints a short summary at the end explaining what each command does, where it installed the binaries, and where it wrote or found the config file. Default config path:
+
+- Linux/macOS: `~/.config/snowfast/config.toml` unless `XDG_CONFIG_HOME` is set.
+- Windows: `%AppData%\snowfast\config.toml`.
+
+Docs: `https://snowfast.todo/docs`
+
+The same update manifest is used by `sfu update`, `sfs update`, `sfl update`, and the background update notice shown after successful runs. GitHub Releases can still host the binary files, but the expected version and hashes come from `sfu-update.snowx.dev`.
+
+For installer testing, set `SNOWFAST_UPDATE_URL` to a local or staging manifest URL before running `install.sh --dry-run` or `install.ps1 -DryRun`.
+
+### Download executables manually
 
 Binaries for Linux, macOS, and Windows are published on the [Releases page](https://github.com/snowx-dev/SnowFastULP/releases). Each release is built reproducibly via GitHub Actions and ships a `SHA256SUMS` file you can verify against:
 
@@ -236,7 +286,7 @@ Binaries for Linux, macOS, and Windows are published on the [Releases page](http
 sha256sum -c SHA256SUMS
 ```
 
-Builds are reproducible via GitHub Actions, every release is built twice and verified to produce identical hashes before publishing.
+Builds are reproducible via GitHub Actions. Every release is built twice and verified to produce identical hashes before publishing.
 
 ### Install with Go
 

@@ -379,12 +379,107 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, s
 			formatInt(int(prog.Files())), formatInt(int(prog.Archives())),
 			formatBytes(prog.DoneBytes()), formatBytes(prog.Total()), formatBytes(int64(rate))))
 		body = []string{bar, counts, detail}
-		if cur := prog.Current(); cur != "" {
+		// Surface the concurrent workers: a per-slot panel makes the
+		// parallelism visible even when the byte bar crawls. Falls back to the
+		// single current path when no registry is wired (back-compat).
+		if panel := sflWorkerPanel(prog, inner); len(panel) > 0 {
+			body = append(body, panel...)
+		} else if cur := prog.Current(); cur != "" {
 			body = append(body, sflMutedStyle.Render(truncatePath(cur, inner)))
 		}
 	}
 
 	return frame(header, insetBox(sflBoxStyle, body, width), width)
+}
+
+// sfl worker-panel sizing. A small floor keeps the "many things at once" feel
+// even on short terminals; the panel expands toward the worker count when there
+// is vertical room, mirroring sfu's OD frame.
+const (
+	sflMaxWorkerRows = 8
+	// rows the extract frame needs for non-worker content (margins, header,
+	// box borders, bar, counts, detail, footer), with margin for SIGWINCH.
+	sflWorkerReservedRows = 12
+	// widest stage label ("testing password"); the stage column is padded to
+	// this so paths line up across rows.
+	sflStageColW = 16
+)
+
+// sflWorkerRowCap is the per-worker row budget for termHeight and totalWorkers.
+// Pure so tests can pass arbitrary heights. Never more than totalWorkers, never
+// fewer than sflMaxWorkerRows, expanding toward totalWorkers on tall terminals.
+func sflWorkerRowCap(termHeight, totalWorkers int) int {
+	if totalWorkers <= 0 {
+		return 0
+	}
+	available := termHeight - sflWorkerReservedRows
+	if available < sflMaxWorkerRows {
+		available = sflMaxWorkerRows
+	}
+	if available > totalWorkers {
+		available = totalWorkers
+	}
+	return available
+}
+
+// sflWorkerPanel reads the live worker registry and renders it. It returns nil
+// when no registry is wired so the caller can fall back to the single
+// current-path line.
+func sflWorkerPanel(prog *sflog.Progress, inner int) []string {
+	total := prog.WorkerCount()
+	if total <= 0 {
+		return nil
+	}
+	active := prog.ActiveWorkers(sflWorkerRowCap(termHeight(), total))
+	return renderSflWorkerPanel(active, total, inner)
+}
+
+// renderSflWorkerPanel is the pure renderer: a header count plus one row per
+// busy worker slot. Empty active set renders nothing.
+func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner int) []string {
+	if len(active) == 0 {
+		return nil
+	}
+	idxMarkerW := lipgloss.Width(fmt.Sprintf("[%d]", total))
+	out := make([]string, 0, len(active)+1)
+	out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d of %d workers active", len(active), total)))
+	for _, w := range active {
+		out = append(out, renderSflWorkerRow(w, inner, idxMarkerW))
+	}
+	return out
+}
+
+// renderSflWorkerRow is one panel line: "[i] <stage>  <path>", with the stage
+// padded to a fixed column so paths align and the path truncated to fit.
+func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW int) string {
+	marker := fmt.Sprintf("[%d]", w.Index+1)
+	if pad := idxMarkerW - lipgloss.Width(marker); pad > 0 {
+		marker += strings.Repeat(" ", pad)
+	}
+	stage := w.Stage.String()
+	if stage == "" {
+		stage = "working"
+	}
+	if pad := sflStageColW - lipgloss.Width(stage); pad > 0 {
+		stage += strings.Repeat(" ", pad)
+	}
+	pathW := inner - idxMarkerW - 1 - sflStageColW - 2
+	if pathW < 8 {
+		pathW = 8
+	}
+	return sflMutedStyle.Render(marker) + " " +
+		sflOkStyle.Render(stage) + "  " +
+		sflMutedStyle.Render(truncatePath(w.Path, pathW))
+}
+
+// termHeight is the terminal row count (stderr), defaulting to 24 when unknown
+// so the worker panel still sizes sensibly on a non-TTY/redirected run.
+func termHeight() int {
+	_, h, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil || h <= 0 {
+		return 24
+	}
+	return h
 }
 
 // renderInterrupt is the frame shown after a graceful Ctrl-C while in-flight

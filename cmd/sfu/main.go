@@ -78,7 +78,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	// `update` / `upgrade`: replace installed sfu+sfs with the latest release.
+	// `update` / `upgrade`: replace installed SnowFast binaries with the latest release.
 	// Handled before cfg load so a bad config can't block self-update.
 	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
 		if err != nil {
