@@ -877,7 +877,11 @@ func processPartTask(ctx context.Context, t partTask, decoderConcurrency int, ws
 	}
 
 	streamErr := streamArchiveLines(ctx, t.part.path, decoderConcurrency, ws, func(line string) error {
-		host, _, login, password, ok := parseFor(line, true)
+		// union (strict OR loose) so the index covers every line the archive
+		// stored, regardless of the mode it was written/ingested in. loose
+		// alone dropped strict-only creds (e.g. host:user:{"uid":...}) and
+		// caused re-ingest stragglers.
+		host, _, login, password, ok := parseUnion(line)
 		if !ok {
 			return nil
 		}

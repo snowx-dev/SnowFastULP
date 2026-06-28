@@ -28,6 +28,13 @@ func parseLoose(line string) (host, url, login, password string, ok bool) {
 		return h, u, l, p, true
 	}
 
+	return looseExtrasTrimmed(line)
+}
+
+// looseExtrasTrimmed handles the loose-only colon shapes (bare
+// host:login:password, host:port:login:password). Caller guarantees the line
+// is already TrimRight'd, within length bounds, and not isLikelyJunk.
+func looseExtrasTrimmed(line string) (host, url, login, password string, ok bool) {
 	first := strings.IndexByte(line, ':')
 	if first <= 0 {
 		return "", "", "", "", false
@@ -51,6 +58,29 @@ func parseLoose(line string) (host, url, login, password string, ok bool) {
 	default:
 		return "", "", "", "", false
 	}
+}
+
+// parseUnion is the index/regen parser: it admits a key for any line that
+// EITHER strict parse() OR loose parseLoose() would accept. strict runs first
+// WITHOUT the isLikelyJunk gate (the gate is a loose-mode recall/precision
+// heuristic, not an index-fidelity rule), so strict-only creds like
+// host:user:{"uid":...} are indexed; the loose-only colon shapes then run
+// behind the gate. This guarantees a part's sidecar can never miss a line the
+// archive actually stored, regardless of the mode it was written/ingested in.
+// Keys match parse() exactly for any line both accept (strict branch reuses it,
+// and parseLoose itself runs strict-first), so dedup stays consistent.
+func parseUnion(line string) (host, url, login, password string, ok bool) {
+	if h, u, l, p, ok := parse(line); ok {
+		return h, u, l, p, true
+	}
+	line = strings.TrimRight(line, "\r\n")
+	if len(line) < 5 || len(line) > maxParsedLineLen {
+		return "", "", "", "", false
+	}
+	if isLikelyJunk(line) {
+		return "", "", "", "", false
+	}
+	return looseExtrasTrimmed(line)
 }
 
 // finishParse w/ url=="" treated as "use host as url"

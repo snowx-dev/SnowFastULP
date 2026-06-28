@@ -322,7 +322,7 @@ func regenSidecarForTest(t *testing.T, partPath string) {
 	}
 	fmtr := newLineFormatter()
 	if err := streamArchiveLines(context.Background(), partPath, 1, nil, func(line string) error {
-		host, _, login, password, ok := parseFor(line, true)
+		host, _, login, password, ok := parseUnion(line)
 		if !ok {
 			return nil
 		}

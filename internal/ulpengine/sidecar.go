@@ -54,7 +54,12 @@ const (
 	// change that affects xxhash64(host:login:password): host derivation,
 	// localhost rejection, the colon-join format.
 	// mismatch = errSidecarStale = silent regen on next run
-	parserVersion uint64 = 1
+	//
+	// v2: regen switched from loose to parseUnion (strict OR loose). loose
+	// regen dropped strict-only creds (host:user:{"uid":...}), leaving gaps
+	// that re-ingest re-emitted as stragglers. bumping forces a one-time full
+	// rebuild of every existing -od index with the complete union parser.
+	parserVersion uint64 = 2
 )
 
 // in-RAM sort budget per sidecar writer before spilling to external-merge runs.
