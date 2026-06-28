@@ -225,6 +225,9 @@ func (d *DebugLog) LogCompletion(m *Metrics, wall time.Duration, r *Resolved) {
 		wall.Truncate(time.Millisecond),
 		m.LinesRead.Load(), m.LinesAccepted.Load(), m.LinesRejected.Load(),
 		m.LinesUnique.Load(), m.BytesWritten.Load())
+	if n := m.LinesUnrepresentable.Load(); n > 0 {
+		d.Printf("droppedUnrepresentable=%d (parsed but no round-trippable line form; excluded to avoid regen stragglers)\n", n)
+	}
 	if r != nil && len(r.OutputPaths) > 0 {
 		d.Printf("outputPaths:\n")
 		var totalDisk int64

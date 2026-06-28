@@ -501,7 +501,19 @@ func processLine(ws *shardWorkState, line string, writers []*bucketWriter, usePo
 		}
 		return nil
 	}
-	out := ws.fmt.FormatRecord(host, url, login, password, noURI)
+	out, repr := ws.fmt.FormatRecordStable(host, url, login, password, noURI)
+	if !repr {
+		// parsed, but no representation round-trips to its key: drop so a
+		// later regen can't straggle on it. count it as rejected.
+		if m != nil {
+			m.LinesRejected.Add(1)
+			m.LinesUnrepresentable.Add(1)
+		}
+		if rr != nil {
+			rr.Record(srcAbs, strconv.FormatInt(posBytes, 10), trimmed)
+		}
+		return nil
+	}
 	h := ws.fmt.HashKey(host, login, password)
 	idx := bucketIndex(h, mask, usePow2, len(writers))
 	if err := writers[idx].writeBytes(h, out); err != nil {

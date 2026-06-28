@@ -582,8 +582,19 @@ func fastPathFile(path string, seen map[uint64]struct{}, sink lineSink, br *bufi
 						h := lf.HashKey(host, login, password)
 						if _, dup := seen[h]; !dup {
 							seen[h] = struct{}{}
-							out := lf.FormatRecordLine(host, url, login, password, noURI)
-							if err := sink.writeBatch(out, 1, m); err != nil {
+							out, repr := lf.FormatRecordStableLine(host, url, login, password, noURI)
+							if !repr {
+								// no round-trippable form: drop. undo the
+								// parse-time accepted tick and count as rejected.
+								if m != nil {
+									m.LinesAccepted.Add(-1)
+									m.LinesRejected.Add(1)
+									m.LinesUnrepresentable.Add(1)
+								}
+								if rr != nil {
+									rr.Record(absPath, strconv.FormatInt(lineNum, 10), trimmed)
+								}
+							} else if err := sink.writeBatch(out, 1, m); err != nil {
 								return err
 							}
 						}

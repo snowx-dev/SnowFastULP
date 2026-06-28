@@ -192,6 +192,76 @@ func (lf *lineFormatter) FormatRecordLine(host, url, login, password string, noU
 	return lf.out.Bytes()
 }
 
+// FormatRecordStable returns the bytes to write for a parsed record, choosing a
+// representation that re-parses (via parseUnion, the regen parser) back to the
+// same dedup key. It prefers the full url form, falls back to
+// host:login:password, and reports ok=false when neither round-trips so the
+// caller can drop the line. Without this, a stored line whose url/host embeds
+// colons (e.g. an LPU line login:pw:scheme://h/:a:b) can fail to re-parse on a
+// sidecar regen, leaving its key out of the index -> re-ingest straggler.
+//
+// The verifying re-parse only runs when the output has more than two colons;
+// a clean host:login:password (<=2 colons) always round-trips (strict matches
+// it, or loose's 3-field path calls the same finishParse), so the common hot
+// path pays nothing beyond a colon scan.
+func (lf *lineFormatter) FormatRecordStable(host, url, login, password string, noURI bool) ([]byte, bool) {
+	out := lf.FormatRecord(host, url, login, password, noURI)
+	if !colonAmbiguous(out) {
+		return out, true
+	}
+	want := lf.HashKey(host, login, password)
+	if k, ok := lf.reparseKey(out); ok && k == want {
+		return out, true
+	}
+	if !noURI {
+		outHost := lf.FormatRecord(host, url, login, password, true)
+		if !colonAmbiguous(outHost) {
+			return outHost, true
+		}
+		if k, ok := lf.reparseKey(outHost); ok && k == want {
+			return outHost, true
+		}
+	}
+	return nil, false
+}
+
+// FormatRecordStableLine is FormatRecordStable + '\n', for newline-terminated
+// sinks. ok=false means the record has no round-trippable representation.
+func (lf *lineFormatter) FormatRecordStableLine(host, url, login, password string, noURI bool) ([]byte, bool) {
+	if _, ok := lf.FormatRecordStable(host, url, login, password, noURI); !ok {
+		return nil, false
+	}
+	lf.out.WriteByte('\n')
+	return lf.out.Bytes(), true
+}
+
+// reparseKey runs the regen parser over a serialized record and returns its
+// dedup key, so callers can verify a written line will round-trip. The string
+// copy only happens on the rare ambiguous (>2 colon) path.
+func (lf *lineFormatter) reparseKey(serialized []byte) (uint64, bool) {
+	host, _, login, password, ok := parseUnion(string(serialized))
+	if !ok {
+		return 0, false
+	}
+	return lf.HashKey(host, login, password), true
+}
+
+// colonAmbiguous reports whether a formatted record has more than two colons,
+// the only case where parse(formatRecord(x)) can mis-split. A clean
+// host:login:password (<=2 colons) always re-parses to the same key.
+func colonAmbiguous(b []byte) bool {
+	n := 0
+	for i := 0; i < len(b); i++ {
+		if b[i] == ':' {
+			if n == 2 {
+				return true
+			}
+			n++
+		}
+	}
+	return false
+}
+
 // xxhash64(host:login:password) via streaming digest, 0 allocs
 func (lf *lineFormatter) HashKey(host, login, password string) uint64 {
 	lf.digest.Reset()

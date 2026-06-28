@@ -10,7 +10,11 @@ type Metrics struct {
 	LinesRead     atomic.Int64 // candidate lines parsed (P1)
 	LinesAccepted atomic.Int64
 	LinesRejected atomic.Int64
-	LinesUnique   atomic.Int64 // unique lines emitted (P2)
+	// parsed cleanly but dropped because no colon-delimited representation
+	// re-parses to the same dedup key (would straggle on regen). counted into
+	// LinesRejected for the summary; tracked here for the debug breakdown.
+	LinesUnrepresentable atomic.Int64
+	LinesUnique          atomic.Int64 // unique lines emitted (P2)
 	// already-in-library credentials (-od P2). 0 when -od off.
 	// sums into "Removed" alongside dups and rejects.
 	LinesSkippedByDest atomic.Int64
