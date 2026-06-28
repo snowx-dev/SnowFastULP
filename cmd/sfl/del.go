@@ -34,10 +34,15 @@ func deleteParsedSources(inputRoot string, results []sflog.SourceResult, protect
 
 	if !info.IsDir() {
 		if len(results) == 1 && results[0].OK && !results[0].HadIssue && !isProtected(absRoot, prot) {
+			// Capture any multi-volume siblings before removing the first part,
+			// then remove the rest of the set too (best-effort).
+			vols := sflog.RarVolumeSet(absRoot)
 			if err := os.Remove(absRoot); err != nil {
 				return nil, err
 			}
-			return []string{absRoot}, nil
+			removed := []string{absRoot}
+			removed = append(removed, removeVolumeSiblings(vols, absRoot)...)
+			return removed, nil
 		}
 		return nil, nil
 	}
@@ -93,14 +98,33 @@ func deleteParsedSources(inputRoot string, results []sflog.SourceResult, protect
 			if err := os.RemoveAll(g.child); err != nil {
 				return removed, err
 			}
+			removed = append(removed, g.child)
 		} else {
+			vols := sflog.RarVolumeSet(g.child)
 			if err := os.Remove(g.child); err != nil {
 				return removed, err
 			}
+			removed = append(removed, g.child)
+			removed = append(removed, removeVolumeSiblings(vols, g.child)...)
 		}
-		removed = append(removed, g.child)
 	}
 	return removed, nil
+}
+
+// removeVolumeSiblings removes every multi-volume RAR part in `vols` other than
+// `keep` (which the caller has already deleted). Missing parts are ignored so a
+// partially extracted set still cleans up what remains.
+func removeVolumeSiblings(vols []string, keep string) []string {
+	var removed []string
+	for _, v := range vols {
+		if v == keep {
+			continue
+		}
+		if err := os.Remove(v); err == nil {
+			removed = append(removed, v)
+		}
+	}
+	return removed
 }
 
 func absClean(p string) (string, error) {

@@ -18,6 +18,10 @@ import (
 // errPasswordNotFound marks an archive that no password candidate could open.
 var errPasswordNotFound = errors.New("password not found")
 
+// errMissingFirstVolume marks an orphaned multi-volume RAR continuation part
+// (e.g. a stray name.part2.rar with no name.part1.rar present).
+var errMissingFirstVolume = errors.New("first volume (.part1.rar) not found")
+
 // perKindIssueCap bounds how many concrete example paths we keep per issue kind
 // for the summary; the integer counters stay exact regardless. Keeping a budget
 // per kind ensures important kinds (e.g. password-not-found) always get
@@ -54,6 +58,14 @@ type workItem struct {
 	kind   workKind
 	weight int64
 	logKey string // identifies the parent "log" unit this item belongs to
+	// volumes, when len > 1, holds the ordered on-disk parts of a multi-volume
+	// RAR set (path is volumes[0]); such items are read via the volume-following
+	// reader. Empty/single-element for ordinary single-file archives.
+	volumes []string
+	// missingFirstVolume marks an orphaned RAR continuation part (e.g. a
+	// stray .part2.rar with no .part1.rar); it is reported as a skip rather than
+	// opened.
+	missingFirstVolume bool
 }
 
 // accum holds the concurrent-safe counters and result/issue lists shared by the
@@ -67,6 +79,7 @@ type accum struct {
 	parseErrors      atomic.Int64
 	openErrors       atomic.Int64
 	noULP            atomic.Int64
+	missingVolumes   atomic.Int64
 
 	mu      sync.Mutex
 	issues  []Issue
@@ -222,6 +235,7 @@ feed:
 		ParseErrors:      int(acc.parseErrors.Load()),
 		OpenErrors:       int(acc.openErrors.Load()),
 		NoULP:            int(acc.noULP.Load()),
+		MissingVolumes:   int(acc.missingVolumes.Load()),
 		Issues:           acc.issues,
 	}
 	results := acc.snapshotResults()
@@ -304,6 +318,19 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 	if e.Progress != nil {
 		e.Progress.addArchive()
 	}
+	if it.missingFirstVolume {
+		// Orphaned multi-volume continuation part: report the gap (so the user
+		// sees it) and credit its bytes so the progress bar still completes.
+		newCreditor(e.Progress, it.weight, 1).finish()
+		acc.skippedArchives.Add(1)
+		acc.missingVolumes.Add(1)
+		acc.addIssue(it.path, IssueMissingVolume, errMissingFirstVolume)
+		acc.addResult(it.path, true, false, true)
+		if e.Debug != nil {
+			e.Debug("archive %s: %v; skipped", it.path, errMissingFirstVolume)
+		}
+		return
+	}
 	var collected []Credential
 	emit := func(c Credential) { collected = append(collected, c) }
 	// onIssue records a per-member problem (e.g. a nested archive whose password
@@ -318,6 +345,8 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 			acc.passwordNotFound.Add(1)
 		case IssueOpenError:
 			acc.openErrors.Add(1)
+		case IssueMissingVolume:
+			acc.missingVolumes.Add(1)
 		default:
 			acc.parseErrors.Add(1)
 		}
@@ -334,8 +363,15 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		onIssue:   onIssue,
 		p:         e.Progress,
 		setStage:  func(s WorkerStage) { e.Progress.setStage(idx, s) },
+		debug:     e.Debug,
 	}
-	scan, err := readArchiveCredentials(ctx, it.path, ec, it.weight)
+	var scan archiveScan
+	var err error
+	if len(it.volumes) > 1 {
+		scan, err = readRarVolumes(ctx, it.volumes, ec, it.weight)
+	} else {
+		scan, err = readArchiveCredentials(ctx, it.path, ec, it.weight)
+	}
 	acc.filesScanned.Add(int64(scan.files))
 	acc.archivesScanned.Add(int64(scan.nestedArchives)) // top-level archive already counted above
 	if e.Progress != nil {
@@ -442,9 +478,8 @@ func buildWorklist(input string, prog *Progress) ([]workItem, error) {
 	for _, f := range filesP {
 		items = append(items, workItem{path: f, kind: kindFile, weight: fileWeight(f), logKey: logGroupKey(absRoot, rootIsDir, f)})
 	}
-	for _, a := range archivesP {
-		items = append(items, workItem{path: a, kind: kindArchive, weight: fileWeight(a), logKey: logGroupKey(absRoot, rootIsDir, a)})
-	}
+	keyOf := func(a string) string { return logGroupKey(absRoot, rootIsDir, a) }
+	items = append(items, groupRarVolumes(archivesP, fileWeight, keyOf)...)
 	return items, nil
 }
 

@@ -25,6 +25,10 @@ const (
 	IssueParseError
 	IssueOpenError
 	IssueNoULP
+	// IssueMissingVolume marks a multi-volume RAR continuation part (e.g.
+	// name.part2.rar) whose first volume (name.part1.rar) was not present, so
+	// the set cannot be opened. Surfaced as a skip, not a failure.
+	IssueMissingVolume
 )
 
 // String returns a stable, log-friendly slug for the issue kind.
@@ -38,6 +42,8 @@ func (k IssueKind) String() string {
 		return "open-error"
 	case IssueNoULP:
 		return "no-ulp"
+	case IssueMissingVolume:
+		return "missing-volume"
 	default:
 		return "unknown"
 	}
@@ -78,6 +84,7 @@ type ExtractStats struct {
 	ParseErrors      int
 	OpenErrors       int
 	NoULP            int
+	MissingVolumes   int
 
 	// capped, ordered list of concrete problems (see issueCap)
 	Issues []Issue
