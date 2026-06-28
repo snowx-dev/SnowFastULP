@@ -243,7 +243,6 @@ func main() {
 		txtMode:         *txtMode,
 		workers:         w,
 		outFile:         *outFile,
-		liveEcho:        !outputMode.Generated,
 		stream:          streamMode,
 		clean:           *clean,
 		decodeStep:      *decodeStep,
@@ -286,7 +285,6 @@ type runConfig struct {
 	txtMode         bool
 	workers         int
 	outFile         string
-	liveEcho        bool
 	stream          bool
 	clean           bool
 	decodeStep      int
@@ -326,23 +324,13 @@ func run(ctx context.Context, cfg runConfig) error {
 	}
 
 	uiMode := resolveUIMode(cfg.stream, cfg.outFile)
-	var layout *terminalLayout
-	if uiMode == uiFull && stdoutIsTTY() && stderrIsTTY() {
-		layout = &terminalLayout{}
-		layout.Enable()
-	}
 
-	// Wire the hit output:
-	//   resultWriter — the durable/canonical sink (ordered when -o/default file).
-	//   liveWriter   — optional on-screen viewport echo for explicit -o on a TTY.
+	// Hit output sink: a file when -o / default-generated, otherwise stdout for
+	// -s streaming. The live status frame (stderr) shows a hit counter and
+	// progress; results themselves are never painted into the alt-screen, which
+	// is what kept letting the frame leak onto the user's scrollback.
 	var resultWriter io.Writer = os.Stdout
-	var liveWriter io.Writer
-	switch {
-	case out != nil && layout != nil && cfg.liveEcho:
-		// -o on a TTY: persist to the file, echo hits live on screen separately.
-		resultWriter = out
-		liveWriter = newHitViewportWriter(os.Stdout, layout)
-	case out != nil:
+	if out != nil {
 		resultWriter = out
 	}
 
@@ -406,7 +394,6 @@ func run(ctx context.Context, cfg runConfig) error {
 		Start:    cfg.started,
 		Done:     uiDone,
 		Signaled: cfg.signaled,
-		Layout:   layout,
 	}, &uiWG)
 	defer func() {
 		close(uiDone)
@@ -441,14 +428,9 @@ func run(ctx context.Context, cfg runConfig) error {
 	hitCh := make(chan search.Hit, 4096)
 	sink := search.NewWriter(resultWriter, cfg.clean)
 	orderedOutput := cfg.outFile != ""
-	streamFlush := layout != nil || (out == nil && stdoutIsTTY())
-
-	// Live on-screen echo (only with -o + TUI). The durable sink stays ordered;
-	// this shows hits as they're found so the screen isn't blank during a -o run.
-	var liveSink *search.Writer
-	if liveWriter != nil {
-		liveSink = search.NewWriter(liveWriter, cfg.clean)
-	}
+	// Flush each hit only when streaming to an interactive stdout (-s on a TTY)
+	// so the user sees results live; piped/file runs buffer for throughput.
+	streamFlush := out == nil && stdoutIsTTY()
 
 	var printer *search.OrderedPrinter
 	writeHit := func(h search.Hit) error {
@@ -560,15 +542,6 @@ func run(ctx context.Context, cfg runConfig) error {
 		if streamFlush {
 			if err := sink.Flush(); err != nil {
 				return false, fmt.Errorf("flush hit: %w", err)
-			}
-		}
-		// echo to the on-screen viewport as found (-o + TUI only)
-		if liveSink != nil {
-			if err := liveSink.WriteHit(h); err != nil {
-				return false, fmt.Errorf("write live hit: %w", err)
-			}
-			if err := liveSink.Flush(); err != nil {
-				return false, fmt.Errorf("flush live hit: %w", err)
 			}
 		}
 		if cfg.limit > 0 && emitted >= cfg.limit {

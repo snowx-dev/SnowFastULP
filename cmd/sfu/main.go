@@ -55,6 +55,17 @@ func isDirHint(p string) bool {
 }
 
 func main() {
+	// A panic anywhere below (e.g. inside ulpengine.Run) would otherwise crash
+	// with the alt-screen still up and the cursor hidden. Restore first, then
+	// re-panic so the stack trace prints on a clean screen. No-op until the
+	// monitor installs the hook.
+	defer func() {
+		if r := recover(); r != nil {
+			restoreTerminal()
+			panic(r)
+		}
+	}()
+
 	// enable VT processing on Windows so TUI ANSI renders. no-op on Unix
 	console.EnableVT()
 
@@ -426,9 +437,9 @@ func signalContext() (context.Context, context.CancelFunc, func() bool) {
 		// races b/c ctx is already cancelled, Go picks randomly and
 		// would silently swallow every other 2nd Ctrl-C
 		<-ch
-		if stdoutIsCharDevice() {
-			fmt.Print(ansiShowCursor + altScreenLeave)
-		}
+		// Leave the alt-screen + restore the cursor via the frame's guarded
+		// close (serialized with the monitor's draw) rather than a raw write.
+		restoreTerminal()
 		ulpengine.PrintManualCleanupHint(os.Stderr)
 		fmt.Fprintln(os.Stderr, "force-exit (signal received twice).")
 		os.Exit(130)
@@ -444,6 +455,10 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 		defer wg.Done()
 	}
 	frame := tuiFrame{tty: stdoutIsCharDevice()}
+	// Route teardown through the frame's mutex-guarded close so the force-exit
+	// goroutine never races the monitor's draw on stdout.
+	setTerminalRestore(frame.close)
+	defer clearTerminalRestore()
 	defer frame.close()
 
 	winch := make(chan os.Signal, 1)

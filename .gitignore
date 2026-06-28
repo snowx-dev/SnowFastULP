@@ -30,5 +30,6 @@
 *.sfsidx.json
 *.sfsidx.json.tmp
 /sfs-debug-*.log
+/sfs_results_*.txt
 *.idx
 *.write.*.tmp

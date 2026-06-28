@@ -10,6 +10,7 @@ import (
 
 	"github.com/snowx-dev/SnowFastULP/internal/search"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
@@ -82,7 +83,6 @@ type uiConfig struct {
 	Start    time.Time
 	Done     <-chan struct{}
 	Signaled func() bool
-	Layout   *terminalLayout
 }
 
 // renderQueryLine formats the "Query" panel row, truncating the pattern to fit.
@@ -138,7 +138,7 @@ func runUI(cfg uiConfig, done *sync.WaitGroup) {
 		return
 	}
 
-	frame := stderrFrame{tty: stderrIsTTY(), layout: cfg.Layout}
+	frame := stderrFrame{tty: stderrIsTTY()}
 	setTerminalRestore(frame.close)
 	defer clearTerminalRestore()
 	defer frame.close()
@@ -166,67 +166,46 @@ func runUI(cfg uiConfig, done *sync.WaitGroup) {
 	}
 }
 
+// stderrFrame is a fixed alt-screen status block redrawn in place each tick.
+// Draw and close are serialized so a teardown (signal/fatal goroutine) can
+// never interleave between line writes and spill the frame onto the primary
+// screen. close is idempotent.
 type stderrFrame struct {
-	tty    bool
-	altOn  bool
-	prevN  int
-	layout *terminalLayout
+	mu    sync.Mutex
+	tty   bool
+	altOn bool
 }
 
 func (f *stderrFrame) close() {
-	if !f.tty {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.tty || !f.altOn {
 		return
 	}
-	if f.layout != nil {
-		f.layout.Reset()
-	}
-	if f.altOn {
-		fmt.Fprint(os.Stderr, ansiResetScroll+ansiShowCursor+altScreenLeave)
-		f.altOn = false
-	}
+	fmt.Fprint(os.Stderr, ansiResetScroll+ansiShowCursor+altScreenLeave)
+	f.altOn = false
 }
 
 func (f *stderrFrame) draw(lines []string) {
-	if len(lines) == 0 {
+	if !f.tty || len(lines) == 0 {
 		return
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	width := termWidth()
-	if !f.tty {
-		fmt.Fprintln(os.Stderr, strings.Join(trimLinesToWidth(lines, width), "\n"))
-		return
+	rows := make([]string, len(lines))
+	for i, ln := range lines {
+		rows[i] = trimToDisplayWidth(ln, width)
 	}
+	var b strings.Builder
 	if !f.altOn {
-		fmt.Fprint(os.Stderr, altScreenEnter+ansiHideCursor)
+		b.WriteString(altScreenEnter + ansiHideCursor)
 		f.altOn = true
 	}
-	if f.layout != nil {
-		f.layout.SetReservedTop(len(lines))
-	}
-	drawLines := func() {
-		for i, ln := range lines {
-			if f.layout != nil && f.layout.enabled {
-				fmt.Fprintf(os.Stderr, "\033[%d;1H", i+1)
-			} else if i == 0 {
-				fmt.Fprint(os.Stderr, "\033[H")
-			}
-			fmt.Fprintf(os.Stderr, "\033[2K\r%s\n", trimToDisplayWidth(ln, width))
-		}
-		for i := len(lines); i < f.prevN; i++ {
-			if f.layout != nil && f.layout.enabled {
-				fmt.Fprintf(os.Stderr, "\033[%d;1H", i+1)
-			} else {
-				fmt.Fprint(os.Stderr, "\033[2K\r\n")
-				continue
-			}
-			fmt.Fprint(os.Stderr, "\033[2K\r\n")
-		}
-		f.prevN = len(lines)
-	}
-	if f.layout != nil {
-		f.layout.DrawHeader(drawLines)
-		return
-	}
-	drawLines()
+	// Clamp to one row shy of the terminal height so the bottom line can't
+	// scroll the buffer; Compose erases any rows a taller previous frame left.
+	b.WriteString(tuiframe.Compose(rows, termHeight()-1))
+	fmt.Fprint(os.Stderr, b.String())
 }
 
 func renderHeader(left, right string, width int) string {

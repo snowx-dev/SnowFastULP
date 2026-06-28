@@ -810,8 +810,10 @@ func regenParts(ctx context.Context, parts []archivePart, cfg odConfig, m *ODMet
 						}
 						return
 					}
-					fmt.Fprintf(os.Stderr, "sfu: warning: skipping corrupt archive part %s: %v\n",
-						t.part.path, err)
+					// Don't write to os.Stderr here: phase-0 regen runs while the
+					// live TUI owns the screen, so a mid-run warning corrupts the
+					// frame. The path is collected below and surfaced cleanly after
+					// teardown via renderODSkippedPaths (plus the debug log).
 					skippedMu.Lock()
 					skippedPaths = append(skippedPaths, t.part.path)
 					skippedMu.Unlock()

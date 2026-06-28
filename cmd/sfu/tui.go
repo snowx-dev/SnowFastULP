@@ -5,12 +5,14 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
@@ -320,32 +322,32 @@ func stdoutIsCharDevice() bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// fixed multi-line status block on the alt-screen. each draw moves cursor
-// home, overwrites every line, clears any leftover lines from prior draw
+// fixed multi-line status block on the alt-screen. each draw homes the cursor,
+// rewrites every line, then erases below to wipe a taller prior frame. Draw and
+// close are serialized so a teardown from the signal/force-exit goroutine can
+// never interleave between line writes and spill onto the primary screen. close
+// is idempotent.
 type tuiFrame struct {
+	mu    sync.Mutex
 	tty   bool
 	altOn bool
-	prevN int
 }
 
 func (f *tuiFrame) close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.tty || !f.altOn {
 		return
 	}
-	fmt.Print(ansiShowCursor + altScreenLeave)
+	// reset any scroll region defensively before leaving the alt-screen.
+	fmt.Print("\033[r" + ansiShowCursor + altScreenLeave)
 	f.altOn = false
-}
-
-func (f *tuiFrame) enterAlt() {
-	if !f.tty || f.altOn {
-		return
-	}
-	fmt.Print(altScreenEnter + ansiHideCursor)
-	f.altOn = true
 }
 
 // wipes viewport on SIGWINCH so next draw lays out from a clean state
 func (f *tuiFrame) redrawOnResize() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.tty || !f.altOn {
 		return
 	}
@@ -353,31 +355,24 @@ func (f *tuiFrame) redrawOnResize() {
 }
 
 func (f *tuiFrame) draw(lines []string) {
-	if len(lines) == 0 {
+	if !f.tty || len(lines) == 0 {
 		return
 	}
-	if !f.tty {
-		fmt.Print(strings.Join(trimLinesToWidth(lines, tuiDisplayWidth), "\n"), "\n")
-		return
-	}
-	f.enterAlt()
-	fmt.Print("\033[H")
-	for _, ln := range lines {
-		ln = trimToDisplayWidth(ln, tuiDisplayWidth)
-		fmt.Print("\033[2K\r", ln, "\n")
-	}
-	for i := len(lines); i < f.prevN; i++ {
-		fmt.Print("\033[2K\r\n")
-	}
-	f.prevN = len(lines)
-}
-
-func trimLinesToWidth(lines []string, max int) []string {
-	out := make([]string, len(lines))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rows := make([]string, len(lines))
 	for i, ln := range lines {
-		out[i] = trimToDisplayWidth(ln, max)
+		rows[i] = trimToDisplayWidth(ln, tuiDisplayWidth)
 	}
-	return out
+	var b strings.Builder
+	if !f.altOn {
+		b.WriteString(altScreenEnter + ansiHideCursor)
+		f.altOn = true
+	}
+	// Clamp to one row shy of the terminal height so the bottom line can't
+	// scroll the buffer; Compose erases any stale rows below.
+	b.WriteString(tuiframe.Compose(rows, termHeight()-1))
+	fmt.Print(b.String())
 }
 
 func trimToDisplayWidth(s string, max int) string {

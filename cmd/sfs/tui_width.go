@@ -99,14 +99,6 @@ func trimToDisplayWidth(s string, max int) string {
 	return b.String()
 }
 
-func trimLinesToWidth(lines []string, max int) []string {
-	out := make([]string, len(lines))
-	for i, ln := range lines {
-		out[i] = trimToDisplayWidth(ln, max)
-	}
-	return out
-}
-
 func padOrTrim(s string, w int) string {
 	if w <= 0 {
 		return ""

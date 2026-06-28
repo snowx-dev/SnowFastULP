@@ -13,6 +13,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
+	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
 	"golang.org/x/term"
 )
 
@@ -59,12 +60,32 @@ var (
 // ASCII spinner, 4 frames at 100ms keyed off wall-clock (no animation tick).
 var lineSpinnerFrames = []string{"|", "/", "-", "\\"}
 
+// spinnerTick is the shared 100ms animation counter derived from the wall
+// clock, so the header and every worker row animate off one monotonic source.
+func spinnerTick(now time.Time) int { return int(now.UnixMilli() / 100) }
+
 func spinnerFrame(now time.Time) string {
-	idx := (now.UnixMilli() / 100) % int64(len(lineSpinnerFrames))
-	if idx < 0 {
-		idx = 0
+	return lineSpinnerFrames[mod(spinnerTick(now), len(lineSpinnerFrames))]
+}
+
+// workerSpinnerFrames is a soft braille dot cycle for the per-worker rows: a
+// subtle, smooth motion that reads as activity without the visual noise of the
+// ASCII bar spinner.
+var workerSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// workerSpinnerFrame returns the braille frame for tick, phase-shifted by offset
+// so each worker row moves slightly out of step — a gentle cascade that makes
+// the panel feel alive and reinforces "many things happening at once".
+func workerSpinnerFrame(tick, offset int) string {
+	return workerSpinnerFrames[mod(tick+offset, len(workerSpinnerFrames))]
+}
+
+// mod is a non-negative modulo so a negative wall clock never indexes OOB.
+func mod(a, n int) int {
+	if n <= 0 {
+		return 0
 	}
-	return lineSpinnerFrames[idx]
+	return ((a % n) + n) % n
 }
 
 // headerLine builds the title row that sits ABOVE the box: an indented spinner
@@ -227,13 +248,19 @@ func gradientBar(percent float64, width int) string {
 }
 
 // stderrFrame is a fixed alt-screen block redrawn in place each tick. Falls
-// back to nothing on a non-TTY so piped runs stay clean.
+// back to nothing on a non-TTY so piped runs stay clean. Draw and close are
+// serialized so a force-exit (second Ctrl+C / cleanup timeout) can never
+// interleave between line writes and spill the frame onto the primary screen.
+// close is idempotent.
 type stderrFrame struct {
+	mu    sync.Mutex
 	tty   bool
 	altOn bool
 }
 
 func (f *stderrFrame) close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.tty || !f.altOn {
 		return
 	}
@@ -245,14 +272,18 @@ func (f *stderrFrame) draw(lines []string) {
 	if !f.tty || len(lines) == 0 {
 		return
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var b strings.Builder
 	if !f.altOn {
-		fmt.Fprint(os.Stderr, altScreenEnter+ansiHideCursor)
+		b.WriteString(altScreenEnter + ansiHideCursor)
 		f.altOn = true
 	}
-	fmt.Fprint(os.Stderr, "\033[H")
-	for _, ln := range lines {
-		fmt.Fprint(os.Stderr, "\033[2K\r", ln, "\n")
-	}
+	// Clamp to one row shy of the terminal height so the worker panel can't
+	// scroll the buffer on short terminals; Compose erases any rows a taller
+	// previous frame (e.g. the extracting panel) left behind.
+	b.WriteString(tuiframe.Compose(lines, termHeight()-1))
+	fmt.Fprint(os.Stderr, b.String())
 }
 
 // monitor samples Progress every ~200ms and redraws the live frame until done.
@@ -287,7 +318,7 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 			}
 		}
 		prevAt, prevBytes = now, cur
-		frame.draw(renderProgress(now.Sub(started), prog, rate, spinnerFrame(now), termWidth()))
+		frame.draw(renderProgress(now.Sub(started), prog, rate, spinnerTick(now), termWidth()))
 	}
 
 	for {
@@ -335,8 +366,9 @@ func frameWithFooter(header string, box []string, width int, footer []string) []
 	return append(out, footer...)
 }
 
-func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, spinner string, width int) []string {
+func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, tick int, width int) []string {
 	inner := boxInner(width)
+	spinner := lineSpinnerFrames[mod(tick, len(lineSpinnerFrames))]
 
 	// Ingest carries the same icy frame so the screen never hands off: a single
 	// bar + "added / already-in-library" counts driven by the dedup engine.
@@ -382,7 +414,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, s
 		// Surface the concurrent workers: a per-slot panel makes the
 		// parallelism visible even when the byte bar crawls. Falls back to the
 		// single current path when no registry is wired (back-compat).
-		if panel := sflWorkerPanel(prog, inner); len(panel) > 0 {
+		if panel := sflWorkerPanel(prog, inner, tick); len(panel) > 0 {
 			body = append(body, panel...)
 		} else if cur := prog.Current(); cur != "" {
 			body = append(body, sflMutedStyle.Render(truncatePath(cur, inner)))
@@ -424,19 +456,19 @@ func sflWorkerRowCap(termHeight, totalWorkers int) int {
 
 // sflWorkerPanel reads the live worker registry and renders it. It returns nil
 // when no registry is wired so the caller can fall back to the single
-// current-path line.
-func sflWorkerPanel(prog *sflog.Progress, inner int) []string {
+// current-path line. tick drives the per-row spinner animation.
+func sflWorkerPanel(prog *sflog.Progress, inner, tick int) []string {
 	total := prog.WorkerCount()
 	if total <= 0 {
 		return nil
 	}
 	active := prog.ActiveWorkers(sflWorkerRowCap(termHeight(), total))
-	return renderSflWorkerPanel(active, total, inner)
+	return renderSflWorkerPanel(active, total, inner, tick)
 }
 
 // renderSflWorkerPanel is the pure renderer: a header count plus one row per
 // busy worker slot. Empty active set renders nothing.
-func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner int) []string {
+func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner, tick int) []string {
 	if len(active) == 0 {
 		return nil
 	}
@@ -444,14 +476,16 @@ func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner int) []strin
 	out := make([]string, 0, len(active)+1)
 	out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d of %d workers active", len(active), total)))
 	for _, w := range active {
-		out = append(out, renderSflWorkerRow(w, inner, idxMarkerW))
+		out = append(out, renderSflWorkerRow(w, inner, idxMarkerW, tick))
 	}
 	return out
 }
 
-// renderSflWorkerRow is one panel line: "[i] <stage>  <path>", with the stage
-// padded to a fixed column so paths align and the path truncated to fit.
-func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW int) string {
+// renderSflWorkerRow is one panel line: "[i] ⠹ <stage>  <path>". A braille
+// spinner (phase-shifted by worker index for a gentle cascade) sits between the
+// marker and the fixed-width stage column so paths still align; the path is
+// truncated to fit.
+func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW, tick int) string {
 	marker := fmt.Sprintf("[%d]", w.Index+1)
 	if pad := idxMarkerW - lipgloss.Width(marker); pad > 0 {
 		marker += strings.Repeat(" ", pad)
@@ -463,11 +497,13 @@ func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW int) string {
 	if pad := sflStageColW - lipgloss.Width(stage); pad > 0 {
 		stage += strings.Repeat(" ", pad)
 	}
-	pathW := inner - idxMarkerW - 1 - sflStageColW - 2
+	// reserve: marker + space + spinner(1) + space + stageCol + 2-space gap
+	pathW := inner - idxMarkerW - 1 - 2 - sflStageColW - 2
 	if pathW < 8 {
 		pathW = 8
 	}
 	return sflMutedStyle.Render(marker) + " " +
+		sflSpinnerStyle.Render(workerSpinnerFrame(tick, w.Index)) + " " +
 		sflOkStyle.Render(stage) + "  " +
 		sflMutedStyle.Render(truncatePath(w.Path, pathW))
 }
@@ -500,16 +536,47 @@ const (
 	phaseDoneVal     = 3 // mirrors sflog phaseDone
 )
 
-// summaryRecap is the shared extraction recap (the two count rows plus any
-// issue lines) reused by every end-of-run summary frame.
-func summaryRecap(stats sflog.ExtractStats) []string {
-	body := []string{
-		fmt.Sprintf("%s logs  ·  %s parsed  ·  %s unique  ·  %s duplicates",
-			formatInt(stats.Logs), formatInt(stats.Credentials), formatInt(stats.Emitted), formatInt(stats.Duplicates)),
-		fmt.Sprintf("%s files scanned  ·  %s archives  ·  %s skipped",
-			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)),
+// sflRecapLabelW is the label column width so recap values line up in a clean
+// gutter (matches sfu's "Input "/"Unique " labels and fits "Ingested").
+const sflRecapLabelW = 10
+
+// recapRow is one "Label   value" line with the label padded to a fixed gutter
+// so every value starts in the same column.
+func recapRow(label, value string) string {
+	if pad := sflRecapLabelW - lipgloss.Width(label); pad > 0 {
+		label += strings.Repeat(" ", pad)
 	}
-	return append(body, issueLines(stats)...)
+	return sflLabelStyle.Render(label) + value
+}
+
+// recapCountRows is the labeled metric block (one row per group so big counts
+// never wrap mid-number). Kept separate from the issue block so the ingest
+// frame can slot its "Ingested" row in before the issues.
+func recapCountRows(stats sflog.ExtractStats) []string {
+	return []string{
+		recapRow("Logs", sflOkStyle.Render(formatInt(stats.Logs))+
+			sflMutedStyle.Render("  ·  "+formatInt(stats.Credentials)+" parsed")),
+		recapRow("Unique", sflOkStyle.Render(formatInt(stats.Emitted))+
+			sflMutedStyle.Render("  ·  "+formatInt(stats.Duplicates)+" duplicates")),
+		recapRow("Sources", sflMutedStyle.Render(fmt.Sprintf("%s files  ·  %s archives  ·  %s skipped",
+			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)))),
+	}
+}
+
+// recapIssueBlock is the per-kind fail lines, set off by a leading blank when
+// present so they breathe below the metric block. nil when there are none.
+func recapIssueBlock(stats sflog.ExtractStats) []string {
+	issues := issueLines(stats)
+	if len(issues) == 0 {
+		return nil
+	}
+	return append([]string{""}, issues...)
+}
+
+// summaryRecap is the shared extraction recap reused by the classic and
+// no-ingest frames: the metric block followed by any issue lines.
+func summaryRecap(stats sflog.ExtractStats) []string {
+	return append(recapCountRows(stats), recapIssueBlock(stats)...)
 }
 
 func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
@@ -519,7 +586,7 @@ func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
 func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
-	body := append(summaryRecap(stats), sflMutedStyle.Render("Output: ")+outPath)
+	body := append(summaryRecap(stats), "", sflMutedStyle.Render("Output: ")+outPath)
 	return frameWithFooter(title, insetBox(sflBoxStyle, body, width), width, summaryFooterLines(width, notice))
 }
 
@@ -534,6 +601,7 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
 	body := append(summaryRecap(stats),
+		"",
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
@@ -551,13 +619,28 @@ func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib
 func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
-	body := append(summaryRecap(stats),
-		fmt.Sprintf("%s new  ·  %s already in library",
-			sflOkStyle.Render(formatInt(int(newToLib))), sflMutedStyle.Render(formatInt(int(alreadyInLib)))),
-		sflOkStyle.Render(formatInt(int(libraryLines)))+sflMutedStyle.Render(" lines in library"),
-		sflMutedStyle.Render("Library: ")+libraryDir,
+	// Ingested sits with the counts (before issues); Library path closes the box.
+	body := append(recapCountRows(stats),
+		recapRow("Ingested", sflOkStyle.Render(formatInt(int(newToLib)))+
+			sflMutedStyle.Render(" new  ·  "+formatInt(int(alreadyInLib))+" already in library")),
 	)
-	return frameWithFooter(title, insetBox(sflBoxStyle, body, width), width, summaryFooterLines(width, notice))
+	body = append(body, recapIssueBlock(stats)...)
+	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
+	// The running library total gets its own box below the recap (mirrors sfu's
+	// renderODSummary) so the headline post-ingest number stands on its own.
+	box := append(insetBox(sflBoxStyle, body, width), "")
+	box = append(box, libraryTotalBox(libraryLines, width)...)
+	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
+}
+
+// libraryTotalBox is the standalone "<N> lines in library" box, the single
+// headline number after ingestion (prior library + new unique this run).
+func libraryTotalBox(libraryLines int64, width int) []string {
+	body := []string{
+		sflOkStyle.Render(formatInt(int(libraryLines))),
+		sflMutedStyle.Render("lines in library"),
+	}
+	return insetBox(sflBoxStyle, body, width)
 }
 
 // renderInterruptSummary is printed on the normal screen after a graceful
@@ -573,26 +656,30 @@ func renderInterruptSummary(elapsed time.Duration) []string {
 	return frame(title, insetBox(sflInterruptBoxStyle, body, width), width)
 }
 
+// plural picks the singular or plural noun by count (1 → singular).
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
 // issueLines summarises non-fatal problems for the analyst: bad passwords,
 // parse failures, and sources that yielded no ULP, with a few example paths.
+// Each label is pluralised by count so a single fail never reads as "1 errors".
 func issueLines(stats sflog.ExtractStats) []string {
 	var lines []string
-	if stats.PasswordNotFound > 0 {
-		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s password not found", formatInt(stats.PasswordNotFound)))+
-			exampleSuffix(stats, sflog.IssuePasswordNotFound, stats.PasswordNotFound))
+	add := func(n int, kind sflog.IssueKind, one, many string) {
+		if n <= 0 {
+			return
+		}
+		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s %s", formatInt(n), plural(n, one, many)))+
+			exampleSuffix(stats, kind, n))
 	}
-	if stats.ParseErrors > 0 {
-		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s parse errors", formatInt(stats.ParseErrors)))+
-			exampleSuffix(stats, sflog.IssueParseError, stats.ParseErrors))
-	}
-	if stats.OpenErrors > 0 {
-		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s open errors", formatInt(stats.OpenErrors)))+
-			exampleSuffix(stats, sflog.IssueOpenError, stats.OpenErrors))
-	}
-	if stats.NoULP > 0 {
-		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s sources with no ULP", formatInt(stats.NoULP)))+
-			exampleSuffix(stats, sflog.IssueNoULP, stats.NoULP))
-	}
+	add(stats.PasswordNotFound, sflog.IssuePasswordNotFound, "password not found", "passwords not found")
+	add(stats.ParseErrors, sflog.IssueParseError, "parse error", "parse errors")
+	add(stats.OpenErrors, sflog.IssueOpenError, "open error", "open errors")
+	add(stats.NoULP, sflog.IssueNoULP, "source with no ULP", "sources with no ULP")
 	return lines
 }
 

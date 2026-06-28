@@ -21,10 +21,11 @@ func TestRenderFinalSummaryShowsSnowFastLogStats(t *testing.T) {
 	for _, want := range []string{
 		"SnowFastLog",
 		"COMPLETE",
-		"3 logs",
+		"Logs",
 		"10 parsed",
-		"8 unique",
+		"Unique",
 		"2 duplicates",
+		"Sources",
 		"2 archives",
 		"out/sfl.txt",
 	} {
@@ -109,7 +110,7 @@ func TestRenderFinalSummaryReportsOpenErrors(t *testing.T) {
 
 func TestRenderProgressScanningStateIsCenteredWithSpinner(t *testing.T) {
 	prog := sflog.NewProgress() // discovery phase, unknown total
-	lines := renderProgress(0, prog, 0, "/", 80)
+	lines := renderProgress(0, prog, 0, 0, 80)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"[sfl]", "SCANNING", "discovering sources"} {
 		if !strings.Contains(joined, want) {
@@ -131,7 +132,7 @@ func TestRenderProgressScanningStateIsCenteredWithSpinner(t *testing.T) {
 
 func TestRenderProgressShowsFooter(t *testing.T) {
 	prog := sflog.NewProgress()
-	joined := strings.Join(renderProgress(0, prog, 0, "/", 80), "\n")
+	joined := strings.Join(renderProgress(0, prog, 0, 0, 80), "\n")
 	for _, want := range []string{"sfl is open-source", "snowx.dev"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("frame missing footer %q:\n%s", want, joined)
@@ -145,7 +146,7 @@ func TestRenderSflWorkerPanelShowsConcurrentStages(t *testing.T) {
 		{Index: 1, Path: "/data/Flores Private Cloud 32.rar", Stage: sflog.StageExtracting},
 		{Index: 3, Path: "/data/victim/Passwords.txt", Stage: sflog.StageParsing},
 	}
-	joined := strings.Join(renderSflWorkerPanel(active, 4, 72), "\n")
+	joined := strings.Join(renderSflWorkerPanel(active, 4, 72, 0), "\n")
 	for _, want := range []string{
 		"3 of 4 workers active",
 		"testing password",
@@ -159,9 +160,41 @@ func TestRenderSflWorkerPanelShowsConcurrentStages(t *testing.T) {
 	}
 }
 
+func TestRenderSflWorkerRowAnimatesSpinner(t *testing.T) {
+	w := sflog.ActiveWorker{Index: 0, Path: "/data/a.zip", Stage: sflog.StageExtracting}
+	// Successive ticks must change the braille spinner glyph so the row reads as
+	// live motion rather than a static label.
+	seen := map[string]bool{}
+	for tick := 0; tick < len(workerSpinnerFrames); tick++ {
+		row := renderSflWorkerRow(w, 60, 4, tick)
+		found := ""
+		for _, f := range workerSpinnerFrames {
+			if strings.Contains(row, f) {
+				found = f
+				break
+			}
+		}
+		if found == "" {
+			t.Fatalf("tick %d: row has no spinner glyph: %q", tick, row)
+		}
+		seen[found] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("spinner did not animate across ticks; saw frames %v", seen)
+	}
+}
+
+func TestWorkerSpinnerCascadesByWorkerIndex(t *testing.T) {
+	// At a fixed tick, adjacent worker rows should show different frames so the
+	// panel ripples instead of blinking in unison.
+	if a, b := workerSpinnerFrame(5, 0), workerSpinnerFrame(5, 1); a == b {
+		t.Fatalf("expected phase-shifted frames for adjacent workers, both = %q", a)
+	}
+}
+
 func TestRenderSflWorkerRowTruncatesLongPath(t *testing.T) {
 	w := sflog.ActiveWorker{Index: 2, Path: "/very/long/path/" + strings.Repeat("x", 200) + "/Passwords.txt", Stage: sflog.StageExtracting}
-	row := renderSflWorkerRow(w, 60, 4)
+	row := renderSflWorkerRow(w, 60, 4, 0)
 	if !strings.Contains(row, "[3]") {
 		t.Fatalf("row missing 1-based marker: %q", row)
 	}
@@ -209,9 +242,32 @@ func TestRenderFinalSummaryReportsSkippedCount(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	// The recap count row must surface the total skipped sources alongside the
 	// per-kind fail lines, so failures are never hidden from the end summary.
-	for _, want := range []string{"3 skipped", "password not found", "locked.zip"} {
+	for _, want := range []string{"3 skipped", "2 passwords not found", "locked.zip"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestIssueLinesPluralizeByCount(t *testing.T) {
+	one := strings.Join(issueLines(sflog.ExtractStats{
+		ParseErrors: 1, OpenErrors: 1, PasswordNotFound: 1, NoULP: 1,
+	}), "\n")
+	for _, want := range []string{"1 parse error", "1 open error", "1 password not found", "1 source with no ULP"} {
+		if !strings.Contains(one, want) {
+			t.Fatalf("singular issue label missing %q:\n%s", want, one)
+		}
+	}
+	if strings.Contains(one, "errors") || strings.Contains(one, "passwords") || strings.Contains(one, "sources") {
+		t.Fatalf("singular counts should not pluralize:\n%s", one)
+	}
+
+	many := strings.Join(issueLines(sflog.ExtractStats{
+		ParseErrors: 3, OpenErrors: 2, PasswordNotFound: 4, NoULP: 5,
+	}), "\n")
+	for _, want := range []string{"3 parse errors", "2 open errors", "4 passwords not found", "5 sources with no ULP"} {
+		if !strings.Contains(many, want) {
+			t.Fatalf("plural issue label missing %q:\n%s", want, many)
 		}
 	}
 }
@@ -241,10 +297,10 @@ func TestRenderFinalSummaryReportsIssues(t *testing.T) {
 	})
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
-		"password not found",
+		"2 passwords not found",
 		"locked.zip",
 		"sealed.7z",
-		"no ULP",
+		"source with no ULP",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("summary missing %q:\n%s", want, joined)
