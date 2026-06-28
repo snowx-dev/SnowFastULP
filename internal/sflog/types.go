@@ -27,6 +27,22 @@ const (
 	IssueNoULP
 )
 
+// String returns a stable, log-friendly slug for the issue kind.
+func (k IssueKind) String() string {
+	switch k {
+	case IssuePasswordNotFound:
+		return "password-not-found"
+	case IssueParseError:
+		return "parse-error"
+	case IssueOpenError:
+		return "open-error"
+	case IssueNoULP:
+		return "no-ulp"
+	default:
+		return "unknown"
+	}
+}
+
 // Issue records a single non-fatal problem tied to a source path so the
 // summary can tell the analyst exactly what was skipped and why.
 type Issue struct {

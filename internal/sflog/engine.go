@@ -126,10 +126,20 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 		return ExtractStats{}, nil, err
 	}
 	var total int64
+	var nFiles, nArchives int
 	logRemaining := make(map[string]int, len(items))
 	for _, it := range items {
 		total += it.weight
 		logRemaining[it.logKey]++
+		if it.kind == kindArchive {
+			nArchives++
+		} else {
+			nFiles++
+		}
+	}
+	if e.Debug != nil {
+		e.Debug("discovered %d source(s): %d file(s), %d archive(s), %d log unit(s), %d byte(s)",
+			len(items), nFiles, nArchives, len(logRemaining), total)
 	}
 	if e.Progress != nil {
 		e.Progress.setTotal(total)
@@ -256,6 +266,9 @@ func (e *Engine) processFile(ctx context.Context, idx int, it workItem, lines ch
 		acc.openErrors.Add(1)
 		acc.addIssue(it.path, IssueOpenError, err)
 		acc.addResult(it.path, false, false, false)
+		if e.Debug != nil {
+			e.Debug("file %s: open error: %v", it.path, err)
+		}
 		return
 	}
 	unreg := registerAbort(ctx, f)
@@ -267,15 +280,21 @@ func (e *Engine) processFile(ctx context.Context, idx int, it workItem, lines ch
 		acc.parseErrors.Add(1)
 		acc.addIssue(it.path, IssueParseError, firstErr(perr, closeErr))
 		acc.addResult(it.path, false, false, false)
+		if e.Debug != nil {
+			e.Debug("file %s: parse error: %v", it.path, firstErr(perr, closeErr))
+		}
 		return
 	}
 	e.emitAll(ctx, lines, creds)
 	if len(creds) == 0 {
 		acc.noULP.Add(1)
 		acc.addIssue(it.path, IssueNoULP, nil)
+		if e.Debug != nil {
+			e.Debug("file %s: no ULP detected", it.path)
+		}
 	}
 	acc.addResult(it.path, false, true, false)
-	if e.Debug != nil {
+	if e.Debug != nil && len(creds) > 0 {
 		e.Debug("file %s: %d credentials", it.path, len(creds))
 	}
 }
@@ -303,6 +322,9 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 			acc.parseErrors.Add(1)
 		}
 		acc.addIssue(path, kind, err)
+		if e.Debug != nil {
+			e.Debug("archive member %s: %s: %v", path, kind, err)
+		}
 	}
 	ec := extractCtx{
 		passwords: e.Passwords,
@@ -324,9 +346,15 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		if errors.Is(err, errPasswordNotFound) {
 			acc.passwordNotFound.Add(1)
 			acc.addIssue(it.path, IssuePasswordNotFound, err)
+			if e.Debug != nil {
+				e.Debug("archive %s: password not found", it.path)
+			}
 		} else {
 			acc.parseErrors.Add(1)
 			acc.addIssue(it.path, IssueParseError, err)
+			if e.Debug != nil {
+				e.Debug("archive %s: parse error: %v", it.path, err)
+			}
 		}
 		acc.addResult(it.path, true, false, hadIssue)
 		return
@@ -335,9 +363,12 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 	if len(collected) == 0 {
 		acc.noULP.Add(1)
 		acc.addIssue(it.path, IssueNoULP, nil)
+		if e.Debug != nil {
+			e.Debug("archive %s: no ULP detected", it.path)
+		}
 	}
 	acc.addResult(it.path, true, true, hadIssue)
-	if e.Debug != nil {
+	if e.Debug != nil && len(collected) > 0 {
 		e.Debug("archive %s: %d credentials across %d file(s), %d nested archive(s)",
 			it.path, len(collected), scan.files, scan.nestedArchives)
 	}

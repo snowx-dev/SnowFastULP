@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
+
+	"github.com/snowx-dev/SnowFastULP/internal/sflog"
+	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
 
 // debugLogger writes structured, timestamped events to a log file when -debug
@@ -50,6 +54,34 @@ func (d *debugLogger) Event(format string, args ...any) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	fmt.Fprintf(d.f, "%s %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+}
+
+// Header records run provenance so the log is self-describing: what was run,
+// where, and with which knobs. Paths and counts only, never raw credentials.
+func (d *debugLogger) Header(cfg runConfig, passwords int, outPath string) {
+	if d == nil {
+		return
+	}
+	mode := "classic (-o " + cfg.OutputDir + ")"
+	if cfg.LibraryDir != "" {
+		mode = "ingest (-od " + cfg.LibraryDir + ")"
+	}
+	d.Event("version=%s gomaxprocs=%d", version.String, runtime.GOMAXPROCS(0))
+	d.Event("config: input=%q mode=%q workers=%d passwords=%d noURI=%v compress=%v del=%v tempDir=%q",
+		cfg.Input, mode, cfg.Workers, passwords, cfg.NoURI, cfg.Compress, cfg.DeleteSources, cfg.TempDir)
+	d.Event("output: %s", outPath)
+}
+
+// Completion records the final aggregate outcome so a run can be assessed at a
+// glance without re-deriving counts from the per-source lines above it.
+func (d *debugLogger) Completion(stats sflog.ExtractStats) {
+	if d == nil {
+		return
+	}
+	d.Event("complete: logs=%d files=%d archives=%d credentials=%d emitted=%d duplicates=%d "+
+		"skippedFiles=%d skippedArchives=%d passwordNotFound=%d parseErrors=%d openErrors=%d noULP=%d",
+		stats.Logs, stats.FilesScanned, stats.ArchivesScanned, stats.Credentials, stats.Emitted, stats.Duplicates,
+		stats.SkippedFiles, stats.SkippedArchives, stats.PasswordNotFound, stats.ParseErrors, stats.OpenErrors, stats.NoULP)
 }
 
 func (d *debugLogger) Close() {

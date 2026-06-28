@@ -189,6 +189,7 @@ func run(cfg runConfig) error {
 	if err != nil {
 		return err
 	}
+	dbg.Header(cfg, len(passwords), snk.outPath)
 
 	prog := sflog.NewProgress()
 	tuiOff := cfg.NoTUI || !stderrIsTTY()
@@ -219,10 +220,18 @@ func run(cfg runConfig) error {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	ulpengine.RegisterCleanupPath(spillDir)
-	defer os.RemoveAll(spillDir)
+	// removeSpill is idempotent (os.RemoveAll no-ops on a missing path), so the
+	// graceful interrupt paths below can clean up explicitly before exitWithCode
+	// — which os.Exits and therefore skips this defer — without any double-free.
+	removeSpill := func() { _ = os.RemoveAll(spillDir) }
+	defer removeSpill()
 
 	eng := buildEngine(cfg, passwords, prog, dbg, spillDir)
 	stats, results, extractErr := eng.Run(ctx, cfg.Input, snk.w)
+	dbg.Completion(stats)
+	if extractErr != nil {
+		dbg.Event("extract ended early: %v (signaled=%v)", extractErr, signaled())
+	}
 	finalizeErr := snk.finalize(extractErr != nil)
 
 	// Extraction/finalize failures tear the live frame down before any stderr so
@@ -231,6 +240,7 @@ func run(cfg runConfig) error {
 		stopMonitor()
 		snk.cleanup()
 		if signaled() {
+			removeSpill()
 			printInterruptSummary(cfg)
 			exitWithCode(130)
 		}
@@ -254,20 +264,25 @@ func run(cfg runConfig) error {
 			// calm completion (with the issue breakdown), not an error exit.
 			libEmpty = true
 			stopMonitor()
+			dbg.Event("ingest: skipped (nothing emitted)")
 		} else {
 			// The same icy frame carries through ingest: the monitor stays up
 			// while the dedup engine runs in-process, then we tear it down for
 			// the summary.
+			dbg.Event("ingest: start lib=%q ulp=%q emitted=%d", cfg.LibraryDir, snk.ulpPath, stats.Emitted)
 			ingestRes, ingestMet, err = ingestToLibrary(ctx, cfg, snk.ulpPath, prog)
 			stopMonitor()
 			if err != nil {
+				dbg.Event("ingest: ended early: %v (signaled=%v)", err, signaled())
 				snk.cleanup()
 				if signaled() {
+					removeSpill()
 					printInterruptSummary(cfg)
 					exitWithCode(130)
 				}
 				return err
 			}
+			dbg.Event("ingest: done")
 		}
 	} else {
 		stopMonitor()
