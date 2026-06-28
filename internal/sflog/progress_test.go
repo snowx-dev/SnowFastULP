@@ -1,6 +1,40 @@
 package sflog
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
+
+// TestCreditorAddConcurrent hammers creditor.add from many goroutines (as the
+// zip member pool does) and asserts the clamp is atomic: exactly weight is
+// credited, never more (overshoot) and never less (lost CAS retries). Run under
+// -race to catch unsynchronized access.
+func TestCreditorAddConcurrent(t *testing.T) {
+	p := NewProgress()
+	const weight = 1 << 20
+	c := newCreditor(p, weight, 1)
+
+	var wg sync.WaitGroup
+	const goroutines, each, chunk = 64, 1000, 64 // 64*1000*64 = 4 MiB attempted >> 1 MiB weight
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				c.add(chunk)
+			}
+		}()
+	}
+	wg.Wait()
+	c.finish()
+
+	if got := c.credited.Load(); got != weight {
+		t.Fatalf("credited = %d, want exactly weight %d (atomic clamp failed)", got, weight)
+	}
+	if got := p.DoneBytes(); got != weight {
+		t.Fatalf("DoneBytes = %d, want %d (no overshoot, no loss)", got, weight)
+	}
+}
 
 func TestProgressWorkerRegistryTracksActiveSlots(t *testing.T) {
 	p := NewProgress()
@@ -40,6 +74,38 @@ func TestProgressWorkerRegistryTracksActiveSlots(t *testing.T) {
 	if len(active) != 1 || active[0].Index != 2 {
 		t.Fatalf("after clearActive(0), active = %+v", active)
 	}
+}
+
+func TestSetWorkerPathUpdatesPathKeepsStage(t *testing.T) {
+	p := NewProgress()
+	p.SetWorkers(2)
+	p.setActive(0, "/data/outer.rar", StageExtracting)
+
+	// Descending into a nested archive re-points the path but must not reset
+	// the stage the nested reader publishes independently.
+	p.setWorkerPath(0, "/data/outer.rar!inner.7z")
+	got := p.ActiveWorkers(8)[0]
+	if got.Path != "/data/outer.rar!inner.7z" {
+		t.Fatalf("path = %q, want nested provenance", got.Path)
+	}
+	if got.Stage != StageExtracting {
+		t.Fatalf("stage = %v, want unchanged (extracting)", got.Stage)
+	}
+
+	// Restoring the parent label leaves the (separately set) stage alone.
+	p.setStage(0, StageTestingPassword)
+	p.setWorkerPath(0, "/data/outer.rar")
+	got = p.ActiveWorkers(8)[0]
+	if got.Path != "/data/outer.rar" || got.Stage != StageTestingPassword {
+		t.Fatalf("after restore = %+v, want parent path + testing-password stage", got)
+	}
+
+	// nil-safe and bounds-safe like the other slot writers.
+	var np *Progress
+	np.setWorkerPath(0, "x")
+	q := NewProgress()
+	q.SetWorkers(1)
+	q.setWorkerPath(9, "oob") // out of range: no-op, no panic
 }
 
 func TestProgressActiveWorkersHonorsMax(t *testing.T) {

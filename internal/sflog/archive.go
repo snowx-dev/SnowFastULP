@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bodgit/sevenzip"
@@ -25,6 +26,13 @@ const maxArchiveDepth = 3
 // maxArchiveDepth.
 var errNestTooDeep = errors.New("archive nesting too deep")
 
+// errNotAnArchive is returned when a member's extension claims an archive but
+// its leading bytes don't match the format's signature. Stealer logs routinely
+// contain decoy/browser files named *.7z or *.zip that aren't archives; this
+// lets the readers skip them as a parse/skip issue instead of burning a full
+// password sweep and mislabeling them "password not found".
+var errNotAnArchive = errors.New("not a recognized archive")
+
 func isArchiveFile(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".zip", ".rar", ".7z":
@@ -32,6 +40,53 @@ func isArchiveFile(path string) bool {
 	default:
 		return false
 	}
+}
+
+// archiveSignatureOK reports whether the file's leading bytes match the magic
+// for ext. It only vets the offset-0 signature formats (.7z, .zip) the bodgit
+// and yeka readers require there anyway; .rar (whose decoder scans for its
+// marker and tolerates SFX stubs) and any other extension return ok=true so the
+// normal reader still runs. A read error is returned so the caller can fall
+// back rather than misclassify an I/O problem as "not an archive".
+//
+// Encrypted zips and 7z keep these signatures in the clear (only entry
+// data/metadata is encrypted), so genuinely password-protected archives still
+// pass.
+func archiveSignatureOK(path, ext string) (bool, error) {
+	switch strings.ToLower(ext) {
+	case ".7z", ".zip":
+	default:
+		return true, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	var hdr [6]byte
+	n, err := io.ReadFull(f, hdr[:])
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	head := hdr[:n]
+	switch strings.ToLower(ext) {
+	case ".7z":
+		return len(head) >= 6 && string(head[:6]) == "\x37\x7A\xBC\xAF\x27\x1C", nil
+	case ".zip":
+		// Local file header, empty archive (EOCD), or spanned/data-descriptor.
+		if len(head) < 4 || head[0] != 'P' || head[1] != 'K' {
+			return false, nil
+		}
+		switch {
+		case head[2] == 0x03 && head[3] == 0x04,
+			head[2] == 0x05 && head[3] == 0x06,
+			head[2] == 0x07 && head[3] == 0x08:
+			return true, nil
+		default:
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // archiveScan reports what an (possibly recursive) archive read produced so the
@@ -60,6 +115,16 @@ type extractCtx struct {
 	// setStage (may be nil) publishes this worker's current archive stage to
 	// the live TUI. Copied across recursion so nested members report too.
 	setStage func(WorkerStage)
+	// setItem (may be nil) publishes the provenance of the archive this worker
+	// is currently inside (e.g. "outer.rar!inner.7z"). recurseNested re-points
+	// it on descent and restores the parent on return so the live line names
+	// the nested archive being worked on, not just the top-level item.
+	setItem func(string)
+	// sem (may be nil) is the engine-wide member-parallelism budget, sized to
+	// the worker count and shared by every top-level archive. readZipFiles
+	// drains it to run a big zip's members concurrently; nil disables member
+	// parallelism (hermetic callers, or when the engine didn't wire one).
+	sem chan struct{}
 	// debug (may be nil) logs provenance-safe diagnostics (paths, counts,
 	// elapsed) to the run's -debug log. Copied across recursion. Never carries
 	// raw passwords or credential values.
@@ -76,6 +141,27 @@ func (ec extractCtx) stage(s WorkerStage) {
 	if ec.setStage != nil {
 		ec.setStage(s)
 	}
+}
+
+// item publishes the provenance label of the archive this level is working on
+// to the worker slot if an item sink is wired (no-op otherwise).
+func (ec extractCtx) item(label string) {
+	if ec.setItem != nil {
+		ec.setItem(label)
+	}
+}
+
+// minParallelZipMembers is the member count below which a zip is read
+// sequentially: tiny archives aren't worth the goroutine/merge overhead and stay
+// trivially deterministic.
+const minParallelZipMembers = 8
+
+// parallelMembers reports whether this level's zip members may be read through
+// the shared pool: only at the top level (depth 0, so a member task never
+// re-acquires a slot -> no hold-and-wait deadlock), only when a budget is wired,
+// and only for archives with enough members to be worth it.
+func (ec extractCtx) parallelMembers(n int) bool {
+	return ec.sem != nil && ec.depth == 0 && n >= minParallelZipMembers
 }
 
 // debugf logs a provenance-safe diagnostic line when -debug is on (no-op
@@ -136,6 +222,38 @@ type pendingIssue struct {
 	err  error
 }
 
+// memberOutcome is one zip member's result, collected by a pool task into its
+// own slot so the merge back into the shared emit/onIssue/scan sinks happens on
+// a single goroutine, in member order (keeping output deterministic).
+type memberOutcome struct {
+	creds  []Credential
+	issues []pendingIssue
+	scan   archiveScan
+	ctxErr error // set only on context cancellation
+}
+
+// boundedForEach runs fn(0..n-1) concurrently, capped at cap(sem) in flight by
+// acquiring a slot before spawning (so a million-member archive never spawns a
+// million goroutines). It stops dispatching once ctx is cancelled; in-flight
+// tasks run to completion. sem is the engine-wide budget, shared across archives
+// so total concurrency stays bounded by the worker count.
+func boundedForEach(ctx context.Context, sem chan struct{}, n int, fn func(i int)) {
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
+}
+
 // readArchiveCredentials extracts credentials from an archive at diskPath,
 // recursing into nested archive members. weight drives smooth progress; ec.emit
 // receives one credential at a time. It returns the files/nested-archive counts.
@@ -146,9 +264,18 @@ func readArchiveCredentials(ctx context.Context, diskPath string, ec extractCtx,
 	if ec.hb == nil && ec.debug != nil {
 		ec.hb = newDebugThrottle(5 * time.Second)
 	}
+	ext := strings.ToLower(filepath.Ext(diskPath))
 	ec.debugf("archive %s: opening (%s, weight=%dB, passwords=%d, depth=%d)",
-		ec.display, strings.ToLower(filepath.Ext(diskPath)), weight, len(ec.passwords), ec.depth)
-	switch strings.ToLower(filepath.Ext(diskPath)) {
+		ec.display, ext, weight, len(ec.passwords), ec.depth)
+	// Vet the signature before any password sweep: a member named *.7z/*.zip
+	// whose bytes don't match is a decoy, not a locked archive. Skip it cleanly
+	// (errNotAnArchive -> parse/skip issue) instead of trying every password and
+	// reporting "password not found". A read error falls through to the reader.
+	if ok, sniffErr := archiveSignatureOK(diskPath, ext); sniffErr == nil && !ok {
+		ec.debugf("archive %s: signature mismatch for %s, skipping (not a real archive)", ec.display, ext)
+		return archiveScan{}, errNotAnArchive
+	}
+	switch ext {
 	case ".zip":
 		return readZipCredentials(ctx, diskPath, ec, weight)
 	case ".rar":
@@ -218,9 +345,15 @@ func recurseNested(ctx context.Context, ec extractCtx, open func() (io.ReadClose
 	child := ec
 	child.depth++
 	child.display = display
+	// Re-point the live worker line at the nested archive while it is worked,
+	// then restore this level's label (and its extracting stage) once it
+	// returns so the line never reads as the parent "testing password".
+	ec.item(display)
 	// Nested progress rides on the spill credit above; weight 0 keeps the
 	// nested reader's own creditor from double-counting.
 	scan, err := readArchiveCredentials(ctx, tmp, child, 0)
+	ec.item(ec.display)
+	ec.stage(StageExtracting)
 	if err != nil {
 		if ctx.Err() != nil {
 			return scan, err
@@ -235,17 +368,27 @@ func recurseNested(ctx context.Context, ec extractCtx, open func() (io.ReadClose
 	return scan, nil
 }
 
+// readZipCredentials opens a single-file zip by path and hands its members to
+// readZipFiles. Split-zip sets reach readZipFiles via readSplitArchive instead,
+// using a concatenated ReaderAt, so the member-handling logic lives in one place.
 func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, weight int64) (archiveScan, error) {
 	zr, err := zipenc.OpenReader(diskPath)
 	if err != nil {
 		return archiveScan{}, err
 	}
 	defer zr.Close()
+	return readZipFiles(ctx, zr.File, ec, weight)
+}
 
+// readZipFiles classifies a zip's members (credential files vs nested archives),
+// resolves a single password against the smallest encrypted probe member, then
+// reads/recurses each. It is fed either a path-opened zip (readZipCredentials)
+// or a split set's concatenated reader (readSplitArchive).
+func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weight int64) (archiveScan, error) {
 	var credFiles, nestedFiles []*zipenc.File
 	var probe *zipenc.File
 	var uncompressed int64
-	for _, f := range zr.File {
+	for _, f := range files {
 		if f.FileInfo().IsDir() {
 			continue
 		}
@@ -258,7 +401,10 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 			continue
 		}
 		uncompressed += int64(f.UncompressedSize64)
-		if probe == nil && f.IsEncrypted() {
+		// Probe with the *smallest* encrypted member so StageTestingPassword
+		// stays a short blip even on a large (split) set, instead of decrypting
+		// the first (possibly huge) member once per candidate password.
+		if f.IsEncrypted() && (probe == nil || f.UncompressedSize64 < probe.UncompressedSize64) {
 			probe = f
 		}
 	}
@@ -266,13 +412,14 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 		return archiveScan{}, nil
 	}
 
-	// Resolve a single working password against the first encrypted member, then
-	// reuse it for all members. yeka/zip handles WinZip AES and legacy ZipCrypto.
+	// Resolve a single working password against the smallest encrypted member,
+	// then reuse it for all members. yeka/zip handles WinZip AES and legacy
+	// ZipCrypto.
 	pw := ""
 	if probe != nil {
 		ec.stage(StageTestingPassword)
-		ec.debugf("archive %s: resolving password against probe member %s (%d candidate(s))",
-			ec.display, filepath.Base(probe.Name), len(ec.passwords))
+		ec.debugf("archive %s: resolving password against probe member %s (%dB uncompressed, %d candidate(s))",
+			ec.display, filepath.Base(probe.Name), probe.UncompressedSize64, len(ec.passwords))
 		resolved, ok := resolveZipPassword(probe, ec.passwords)
 		if !ok {
 			return archiveScan{}, errPasswordNotFound
@@ -284,6 +431,13 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 	cr := newCreditor(ec.p, weight, scaleFor(weight, uncompressed))
 	defer cr.finish()
 
+	// Big top-level zips read their members through the shared pool; everything
+	// else (small archives, nested members below depth 0) stays on the
+	// sequential path so behavior and output order are unchanged.
+	if ec.parallelMembers(len(credFiles) + len(nestedFiles)) {
+		return readZipMembersParallel(ctx, credFiles, nestedFiles, ec, pw, cr)
+	}
+
 	var scan archiveScan
 	members := 0
 	for _, f := range credFiles {
@@ -292,24 +446,12 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 		}
 		members++
 		ec.heartbeat(members)
-		if f.IsEncrypted() {
-			f.SetPassword(pw)
+		o := readZipCredMember(ctx, f, ec, pw, cr)
+		for _, is := range o.issues {
+			ec.onIssue(is.path, is.kind, is.err)
 		}
-		rc, err := f.Open()
-		if err != nil {
-			// Member-level isolation: a single unreadable member never discards
-			// the rest of the archive.
-			ec.onIssue(ec.display+"!"+f.Name, IssueOpenError, err)
-			continue
-		}
-		creds, parseErr := ParseCredentials(countingReader{r: rc, c: cr}, ec.display+"!"+f.Name)
-		closeErr := rc.Close()
-		if parseErr != nil || closeErr != nil {
-			ec.onIssue(ec.display+"!"+f.Name, IssueParseError, firstErr(parseErr, closeErr))
-			continue
-		}
-		scan.files++
-		for _, c := range creds {
+		scan.add(o.scan)
+		for _, c := range o.creds {
 			ec.emit(c)
 		}
 	}
@@ -334,6 +476,97 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 		scan.add(ns)
 	}
 	return scan, nil
+}
+
+// readZipMembersParallel reads a top-level zip's credential members and nested
+// archives through the shared member pool. Each task collects into its own
+// outcome slot (lock-free), and results are merged in member order on return so
+// output is deterministic regardless of completion order. The credit (cr) is
+// the only shared sink touched concurrently and is atomic. Per-task stage/item
+// sinks are dropped so concurrent tasks never thrash the single worker slot; the
+// archive-level "extracting" stage set by the caller stands.
+func readZipMembersParallel(ctx context.Context, credFiles, nestedFiles []*zipenc.File, ec extractCtx, pw string, cr *creditor) (archiveScan, error) {
+	out := make([]memberOutcome, len(credFiles)+len(nestedFiles))
+	var members atomic.Int64
+	boundedForEach(ctx, ec.sem, len(out), func(i int) {
+		if ctx.Err() != nil {
+			out[i].ctxErr = ctx.Err()
+			return
+		}
+		ec.heartbeat(int(members.Add(1)))
+		if i < len(credFiles) {
+			out[i] = readZipCredMember(ctx, credFiles[i], ec, pw, cr)
+			return
+		}
+		out[i] = readZipNestedMember(ctx, nestedFiles[i-len(credFiles)], ec, pw, cr)
+	})
+	var scan archiveScan
+	for i := range out {
+		if out[i].ctxErr != nil {
+			return scan, out[i].ctxErr
+		}
+		for _, is := range out[i].issues {
+			ec.onIssue(is.path, is.kind, is.err)
+		}
+		scan.add(out[i].scan)
+		for _, c := range out[i].creds {
+			ec.emit(c)
+		}
+	}
+	return scan, nil
+}
+
+// readZipCredMember opens, decrypts and parses one credential member, returning
+// a self-contained outcome (no shared sinks touched except the atomic cr). A bad
+// member becomes an isolated issue and never discards the rest of the archive.
+func readZipCredMember(ctx context.Context, f *zipenc.File, ec extractCtx, pw string, cr *creditor) memberOutcome {
+	var o memberOutcome
+	name := ec.display + "!" + f.Name
+	if f.IsEncrypted() {
+		f.SetPassword(pw)
+	}
+	rc, err := f.Open()
+	if err != nil {
+		o.issues = append(o.issues, pendingIssue{name, IssueOpenError, err})
+		return o
+	}
+	creds, parseErr := ParseCredentials(countingReader{r: rc, c: cr}, name)
+	closeErr := rc.Close()
+	if parseErr != nil || closeErr != nil {
+		o.issues = append(o.issues, pendingIssue{name, IssueParseError, firstErr(parseErr, closeErr)})
+		return o
+	}
+	o.scan.files++
+	o.creds = creds
+	return o
+}
+
+// readZipNestedMember recurses into one nested archive member, collecting its
+// creds/issues into a task-local outcome. The live stage/item sinks are dropped
+// so concurrent nested tasks don't fight over the single worker slot; the
+// recursion runs sequentially (depth > 0, so parallelMembers is false).
+func readZipNestedMember(ctx context.Context, f *zipenc.File, ec extractCtx, pw string, cr *creditor) memberOutcome {
+	var o memberOutcome
+	taskEc := ec
+	taskEc.emit = func(c Credential) { o.creds = append(o.creds, c) }
+	taskEc.onIssue = func(p string, k IssueKind, e error) { o.issues = append(o.issues, pendingIssue{p, k, e}) }
+	taskEc.setStage = nil
+	taskEc.setItem = nil
+	member := f
+	open := func() (io.ReadCloser, error) {
+		if member.IsEncrypted() {
+			member.SetPassword(pw)
+		}
+		return member.Open()
+	}
+	ns, err := recurseNested(ctx, taskEc, open, member.Name, cr)
+	if err != nil {
+		o.ctxErr = err // ctx only
+		return o
+	}
+	ns.nestedArchives++
+	o.scan = ns
+	return o
 }
 
 // resolveZipPassword finds the first candidate that fully decrypts the
@@ -609,11 +842,26 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 	}
 }
 
+// readSevenZipCredentials reads a single-file 7z by path. The split-set caller
+// uses readSevenZip directly with a ReaderAt-backed factory.
 func readSevenZipCredentials(ctx context.Context, diskPath string, ec extractCtx, weight int64) (archiveScan, error) {
-	// One creditor for the item so password retries never over-credit. Each
-	// candidate is tried in a single pass; credentials/issues are buffered and
-	// only committed after every member decrypts and parses cleanly, so a wrong
-	// password (which fails mid-read) yields no partial/garbage output.
+	return readSevenZip(ctx, ec, weight, func(pw string) (*sevenzip.Reader, func() error, error) {
+		rc, err := sevenzip.OpenReaderWithPassword(diskPath, pw)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &rc.Reader, rc.Close, nil
+	})
+}
+
+// readSevenZip drives the password sweep over a 7z archive independent of where
+// the bytes come from. open(pw) returns a reader for one password attempt plus a
+// closer for that attempt; the path caller wraps OpenReaderWithPassword, the
+// split caller wraps NewReaderWithPassword over the concatenated parts. Each
+// candidate is tried in a single pass; credentials/issues are buffered and only
+// committed after every member decrypts and parses cleanly, so a wrong password
+// (which fails mid-read) yields no partial/garbage output.
+func readSevenZip(ctx context.Context, ec extractCtx, weight int64, open func(pw string) (*sevenzip.Reader, func() error, error)) (archiveScan, error) {
 	cr := newCreditor(ec.p, weight, 1)
 	defer cr.finish()
 
@@ -626,7 +874,7 @@ func readSevenZipCredentials(ctx context.Context, diskPath string, ec extractCtx
 		ec.stage(StageTestingPassword)
 		ec.debugf("archive %s: trying password %d/%d", ec.display, i+1, len(ec.passwords))
 		attemptStart := time.Now()
-		zr, err := sevenzip.OpenReaderWithPassword(diskPath, pw)
+		zr, closeReader, err := open(pw)
 		if err != nil {
 			lastErr = err // header-encrypted wrong password fails here
 			ec.debugf("archive %s: password %d/%d rejected after %s: %v",
@@ -642,7 +890,7 @@ func readSevenZipCredentials(ctx context.Context, diskPath string, ec extractCtx
 			bufIssues = append(bufIssues, pendingIssue{path, kind, err})
 		}
 		scan, hadMembers, streamErr := readSevenZipMembers(ctx, bufEc, zr, cr)
-		_ = zr.Close()
+		_ = closeReader()
 		if streamErr == nil {
 			if !hadMembers {
 				emptyArchive = true
@@ -672,7 +920,7 @@ func readSevenZipCredentials(ctx context.Context, diskPath string, ec extractCtx
 	return archiveScan{}, fmt.Errorf("%w: %v", errPasswordNotFound, lastErr)
 }
 
-func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.ReadCloser, cr *creditor) (archiveScan, bool, error) {
+func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader, cr *creditor) (archiveScan, bool, error) {
 	ec.stage(StageExtracting)
 	var scan archiveScan
 	hadMembers := false
@@ -717,4 +965,45 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.ReadCl
 		}
 	}
 	return scan, hadMembers, nil
+}
+
+// readSplitArchive reads a raw byte-split set (".zip.NNN" / ".7z.NNN") as one
+// logical archive. The ordered parts are presented as a single concatenated
+// io.ReaderAt (no temp reassembly), then dispatched to the same zip/7z member
+// logic the single-file path uses — so nested archives, the signature sniff,
+// password probing and the live worker line all apply unchanged. The logical
+// format is the parts' name with the ".NNN" suffix stripped.
+func readSplitArchive(ctx context.Context, parts []string, ec extractCtx, weight int64) (archiveScan, error) {
+	if ec.hb == nil && ec.debug != nil {
+		ec.hb = newDebugThrottle(5 * time.Second)
+	}
+	ra, err := openMultiPartReaderAt(parts)
+	if err != nil {
+		return archiveScan{}, err
+	}
+	defer ra.Close()
+
+	logical := strings.TrimSuffix(parts[0], filepath.Ext(parts[0])) // drop ".NNN"
+	ext := strings.ToLower(filepath.Ext(logical))
+	ec.debugf("archive %s: opening split set (%d parts, %s, weight=%dB)",
+		ec.display, len(parts), ext, weight)
+	switch ext {
+	case ".zip":
+		zr, err := zipenc.NewReader(ra, ra.Size())
+		if err != nil {
+			return archiveScan{}, err
+		}
+		return readZipFiles(ctx, zr.File, ec, weight)
+	case ".7z":
+		return readSevenZip(ctx, ec, weight, func(pw string) (*sevenzip.Reader, func() error, error) {
+			// ra is closed by this function's defer, not per attempt.
+			r, err := sevenzip.NewReaderWithPassword(ra, ra.Size(), pw)
+			if err != nil {
+				return nil, nil, err
+			}
+			return r, func() error { return nil }, nil
+		})
+	default:
+		return archiveScan{}, errNotAnArchive
+	}
 }

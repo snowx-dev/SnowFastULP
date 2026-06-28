@@ -505,7 +505,7 @@ func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW, tick int) strin
 	return sflMutedStyle.Render(marker) + " " +
 		sflSpinnerStyle.Render(workerSpinnerFrame(tick, w.Index)) + " " +
 		sflOkStyle.Render(stage) + "  " +
-		sflMutedStyle.Render(truncatePath(w.Path, pathW))
+		sflMutedStyle.Render(truncatePath(workerPathLabel(w.Path), pathW))
 }
 
 // termHeight is the terminal row count (stderr), defaulting to 24 when unknown
@@ -711,6 +711,22 @@ func baseName(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// workerPathLabel renders a worker slot's current archive for the live row.
+// While a worker is inside a nested archive the engine stores the raw
+// provenance ("outer.rar!sub/inner.7z"); collapse it to "outer ▸ inner" so the
+// line names the archive actually being worked, not just the top-level item.
+// Non-nested paths (no "!") are returned unchanged for the caller to truncate
+// as an ordinary path tail.
+func workerPathLabel(p string) string {
+	first := strings.IndexByte(p, '!')
+	if first < 0 {
+		return p
+	}
+	outer := baseName(p[:first])
+	inner := baseName(p[strings.LastIndexByte(p, '!')+1:])
+	return outer + " ▸ " + inner
 }
 
 func truncatePath(p string, max int) string {

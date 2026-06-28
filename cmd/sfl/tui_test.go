@@ -8,6 +8,26 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 )
 
+func TestWorkerPathLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"top level path unchanged", "/data/leak/outer.rar", "/data/leak/outer.rar"},
+		{"nested collapses to outer and inner", "/data/leak/outer.rar!sub/dir/inner.7z", "outer.rar ▸ inner.7z"},
+		{"nested inner without slash", "/data/outer.zip!inner.rar", "outer.zip ▸ inner.rar"},
+		{"deep nesting keeps outer and innermost", "/data/a.rar!mid/b.7z!deep/c.zip", "a.rar ▸ c.zip"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := workerPathLabel(tc.in); got != tc.want {
+				t.Fatalf("workerPathLabel(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderFinalSummaryShowsSnowFastLogStats(t *testing.T) {
 	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
 		FilesScanned:    4,

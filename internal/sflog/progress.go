@@ -255,6 +255,16 @@ func (p *Progress) setStage(idx int, stage WorkerStage) {
 	}
 }
 
+// setWorkerPath updates only the displayed path of an already-active worker
+// slot, leaving its stage intact. The recursive archive readers call this as
+// they descend into / return from nested archives so the live line names the
+// archive the worker is actually inside, not just the top-level item.
+func (p *Progress) setWorkerPath(idx int, path string) {
+	if s := p.slot(idx); s != nil {
+		s.path.Store(&path)
+	}
+}
+
 // clearActive marks worker idx idle once it finishes its current item.
 func (p *Progress) clearActive(idx int) {
 	if s := p.slot(idx); s != nil {
@@ -344,12 +354,13 @@ func (p *Progress) addLogDone() {
 
 // creditor maps bytes read for a single item onto that item's fixed weight so
 // progress never overshoots. zip/7z scale uncompressed reads onto the on-disk
-// weight; loose files and rar read byte-for-byte (scale 1).
+// weight; loose files and rar read byte-for-byte (scale 1). credited is atomic
+// so the zip member pool can credit concurrently from many goroutines.
 type creditor struct {
 	p        *Progress
 	weight   int64
 	scale    float64
-	credited int64
+	credited atomic.Int64
 }
 
 func newCreditor(p *Progress, weight int64, scale float64) *creditor {
@@ -359,29 +370,43 @@ func newCreditor(p *Progress, weight int64, scale float64) *creditor {
 	return &creditor{p: p, weight: weight, scale: scale}
 }
 
+// add credits readBytes (scaled) toward the item's weight, clamped so concurrent
+// callers can never overshoot. The CAS loop makes the clamp atomic with respect
+// to other workers crediting the same item.
 func (c *creditor) add(readBytes int64) {
 	if c == nil || readBytes <= 0 {
 		return
 	}
-	inc := int64(float64(readBytes) * c.scale)
-	if c.credited+inc > c.weight {
-		inc = c.weight - c.credited
-	}
-	if inc <= 0 {
+	want := int64(float64(readBytes) * c.scale)
+	if want <= 0 {
 		return
 	}
-	c.credited += inc
-	c.p.add(inc)
+	for {
+		cur := c.credited.Load()
+		inc := want
+		if cur+inc > c.weight {
+			inc = c.weight - cur
+		}
+		if inc <= 0 {
+			return
+		}
+		if c.credited.CompareAndSwap(cur, cur+inc) {
+			c.p.add(inc)
+			return
+		}
+	}
 }
 
 // finish credits any rounding/shortfall remainder so each item contributes
-// exactly its weight even on early stops or skipped members.
+// exactly its weight even on early stops or skipped members. Called once per
+// item after its (possibly parallel) member pass has joined, so it is not
+// contended; a plain Add keeps the books straight.
 func (c *creditor) finish() {
 	if c == nil {
 		return
 	}
-	if rem := c.weight - c.credited; rem > 0 {
-		c.credited += rem
+	if rem := c.weight - c.credited.Load(); rem > 0 {
+		c.credited.Add(rem)
 		c.p.add(rem)
 	}
 }

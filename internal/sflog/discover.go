@@ -18,7 +18,7 @@ func walkSources(root string, onFound func(path string, isArchive bool)) error {
 	}
 	if !info.IsDir() {
 		switch {
-		case isArchiveFile(root):
+		case isArchiveFile(root) || isSplitArchivePart(root):
 			onFound(root, true)
 		case isPasswordFile(root):
 			onFound(root, false)
@@ -33,7 +33,7 @@ func walkSources(root string, onFound func(path string, isArchive bool)) error {
 			return nil
 		}
 		switch {
-		case isArchiveFile(path):
+		case isArchiveFile(path) || isSplitArchivePart(path):
 			onFound(path, true)
 		case isPasswordFile(path):
 			onFound(path, false)

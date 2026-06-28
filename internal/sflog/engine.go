@@ -44,6 +44,12 @@ type Engine struct {
 	// instead of flipping to Done, so an -od caller can hand straight off to the
 	// ingest phase without a transient "COMPLETE" frame.
 	FollowedByIngest bool
+
+	// memberSem is the engine-wide member-parallelism budget, allocated in Run
+	// sized to the worker count and shared by every top-level archive so a big
+	// zip can read its members concurrently without total CPU work exceeding the
+	// worker budget. nil until Run sets it.
+	memberSem chan struct{}
 }
 
 type workKind int
@@ -53,18 +59,29 @@ const (
 	kindArchive
 )
 
+// assemblyKind tells processArchive how a multi-part archive item's volumes
+// combine into one logical archive.
+type assemblyKind int
+
+const (
+	assemblySingle     assemblyKind = iota // path is the whole archive (volumes unused)
+	assemblyRarVolumes                     // .partN.rar set, read via rardecode.OpenReader
+	assemblySplitParts                     // raw byte-split (.zip.NNN/.7z.NNN), read via a concatenated reader
+)
+
 type workItem struct {
 	path   string
 	kind   workKind
 	weight int64
 	logKey string // identifies the parent "log" unit this item belongs to
-	// volumes, when len > 1, holds the ordered on-disk parts of a multi-volume
-	// RAR set (path is volumes[0]); such items are read via the volume-following
-	// reader. Empty/single-element for ordinary single-file archives.
-	volumes []string
-	// missingFirstVolume marks an orphaned RAR continuation part (e.g. a
-	// stray .part2.rar with no .part1.rar); it is reported as a skip rather than
-	// opened.
+	// volumes, when len > 1, holds the ordered on-disk parts of a multi-part
+	// set (path is volumes[0]); assembly says how to combine them. Empty for
+	// ordinary single-file archives.
+	volumes  []string
+	assembly assemblyKind
+	// missingFirstVolume marks an orphaned continuation part (e.g. a stray
+	// .part2.rar with no .part1.rar, or an incomplete .zip.NNN set); it is
+	// reported as a skip rather than opened.
 	missingFirstVolume bool
 }
 
@@ -167,6 +184,10 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	if e.Progress != nil {
 		e.Progress.SetWorkers(workers)
 	}
+	// Shared member-parallelism budget: a big zip's member pool draws from the
+	// same slots as the top-level workers, so total in-flight extraction work
+	// stays bounded by the worker count.
+	e.memberSem = make(chan struct{}, workers)
 
 	// runCtx lets the writer abort the workers: if the output write fails, the
 	// writer stops draining `lines`, so without cancellation workers would
@@ -363,13 +384,18 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		onIssue:   onIssue,
 		p:         e.Progress,
 		setStage:  func(s WorkerStage) { e.Progress.setStage(idx, s) },
+		setItem:   func(label string) { e.Progress.setWorkerPath(idx, label) },
 		debug:     e.Debug,
+		sem:       e.memberSem,
 	}
 	var scan archiveScan
 	var err error
-	if len(it.volumes) > 1 {
+	switch it.assembly {
+	case assemblyRarVolumes:
 		scan, err = readRarVolumes(ctx, it.volumes, ec, it.weight)
-	} else {
+	case assemblySplitParts:
+		scan, err = readSplitArchive(ctx, it.volumes, ec, it.weight)
+	default:
 		scan, err = readArchiveCredentials(ctx, it.path, ec, it.weight)
 	}
 	acc.filesScanned.Add(int64(scan.files))
@@ -479,7 +505,7 @@ func buildWorklist(input string, prog *Progress) ([]workItem, error) {
 		items = append(items, workItem{path: f, kind: kindFile, weight: fileWeight(f), logKey: logGroupKey(absRoot, rootIsDir, f)})
 	}
 	keyOf := func(a string) string { return logGroupKey(absRoot, rootIsDir, a) }
-	items = append(items, groupRarVolumes(archivesP, fileWeight, keyOf)...)
+	items = append(items, groupArchiveVolumes(archivesP, fileWeight, keyOf)...)
 	return items, nil
 }
 

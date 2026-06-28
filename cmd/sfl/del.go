@@ -34,9 +34,10 @@ func deleteParsedSources(inputRoot string, results []sflog.SourceResult, protect
 
 	if !info.IsDir() {
 		if len(results) == 1 && results[0].OK && !results[0].HadIssue && !isProtected(absRoot, prot) {
-			// Capture any multi-volume siblings before removing the first part,
-			// then remove the rest of the set too (best-effort).
-			vols := sflog.RarVolumeSet(absRoot)
+			// Capture any multi-part siblings (rar volumes or split .NNN parts)
+			// before removing the first part, then remove the rest of the set
+			// too (best-effort).
+			vols := sflog.VolumeSet(absRoot)
 			if err := os.Remove(absRoot); err != nil {
 				return nil, err
 			}
@@ -100,7 +101,7 @@ func deleteParsedSources(inputRoot string, results []sflog.SourceResult, protect
 			}
 			removed = append(removed, g.child)
 		} else {
-			vols := sflog.RarVolumeSet(g.child)
+			vols := sflog.VolumeSet(g.child)
 			if err := os.Remove(g.child); err != nil {
 				return removed, err
 			}
@@ -111,9 +112,10 @@ func deleteParsedSources(inputRoot string, results []sflog.SourceResult, protect
 	return removed, nil
 }
 
-// removeVolumeSiblings removes every multi-volume RAR part in `vols` other than
-// `keep` (which the caller has already deleted). Missing parts are ignored so a
-// partially extracted set still cleans up what remains.
+// removeVolumeSiblings removes every multi-part sibling in `vols` (rar volumes
+// or split .NNN parts) other than `keep` (which the caller has already deleted).
+// Missing parts are ignored so a partially extracted set still cleans up what
+// remains.
 func removeVolumeSiblings(vols []string, keep string) []string {
 	var removed []string
 	for _, v := range vols {
