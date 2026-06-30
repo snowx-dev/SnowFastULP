@@ -2,4 +2,5 @@
 
 package console
 
-func platformEnableVT() {}
+// Unix terminals process ANSI natively, so VT is always available.
+func platformEnableVT() bool { return true }

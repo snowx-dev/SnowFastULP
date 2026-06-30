@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
@@ -202,14 +203,98 @@ func applyStderrColorProfile() {
 }
 
 func termWidth() int {
+	if w := termWidthFull(); w < sflDisplayWidth {
+		return w
+	}
+	return sflDisplayWidth
+}
+
+// termWidthFull is the real terminal width, uncapped. The boxes clamp to
+// sflDisplayWidth for readability, but the muted issue block above them is free
+// to use all the real estate so long provenance lines truncate as late as
+// possible. Falls back to sflDisplayWidth when the size can't be read.
+func termWidthFull() int {
 	w, _, err := term.GetSize(int(os.Stderr.Fd()))
 	if err != nil || w <= 0 {
 		return sflDisplayWidth
 	}
-	if w > sflDisplayWidth {
-		return sflDisplayWidth
-	}
 	return w
+}
+
+// tuiVisibleWidth counts a string's printable columns, skipping ANSI SGR
+// escapes so styled lines measure by what the terminal actually shows.
+func tuiVisibleWidth(s string) int {
+	b := []byte(s)
+	i, n := 0, 0
+	for i < len(b) {
+		if b[i] == '\033' && i+1 < len(b) && b[i+1] == '[' {
+			i += 2
+			for i < len(b) && b[i] != 'm' {
+				i++
+			}
+			if i < len(b) {
+				i++
+			}
+			continue
+		}
+		_, sz := utf8.DecodeRune(b[i:])
+		if sz == 0 {
+			i++
+			continue
+		}
+		i += sz
+		n++
+	}
+	return n
+}
+
+// trimToDisplayWidth clamps a (possibly ANSI-styled) line to max printable
+// columns, preserving escape sequences and appending an ellipsis. Frame rows are
+// run through this before tuiframe.Compose so a line never exceeds the terminal
+// width and soft-wraps (which would desync Compose's per-row cursor math and
+// reintroduce ghosting on narrow terminals).
+func trimToDisplayWidth(s string, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	if tuiVisibleWidth(s) <= max {
+		return s
+	}
+	var b strings.Builder
+	v := 0
+	bytes := []byte(s)
+	i := 0
+	for i < len(bytes) {
+		if bytes[i] == '\033' && i+1 < len(bytes) && bytes[i+1] == '[' {
+			j := i + 2
+			for j < len(bytes) && bytes[j] != 'm' {
+				j++
+			}
+			if j < len(bytes) {
+				b.Write(bytes[i : j+1])
+				i = j + 1
+			} else {
+				i = j
+			}
+			continue
+		}
+		if v >= max-1 {
+			break
+		}
+		r, sz := utf8.DecodeRune(bytes[i:])
+		if sz == 0 {
+			i++
+			continue
+		}
+		b.Write(bytes[i : i+sz])
+		i += sz
+		if r != utf8.RuneError {
+			v++
+		}
+	}
+	b.WriteString("\033[0m")
+	b.WriteString("…")
+	return b.String()
 }
 
 // gradientBar renders an icy progress bar with a right-aligned percent suffix.
@@ -279,10 +364,18 @@ func (f *stderrFrame) draw(lines []string) {
 		b.WriteString(altScreenEnter + ansiHideCursor)
 		f.altOn = true
 	}
+	// Clamp every row to the terminal width before composing: a row wider than
+	// the terminal soft-wraps, which desyncs Compose's per-row cursor math and
+	// reintroduces ghosting on terminals narrower than the box floor.
+	w := termWidth()
+	clamped := make([]string, len(lines))
+	for i, ln := range lines {
+		clamped[i] = trimToDisplayWidth(ln, w)
+	}
 	// Clamp to one row shy of the terminal height so the worker panel can't
 	// scroll the buffer on short terminals; Compose erases any rows a taller
 	// previous frame (e.g. the extracting panel) left behind.
-	b.WriteString(tuiframe.Compose(lines, termHeight()-1))
+	b.WriteString(tuiframe.Compose(clamped, termHeight()-1))
 	fmt.Fprint(os.Stderr, b.String())
 }
 
@@ -314,7 +407,16 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 		cur := prog.DoneBytes()
 		if !prevAt.IsZero() {
 			if dt := now.Sub(prevAt).Seconds(); dt >= 0.05 {
-				rate = float64(cur-prevBytes) / dt
+				inst := float64(cur-prevBytes) / dt
+				// EMA smooths the bursty per-tick delta (tiny files scream, a big
+				// single stream crawls) so the rate and its ETA read steadily
+				// instead of jumping every tick.
+				const emaAlpha = 0.3
+				if rate == 0 {
+					rate = inst
+				} else {
+					rate = emaAlpha*inst + (1-emaAlpha)*rate
+				}
 			}
 		}
 		prevAt, prevBytes = now, cur
@@ -407,9 +509,10 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, t
 		counts := fmt.Sprintf("%s / %s logs  ·  %s unique  ·  %s dupes",
 			formatInt(int(prog.Logs())), formatInt(int(prog.LogsTotal())),
 			formatInt(int(prog.Emitted())), formatInt(int(prog.Duplicates())))
-		detail := sflMutedStyle.Render(fmt.Sprintf("%s files · %s archives · %s / %s · %s/s",
+		detail := sflMutedStyle.Render(fmt.Sprintf("%s files · %s archives · %s / %s · %s/s%s",
 			formatInt(int(prog.Files())), formatInt(int(prog.Archives())),
-			formatBytes(prog.DoneBytes()), formatBytes(prog.Total()), formatBytes(int64(rate))))
+			formatBytes(prog.DoneBytes()), formatBytes(prog.Total()), formatBytes(int64(rate)),
+			formatETA(prog.Total()-prog.DoneBytes(), rate)))
 		body = []string{bar, counts, detail}
 		// Surface the concurrent workers: a per-slot panel makes the
 		// parallelism visible even when the byte bar crawls. Falls back to the
@@ -474,7 +577,12 @@ func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner, tick int) [
 	}
 	idxMarkerW := lipgloss.Width(fmt.Sprintf("[%d]", total))
 	out := make([]string, 0, len(active)+1)
-	out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d of %d workers active", len(active), total)))
+	// Only call out the worker count when 2+ are genuinely busy: a single active
+	// row reading "1 of N workers active" makes a (correctly) one-stream archive
+	// look like wasted cores, so collapse to just the row in that case.
+	if len(active) >= 2 {
+		out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d of %d workers active", len(active), total)))
+	}
 	for _, w := range active {
 		out = append(out, renderSflWorkerRow(w, inner, idxMarkerW, tick))
 	}
@@ -563,22 +671,6 @@ func recapCountRows(stats sflog.ExtractStats) []string {
 	}
 }
 
-// recapIssueBlock is the per-kind fail lines, set off by a leading blank when
-// present so they breathe below the metric block. nil when there are none.
-func recapIssueBlock(stats sflog.ExtractStats) []string {
-	issues := issueLines(stats)
-	if len(issues) == 0 {
-		return nil
-	}
-	return append([]string{""}, issues...)
-}
-
-// summaryRecap is the shared extraction recap reused by the classic and
-// no-ingest frames: the metric block followed by any issue lines.
-func summaryRecap(stats sflog.ExtractStats) []string {
-	return append(recapCountRows(stats), recapIssueBlock(stats)...)
-}
-
 func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
 	return renderFinalSummaryWithNotice(outPath, stats, nil)
 }
@@ -586,8 +678,9 @@ func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
 func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
-	body := append(summaryRecap(stats), "", sflMutedStyle.Render("Output: ")+outPath)
-	return frameWithFooter(title, insetBox(sflBoxStyle, body, width), width, summaryFooterLines(width, notice))
+	body := append(recapCountRows(stats), "", sflMutedStyle.Render("Output: ")+outPath)
+	box := append(mutedAbove(stats, termWidthFull()), insetBox(sflBoxStyle, body, width)...)
+	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
 
 // renderNoIngestSummary is the -od frame when extraction produced no
@@ -600,12 +693,13 @@ func renderNoIngestSummary(libraryDir string, stats sflog.ExtractStats) []string
 func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
-	body := append(summaryRecap(stats),
+	body := append(recapCountRows(stats),
 		"",
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
-	return frameWithFooter(title, insetBox(sflBoxStyle, body, width), width, summaryFooterLines(width, notice))
+	box := append(mutedAbove(stats, termWidthFull()), insetBox(sflBoxStyle, body, width)...)
+	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
 
 // renderIngestSummary is the -od completion frame: the same extraction recap,
@@ -619,16 +713,16 @@ func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib
 func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
-	// Ingested sits with the counts (before issues); Library path closes the box.
+	// Box holds clean stats only: counts, the Ingested row, and the library path.
+	// Failures/skips live in the muted block above; the running library total
+	// gets its own box below (mirrors sfu's renderODSummary).
 	body := append(recapCountRows(stats),
 		recapRow("Ingested", sflOkStyle.Render(formatInt(int(newToLib)))+
 			sflMutedStyle.Render(" new  ·  "+formatInt(int(alreadyInLib))+" already in library")),
 	)
-	body = append(body, recapIssueBlock(stats)...)
 	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
-	// The running library total gets its own box below the recap (mirrors sfu's
-	// renderODSummary) so the headline post-ingest number stands on its own.
-	box := append(insetBox(sflBoxStyle, body, width), "")
+	box := append(mutedAbove(stats, termWidthFull()), insetBox(sflBoxStyle, body, width)...)
+	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
@@ -664,46 +758,84 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-// issueLines summarises non-fatal problems for the analyst: bad passwords,
-// parse failures, and sources that yielded no ULP, with a few example paths.
-// Each label is pluralised by count so a single fail never reads as "1 errors".
-func issueLines(stats sflog.ExtractStats) []string {
-	var lines []string
+// maxAboveExamples caps how many concrete example paths are listed under each
+// issue header above the box. The exact per-kind counters drive "+N more", so
+// no failure is ever hidden even though only a few paths are shown.
+const maxAboveExamples = 5
+
+// issueProvenance renders an issue path so the analyst sees exactly what failed
+// and where: a nested member ("outer.rar!sub/inner.rar") collapses to
+// "inner.rar  —  in outer.rar"; a top-level source shows just its name.
+func issueProvenance(path string) string {
+	first := strings.IndexByte(path, '!')
+	if first < 0 {
+		return baseName(path)
+	}
+	outer := baseName(path[:first])
+	inner := baseName(path[strings.LastIndexByte(path, '!')+1:])
+	return inner + "  —  in " + outer
+}
+
+// clampHead trims s to at most max runes, keeping the start (the file name) and
+// marking the cut with an ellipsis, so a pathological member name can't
+// soft-wrap the muted block across the terminal.
+func clampHead(s string, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max == 1 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
+}
+
+// mutedIssueBlock is the grey warnings/errors block printed ABOVE the summary
+// box. Each non-zero issue kind gets a header line plus a few indented example
+// paths (full provenance), with the exact counter driving "+N more". Labels are
+// pluralised so a single fail never reads as "1 errors". Returns nil for a clean
+// run so the frame shows no empty gap.
+func mutedIssueBlock(stats sflog.ExtractStats, width int) []string {
+	var out []string
+	budget := width - sflLeftPad - 2
 	add := func(n int, kind sflog.IssueKind, one, many string) {
 		if n <= 0 {
 			return
 		}
-		lines = append(lines, sflWarnStyle.Render(fmt.Sprintf("! %s %s", formatInt(n), plural(n, one, many)))+
-			exampleSuffix(stats, kind, n))
+		out = append(out, sflIndent+sflMutedStyle.Render(fmt.Sprintf("! %s %s", formatInt(n), plural(n, one, many))))
+		shown := 0
+		for _, is := range stats.Issues {
+			if is.Kind != kind || shown >= maxAboveExamples {
+				continue
+			}
+			out = append(out, sflIndent+"  "+sflMutedStyle.Render(clampHead(issueProvenance(is.Path), budget)))
+			shown++
+		}
+		if n > shown {
+			out = append(out, sflIndent+"  "+sflMutedStyle.Render(fmt.Sprintf("+%s more", formatInt(n-shown))))
+		}
 	}
 	add(stats.PasswordNotFound, sflog.IssuePasswordNotFound, "password not found", "passwords not found")
 	add(stats.ParseErrors, sflog.IssueParseError, "parse error", "parse errors")
 	add(stats.OpenErrors, sflog.IssueOpenError, "open error", "open errors")
+	add(stats.MissingVolumes, sflog.IssueMissingVolume, "incomplete set", "incomplete sets")
 	add(stats.NoULP, sflog.IssueNoULP, "source with no ULP", "sources with no ULP")
-	return lines
+	return out
 }
 
-// exampleSuffix lists a couple of example paths for an issue kind. total is the
-// true count (not the capped example count) so "+N more" is accurate.
-func exampleSuffix(stats sflog.ExtractStats, kind sflog.IssueKind, total int) string {
-	const maxShown = 2
-	var shown []string
-	for _, is := range stats.Issues {
-		if is.Kind != kind {
-			continue
-		}
-		if len(shown) < maxShown {
-			shown = append(shown, baseName(is.Path))
-		}
+// mutedAbove is the muted issue block plus a double trailing blank that sets the
+// bad news apart from the boxes below, so the eye settles on the good-news stats
+// rather than the warnings. Returns nil when there are no issues (so a clean
+// run's layout is unchanged). Prepended to the box lines by the completion frames.
+func mutedAbove(stats sflog.ExtractStats, width int) []string {
+	block := mutedIssueBlock(stats, width)
+	if len(block) == 0 {
+		return nil
 	}
-	if len(shown) == 0 {
-		return ""
-	}
-	suffix := ": " + strings.Join(shown, ", ")
-	if total > len(shown) {
-		suffix += fmt.Sprintf(" (+%s more)", formatInt(total-len(shown)))
-	}
-	return sflMutedStyle.Render(suffix)
+	return append(block, "", "")
 }
 
 func baseName(p string) string {
@@ -733,10 +865,13 @@ func truncatePath(p string, max int) string {
 	if max < 8 {
 		max = 8
 	}
-	if len(p) <= max {
+	// Count and slice on rune boundaries so a UTF-8 path (or the "▸" nested
+	// separator) is never cut mid-rune into mojibake.
+	r := []rune(p)
+	if len(r) <= max {
 		return p
 	}
-	return "…" + p[len(p)-(max-1):]
+	return "…" + string(r[len(r)-(max-1):])
 }
 
 func formatDuration(d time.Duration) string {
@@ -748,6 +883,22 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 	}
 	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// formatETA renders a muted "  ·  ETA <d>" suffix for the extract detail line,
+// or "" when an estimate would mislead: unknown total / near-complete (rem<=0),
+// a stalled or not-yet-measured rate (<=1 B/s), or an absurdly long horizon
+// from an early near-zero rate. It converges on the long single-archive tail,
+// which is exactly when users stare at it.
+func formatETA(remaining int64, rate float64) string {
+	if remaining <= 0 || rate <= 1 {
+		return ""
+	}
+	secs := float64(remaining) / rate
+	if secs < 1 || secs >= 99*3600 {
+		return ""
+	}
+	return "  ·  ETA " + formatDuration(time.Duration(secs * float64(time.Second)))
 }
 
 func formatBytes(n int64) string {

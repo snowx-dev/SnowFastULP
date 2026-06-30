@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
@@ -45,11 +46,13 @@ type Engine struct {
 	// ingest phase without a transient "COMPLETE" frame.
 	FollowedByIngest bool
 
-	// memberSem is the engine-wide member-parallelism budget, allocated in Run
-	// sized to the worker count and shared by every top-level archive so a big
-	// zip can read its members concurrently without total CPU work exceeding the
-	// worker budget. nil until Run sets it.
-	memberSem chan struct{}
+	// extractSem is the engine-wide extraction budget (cap = worker count),
+	// allocated in Run. Every worker holds one slot while processing an item;
+	// when a worker parks to fan a big zip's members out through the same
+	// semaphore it releases its slot first, so the members reuse that freed core
+	// and total in-flight extraction work never exceeds the worker count (no 2x
+	// oversubscription). nil until Run sets it.
+	extractSem chan struct{}
 }
 
 type workKind int
@@ -184,10 +187,13 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	if e.Progress != nil {
 		e.Progress.SetWorkers(workers)
 	}
-	// Shared member-parallelism budget: a big zip's member pool draws from the
-	// same slots as the top-level workers, so total in-flight extraction work
-	// stays bounded by the worker count.
-	e.memberSem = make(chan struct{}, workers)
+	// Shared extraction budget: workers hold a slot per item and lend it to a
+	// big zip's member pool while parked, so total in-flight extraction work
+	// stays bounded by the worker count. Pre-set only by tests that sample
+	// occupancy; production always allocates it here.
+	if e.extractSem == nil {
+		e.extractSem = make(chan struct{}, workers)
+	}
 
 	// runCtx lets the writer abort the workers: if the output write fails, the
 	// writer stops draining `lines`, so without cancellation workers would
@@ -215,15 +221,24 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	var workerWG sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		workerWG.Add(1)
-		go func(workerIdx int) {
+		go func() {
 			defer workerWG.Done()
 			for it := range jobs {
 				if runCtx.Err() != nil {
 					continue
 				}
-				e.process(runCtx, workerIdx, it, lines, &acc)
+				// Hold one extraction slot for this item; a parallel zip lends
+				// it to its member pool (see readZipFiles) so the budget is
+				// global, not additive. The matching live-status slot is leased
+				// per item (not pinned to this goroutine) so dispatched members
+				// and password probes get their own rows in the panel.
+				e.extractSem <- struct{}{}
+				slot := e.Progress.acquireSlot()
+				e.process(runCtx, slot, it, lines, &acc)
+				e.Progress.releaseSlot(slot)
+				<-e.extractSem
 			}
-		}(i)
+		}()
 	}
 
 feed:
@@ -273,7 +288,8 @@ func (e *Engine) process(ctx context.Context, idx int, it workItem, lines chan<-
 	if e.Progress != nil {
 		e.Progress.setCurrent(it.path)
 		e.Progress.setActive(idx, it.path, StageOpening)
-		defer e.Progress.clearActive(idx)
+		// The slot is cleared and returned to the free-list by releaseSlot in
+		// the worker loop once this item finishes, so no clearActive here.
 	}
 	switch it.kind {
 	case kindArchive:
@@ -352,8 +368,20 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		}
 		return
 	}
-	var collected []Credential
-	emit := func(c Credential) { collected = append(collected, c) }
+	// Stream credentials straight to the writer instead of buffering the whole
+	// archive tree: zip resolves its password up front and rar/7z buffer-and-
+	// commit internally, so by the time emit fires the data is already
+	// validated. emit runs only on this worker goroutine (sequential loops, the
+	// rar/7z commit loop, and the parallel chunk merge), so emitted is a plain
+	// int. This caps per-archive memory instead of holding every credential.
+	var emitted int
+	emit := func(c Credential) {
+		select {
+		case <-ctx.Done():
+		case lines <- FormatULPLine(c, e.NoURI):
+			emitted++
+		}
+	}
 	// onIssue records a per-member problem (e.g. a nested archive whose password
 	// was not found) without aborting the parent archive or the run. hadIssue
 	// then keeps the source out of -del so un-extracted data is never discarded.
@@ -386,7 +414,15 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		setStage:  func(s WorkerStage) { e.Progress.setStage(idx, s) },
 		setItem:   func(label string) { e.Progress.setWorkerPath(idx, label) },
 		debug:     e.Debug,
-		sem:       e.memberSem,
+		sem:       e.extractSem,
+		processor: defaultProcessor,
+	}
+	// One heartbeat throttle per top-level item, shared across the whole
+	// recursion. Set here (not just in readArchiveCredentials) so the
+	// multi-volume and split paths -- which dispatch directly below and are the
+	// longest-running archives -- still emit "still extracting" lines.
+	if e.Debug != nil {
+		ec.hb = newDebugThrottle(5 * time.Second)
 	}
 	var scan archiveScan
 	var err error
@@ -421,8 +457,7 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		acc.addResult(it.path, true, false, hadIssue)
 		return
 	}
-	e.emitAll(ctx, lines, collected)
-	if len(collected) == 0 {
+	if emitted == 0 {
 		acc.noULP.Add(1)
 		acc.addIssue(it.path, IssueNoULP, nil)
 		if e.Debug != nil {
@@ -430,9 +465,9 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		}
 	}
 	acc.addResult(it.path, true, true, hadIssue)
-	if e.Debug != nil && len(collected) > 0 {
+	if e.Debug != nil && emitted > 0 {
 		e.Debug("archive %s: %d credentials across %d file(s), %d nested archive(s)",
-			it.path, len(collected), scan.files, scan.nestedArchives)
+			it.path, emitted, scan.files, scan.nestedArchives)
 	}
 }
 

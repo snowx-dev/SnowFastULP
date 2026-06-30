@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 )
@@ -180,6 +182,52 @@ func TestRenderSflWorkerPanelShowsConcurrentStages(t *testing.T) {
 	}
 }
 
+// TestRenderSflWorkerPanelHidesHeaderWhenOne proves a single active row drops
+// the "N of M workers active" header (so a correctly one-stream archive doesn't
+// look like wasted cores) but still shows the worker row, and that 2+ active
+// restores the honest count.
+func TestRenderSflWorkerPanelHidesHeaderWhenOne(t *testing.T) {
+	one := []sflog.ActiveWorker{{Index: 0, Path: "/data/big.rar", Stage: sflog.StageExtracting}}
+	joined := strings.Join(renderSflWorkerPanel(one, 16, 72, 0), "\n")
+	if strings.Contains(joined, "workers active") {
+		t.Fatalf("single active worker must not show the count header:\n%s", joined)
+	}
+	if !strings.Contains(joined, "extracting") || !strings.Contains(joined, "[1]") {
+		t.Fatalf("single worker row missing:\n%s", joined)
+	}
+	two := append(one, sflog.ActiveWorker{Index: 1, Path: "/data/b.zip", Stage: sflog.StageParsing})
+	if j := strings.Join(renderSflWorkerPanel(two, 16, 72, 0), "\n"); !strings.Contains(j, "2 of 16 workers active") {
+		t.Fatalf("two active workers must show the count header:\n%s", j)
+	}
+}
+
+// TestFormatETA covers the hide/show rules: hidden during discovery (no total ->
+// non-positive remaining), near-complete, a stalled/unmeasured rate, and an
+// absurd horizon; shown with a steady rate.
+func TestFormatETA(t *testing.T) {
+	cases := []struct {
+		name      string
+		remaining int64
+		rate      float64
+		wantETA   bool
+	}{
+		{"near-complete", 0, 10 << 20, false},
+		{"discovery-negative", -5, 10 << 20, false},
+		{"stalled-rate", 5 << 20, 0.5, false},
+		{"absurd-horizon", int64(99*3600) * 4, 2, false},
+		{"steady", 100 << 20, 10 << 20, true}, // ~10s
+	}
+	for _, c := range cases {
+		got := formatETA(c.remaining, c.rate)
+		if c.wantETA && !strings.Contains(got, "ETA ") {
+			t.Errorf("%s: formatETA(%d,%v)=%q, want an ETA", c.name, c.remaining, c.rate, got)
+		}
+		if !c.wantETA && got != "" {
+			t.Errorf("%s: formatETA(%d,%v)=%q, want empty", c.name, c.remaining, c.rate, got)
+		}
+	}
+}
+
 func TestRenderSflWorkerRowAnimatesSpinner(t *testing.T) {
 	w := sflog.ActiveWorker{Index: 0, Path: "/data/a.zip", Stage: sflog.StageExtracting}
 	// Successive ticks must change the braille spinner glyph so the row reads as
@@ -269,25 +317,130 @@ func TestRenderFinalSummaryReportsSkippedCount(t *testing.T) {
 	}
 }
 
-func TestIssueLinesPluralizeByCount(t *testing.T) {
-	one := strings.Join(issueLines(sflog.ExtractStats{
-		ParseErrors: 1, OpenErrors: 1, PasswordNotFound: 1, NoULP: 1,
-	}), "\n")
-	for _, want := range []string{"1 parse error", "1 open error", "1 password not found", "1 source with no ULP"} {
+func TestMutedIssueBlockPluralizeByCount(t *testing.T) {
+	one := strings.Join(mutedIssueBlock(sflog.ExtractStats{
+		ParseErrors: 1, OpenErrors: 1, PasswordNotFound: 1, MissingVolumes: 1, NoULP: 1,
+	}, 80), "\n")
+	for _, want := range []string{"1 parse error", "1 open error", "1 password not found", "1 incomplete set", "1 source with no ULP"} {
 		if !strings.Contains(one, want) {
 			t.Fatalf("singular issue label missing %q:\n%s", want, one)
 		}
 	}
-	if strings.Contains(one, "errors") || strings.Contains(one, "passwords") || strings.Contains(one, "sources") {
+	if strings.Contains(one, "errors") || strings.Contains(one, "passwords") || strings.Contains(one, "sets") || strings.Contains(one, "sources") {
 		t.Fatalf("singular counts should not pluralize:\n%s", one)
 	}
 
-	many := strings.Join(issueLines(sflog.ExtractStats{
-		ParseErrors: 3, OpenErrors: 2, PasswordNotFound: 4, NoULP: 5,
-	}), "\n")
-	for _, want := range []string{"3 parse errors", "2 open errors", "4 passwords not found", "5 sources with no ULP"} {
+	many := strings.Join(mutedIssueBlock(sflog.ExtractStats{
+		ParseErrors: 3, OpenErrors: 2, PasswordNotFound: 4, MissingVolumes: 6, NoULP: 5,
+	}, 80), "\n")
+	for _, want := range []string{"3 parse errors", "2 open errors", "4 passwords not found", "6 incomplete sets", "5 sources with no ULP"} {
 		if !strings.Contains(many, want) {
 			t.Fatalf("plural issue label missing %q:\n%s", want, many)
+		}
+	}
+}
+
+// TestSummaryIssuesAppearAboveBoxMuted proves failures render in the grey block
+// ABOVE the stats box (not inside it), carry the muted style rather than the
+// yellow warn style, and show full inner/outer provenance.
+func TestSummaryIssuesAppearAboveBoxMuted(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	lines := renderIngestSummary("/data/Library", 1000, 1, 1, sflog.ExtractStats{
+		Logs: 1, Credentials: 1, Emitted: 1,
+		PasswordNotFound: 2,
+		Issues: []sflog.Issue{
+			{Path: "/logs/a.rar!sub/locked.zip", Kind: sflog.IssuePasswordNotFound},
+			{Path: "/logs/b.rar!sub/sealed.7z", Kind: sflog.IssuePasswordNotFound},
+		},
+	})
+
+	headerIdx, borderIdx := -1, -1
+	for i, ln := range lines {
+		if headerIdx < 0 && strings.Contains(ln, "passwords not found") {
+			headerIdx = i
+		}
+		if borderIdx < 0 && strings.Contains(ln, "╭") {
+			borderIdx = i
+		}
+	}
+	joined := strings.Join(lines, "\n")
+	if headerIdx < 0 || borderIdx < 0 {
+		t.Fatalf("header (%d) or box border (%d) not found:\n%s", headerIdx, borderIdx, joined)
+	}
+	if headerIdx >= borderIdx {
+		t.Fatalf("issue header at %d is not above the box border at %d:\n%s", headerIdx, borderIdx, joined)
+	}
+	for i := borderIdx; i < len(lines); i++ {
+		if strings.Contains(lines[i], "passwords not found") {
+			t.Fatalf("issue header leaked into/after the box at line %d:\n%s", i, joined)
+		}
+	}
+	if !strings.Contains(joined, "locked.zip  —  in a.rar") {
+		t.Fatalf("missing inner/outer provenance form:\n%s", joined)
+	}
+	// #8BA7B1 (muted grey), never #F2C14E (warn yellow), in a completion frame.
+	if !strings.Contains(lines[headerIdx], "139;167;177") {
+		t.Fatalf("issue header is not muted-styled: %q", lines[headerIdx])
+	}
+	if strings.Contains(joined, "242;193;78") {
+		t.Fatalf("warn (yellow) styling must not appear in a completion summary:\n%s", joined)
+	}
+}
+
+// TestSummarySurfacesMissingVolume guards the newly surfaced incomplete-set
+// kind, which the prior in-box block never reported.
+func TestSummarySurfacesMissingVolume(t *testing.T) {
+	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
+		Emitted:        3,
+		MissingVolumes: 1,
+		Issues: []sflog.Issue{
+			{Path: "/data/set.part2.rar", Kind: sflog.IssueMissingVolume},
+		},
+	})
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"1 incomplete set", "set.part2.rar"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestTrimToDisplayWidthClampsStyledMultibyte(t *testing.T) {
+	// ANSI-styled, multibyte content far wider than the cap (mirrors a worker
+	// row with a long unicode path and the "▸" nested separator).
+	styled := sflOkStyle.Render("extracting") + "  " +
+		sflMutedStyle.Render("/data/"+strings.Repeat("é", 120)+"/Passwords.txt ▸ inner.7z")
+	for _, max := range []int{1, 10, 20, 34, 72} {
+		got := trimToDisplayWidth(styled, max)
+		if w := tuiVisibleWidth(got); w > max {
+			t.Fatalf("trimToDisplayWidth(_, %d) visible width = %d (> %d): %q", max, w, max, got)
+		}
+	}
+	// A line already within budget is returned untouched.
+	short := sflOkStyle.Render("ok")
+	if got := trimToDisplayWidth(short, 40); got != short {
+		t.Fatalf("short line altered: %q -> %q", short, got)
+	}
+}
+
+// TestSflFrameRowsClampToWidth proves the draw() width clamp keeps every
+// composed worker-panel row within the terminal width on terminals narrower
+// than the box floor, so rows can't soft-wrap and ghost.
+func TestSflFrameRowsClampToWidth(t *testing.T) {
+	active := []sflog.ActiveWorker{
+		{Index: 0, Path: "/data/" + strings.Repeat("x", 200) + ".zip", Stage: sflog.StageExtracting},
+		{Index: 1, Path: "/data/outer.rar!sub/" + strings.Repeat("y", 80) + "/inner.7z", Stage: sflog.StageTestingPassword},
+	}
+	rows := renderSflWorkerPanel(active, 4, 72, 0)
+	for _, w := range []int{8, 12, 24, 34} {
+		for _, ln := range rows {
+			got := trimToDisplayWidth(ln, w)
+			if vw := tuiVisibleWidth(got); vw > w {
+				t.Fatalf("row clamped to %d but visible width %d: %q", w, vw, got)
+			}
 		}
 	}
 }

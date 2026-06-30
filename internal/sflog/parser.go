@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/url"
 	"strings"
+
+	"github.com/snowx-dev/SnowFastULP/internal/textenc"
 )
 
 type credBlock struct {
@@ -14,7 +16,10 @@ type credBlock struct {
 }
 
 func ParseCredentials(r io.Reader, source string) ([]Credential, error) {
-	sc := bufio.NewScanner(r)
+	// Stealer logs are routinely UTF-16LE-BOM (RedLine/Vidar) or UTF-8-BOM;
+	// decode to UTF-8 first so a Windows-origin Passwords.txt isn't parsed as
+	// garbage (silent zero creds) or stripped of its first record.
+	sc := bufio.NewScanner(textenc.WrapReader(r))
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
 	var out []Credential
@@ -127,13 +132,10 @@ func FormatULPLine(c Credential, noURI bool) string {
 	return b.String()
 }
 
-// normalizeURL strips the web scheme for http(s) and collapses Android app
-// pseudo-URLs (android://<token>@com.pkg/) down to the package host so we never
-// leak the embedded credential token into the ULP line.
+// normalizeURL drops the http(s) scheme so web URLs match the sfu line shape.
+// Non-web schemes (android://, etc.) are kept verbatim, exactly like sfu's
+// stripScheme, so the two pipelines emit identical lines for the same input.
 func normalizeURL(s string) string {
-	if strings.HasPrefix(strings.ToLower(s), "android://") {
-		return hostFromURL(s)
-	}
 	return stripWebScheme(s)
 }
 

@@ -25,8 +25,10 @@ import (
 )
 
 func main() {
-	// VT on for windows ANSI, no-op on unix. must run pre-output
-	console.EnableVT()
+	// VT on for windows ANSI, no-op on unix. must run pre-output. vtOK is false
+	// only on a legacy console that can't render ANSI, forcing the silent UI so
+	// escapes never leak as raw text.
+	vtOK := console.EnableVT()
 
 	flag.Usage = func() { printHelp(filepath.Base(os.Args[0]), os.Stderr) }
 
@@ -48,6 +50,10 @@ func main() {
 		return
 	}
 
+	// Gate color on stderr (the live-screen target): a redirected stderr must
+	// never accumulate ANSI escapes even when stdout is a TTY.
+	applyStderrColorProfile()
+
 	cfg, err := config.LoadFromArgv(os.Args[1:])
 	if err != nil {
 		fatal("%v", err)
@@ -60,6 +66,7 @@ func main() {
 	clean := flag.Bool("clean", false, "strip URL scheme prefixes from output lines")
 	since := flag.String("since", "", "only search archives modified within this window, e.g. 7d, 12h, 90m (default: all)")
 	workers := flag.Int("j", 0, "worker goroutines (0 = GOMAXPROCS)")
+	workersAlias := flag.Int("workers", 0, "alias for -j")
 	debugFlag := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
 	// 1 MiB default matches the search engine default; tune only after profiling.
@@ -76,6 +83,9 @@ func main() {
 		os.Exit(2)
 	}
 	visited := config.NewVisited()
+	// Accept -workers as an alias for -j (sfu/sfl use -workers) so the same
+	// invocation works across all three CLIs; explicit -j wins.
+	visited.ResolveIntAlias(workers, workersAlias, "j", "workers")
 	if err := cfg.ApplySFS(visited, config.SFSFlags{
 		O: outFile, Txt: txtMode, Stream: stream, Silent: silent, Clean: clean, J: workers, Debug: debugFlag,
 		DecodeStep: decodeStep, MaxHitsPerChunk: maxHitsPerChunk, Limit: limit, Since: since,
@@ -181,7 +191,7 @@ func main() {
 	ctx = fileabort.WithContext(ctx, files)
 	go watchInterrupt(ctx, files, signaled)
 
-	uiMode := resolveUIMode(streamMode, *outFile)
+	uiMode := resolveUIMode(streamMode || !vtOK, *outFile)
 
 	var dbg *debugLog
 	var debugLogPath string
@@ -252,6 +262,7 @@ func main() {
 		started:         started,
 		debug:           dbg,
 		metrics:         metrics,
+		forcePlainTUI:   !vtOK,
 	})
 	wall := time.Since(started)
 
@@ -269,9 +280,18 @@ func main() {
 		dbg.logCompletion(metrics, wall, debugInfo)
 	}
 	if !streamMode {
+		// A generated-default output with zero hits would leave a 0-byte
+		// sfs_results_*.txt cluttering CWD; remove it (run() has returned, so
+		// its deferred Close already ran — safe to unlink on Windows too) and
+		// surface "(no matches)" in place of the output path. An explicit -o is
+		// left untouched: the user asked for that file.
+		summaryOut, removed := finalizeEmptyOutput(*outFile, outputMode.Generated, metrics.Hits.Load())
+		if removed && dbg != nil {
+			dbg.Event("no hits: removed empty generated output %q", *outFile)
+		}
 		// NoticeForSummary returns nil when the check is disabled, so no extra guard.
 		updateNotice := updateChecker.NoticeForSummary()
-		for _, ln := range renderFinalSummary(started, metrics, *outFile, pattern, updateNotice) {
+		for _, ln := range renderFinalSummary(started, metrics, summaryOut, pattern, updateNotice) {
 			fmt.Fprintln(os.Stderr, ln)
 		}
 	}
@@ -294,6 +314,9 @@ type runConfig struct {
 	started         time.Time
 	debug           *debugLog
 	metrics         *search.Metrics
+	// forcePlainTUI drops the live screen to silent when VT can't be enabled
+	// (legacy Windows console), so raw ANSI escapes never reach the terminal.
+	forcePlainTUI bool
 }
 
 func run(ctx context.Context, cfg runConfig) error {
@@ -323,7 +346,7 @@ func run(ctx context.Context, cfg runConfig) error {
 		out = f
 	}
 
-	uiMode := resolveUIMode(cfg.stream, cfg.outFile)
+	uiMode := resolveUIMode(cfg.stream || cfg.forcePlainTUI, cfg.outFile)
 
 	// Hit output sink: a file when -o / default-generated, otherwise stdout for
 	// -s streaming. The live status frame (stderr) shows a hit counter and

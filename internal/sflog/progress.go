@@ -24,11 +24,18 @@ type Progress struct {
 	phase      atomic.Int32
 	ingestView atomic.Value // func() IngestView, installed by BeginIngest
 
-	// workers is the per-engine-worker live status registry the TUI reads to
-	// render concurrent activity. Sized once by SetWorkers; guarded by
-	// workersMu only for the slice header (resize), slot fields are atomic.
+	// workers is the live status registry the TUI reads to render concurrent
+	// activity. Sized once by SetWorkers; guarded by workersMu for the slice
+	// header (resize) and the free-list, slot fields themselves are atomic.
+	// Slots are no longer pinned to a fixed engine worker: any in-flight task
+	// (top-level item, dispatched archive member, password probe) leases a slot
+	// from slotFree for its lifetime, so the panel shows real concurrency. Total
+	// simultaneous leases is bounded by the extraction budget (= worker count),
+	// so the free-list never underflows for budgeted work; opportunistic tasks
+	// that miss out (acquireSlot returns -1) still run, just without a row.
 	workersMu sync.RWMutex
 	workers   []workerSlot
+	slotFree  []int
 }
 
 // WorkerStage labels what an extraction worker is doing right now. It is
@@ -214,6 +221,42 @@ func (p *Progress) SetWorkers(n int) {
 	}
 	p.workersMu.Lock()
 	p.workers = make([]workerSlot, n)
+	// Fill the free-list so acquireSlot (pop from the end) hands out 0,1,2,...
+	// first, keeping the panel's busy rows packed at the low indices.
+	p.slotFree = make([]int, n)
+	for i := range p.slotFree {
+		p.slotFree[i] = n - 1 - i
+	}
+	p.workersMu.Unlock()
+}
+
+// acquireSlot leases a free registry slot index for an in-flight task, or -1
+// when none is free (the task still runs, just without a live row). The lease
+// is released with releaseSlot. Callers pair this with the extraction budget so
+// leases never exceed the slot count.
+func (p *Progress) acquireSlot() int {
+	if p == nil {
+		return -1
+	}
+	p.workersMu.Lock()
+	defer p.workersMu.Unlock()
+	if len(p.slotFree) == 0 {
+		return -1
+	}
+	idx := p.slotFree[len(p.slotFree)-1]
+	p.slotFree = p.slotFree[:len(p.slotFree)-1]
+	return idx
+}
+
+// releaseSlot clears the slot's live status and returns it to the free-list.
+// A negative idx (no lease was granted) is a no-op.
+func (p *Progress) releaseSlot(idx int) {
+	if p == nil || idx < 0 {
+		return
+	}
+	p.clearActive(idx)
+	p.workersMu.Lock()
+	p.slotFree = append(p.slotFree, idx)
 	p.workersMu.Unlock()
 }
 
@@ -395,6 +438,18 @@ func (c *creditor) add(readBytes int64) {
 			return
 		}
 	}
+}
+
+// useScale recomputes the uncompressed->on-disk mapping once the member table
+// is known. The 7z reader only learns total uncompressed size after opening the
+// archive (unlike zip, which has it from the central directory up front), so it
+// sets the scale here before crediting. Safe only before any concurrent
+// crediting; the 7z member read is sequential.
+func (c *creditor) useScale(uncompressed int64) {
+	if c == nil {
+		return
+	}
+	c.scale = scaleFor(c.weight, uncompressed)
 }
 
 // finish credits any rounding/shortfall remainder so each item contributes

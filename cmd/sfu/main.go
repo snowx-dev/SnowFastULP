@@ -66,8 +66,10 @@ func main() {
 		}
 	}()
 
-	// enable VT processing on Windows so TUI ANSI renders. no-op on Unix
-	console.EnableVT()
+	// enable VT processing on Windows so TUI ANSI renders. no-op on Unix.
+	// vtOK is false only on a legacy console that can't render ANSI, which
+	// forces plain mode below so escapes never leak as raw text.
+	vtOK := console.EnableVT()
 
 	started := time.Now()
 	runID, err := ulpengine.NewRunID()
@@ -98,6 +100,10 @@ func main() {
 		return
 	}
 
+	// Gate color on stderr (the TUI + summary target): a redirected stderr log
+	// must never accumulate ANSI escapes even when stdout is a TTY.
+	applyStderrColorProfile()
+
 	fileCfg, err := config.LoadFromArgv(os.Args[1:])
 	if err != nil {
 		fatalf("%v", err)
@@ -106,6 +112,7 @@ func main() {
 	out := flag.String("o", "", "output directory (default: CWD; see -h for file naming)")
 	outDedup := flag.String("od", "", "output directory with incremental dedup against past sfu_*.txt.zst archives in the same dir (auto-enables -zst; mutually exclusive with -o)")
 	workers := flag.Int("workers", 0, "phase-1 parser goroutines (0=auto)")
+	workersAlias := flag.Int("j", 0, "alias for -workers")
 	dedupW := flag.Int("dedup", 0, "phase-2 dedup goroutines (0=auto)")
 	buckets := flag.Int("buckets", 0, "override adaptive bucket count (0=auto)")
 	tempDir := flag.String("temp-dir", "", "directory for shard temp files (default: same dir as -o)")
@@ -129,6 +136,9 @@ func main() {
 		os.Exit(2)
 	}
 	visited := config.NewVisited()
+	// Accept -j as an alias for -workers (sfs uses -j) so the same invocation
+	// works across all three CLIs; explicit -workers wins.
+	visited.ResolveIntAlias(workers, workersAlias, "workers", "j")
 	if err := fileCfg.ApplySFU(visited, config.SFUFlags{
 		O: out, OD: outDedup, TempDir: tempDir,
 		Workers: workers, Dedup: dedupW, Buckets: buckets,
@@ -331,7 +341,7 @@ func main() {
 	m := &ulpengine.Metrics{TotalInputBytes: r.TotalInputs}
 
 	doneCh := make(chan struct{})
-	tuiOff := *noTUI || !stdoutIsCharDevice()
+	tuiOff := *noTUI || !stderrIsCharDevice() || !vtOK
 
 	var monitorWG sync.WaitGroup
 	if !tuiOff {
@@ -454,9 +464,9 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 	if wg != nil {
 		defer wg.Done()
 	}
-	frame := tuiFrame{tty: stdoutIsCharDevice()}
+	frame := tuiFrame{tty: stderrIsCharDevice()}
 	// Route teardown through the frame's mutex-guarded close so the force-exit
-	// goroutine never races the monitor's draw on stdout.
+	// goroutine never races the monitor's draw on stderr.
 	setTerminalRestore(frame.close)
 	defer clearTerminalRestore()
 	defer frame.close()

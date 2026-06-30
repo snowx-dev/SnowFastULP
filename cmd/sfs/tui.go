@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/muesli/termenv"
 )
 
 const (
@@ -108,6 +109,16 @@ func stderrIsTTY() bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// applyStderrColorProfile downgrades lipgloss to plain ASCII when stderr is not
+// a terminal. The live screen and any styled status render to stderr, so a
+// redirected stderr (even with stdout a TTY) must stay free of ANSI escapes.
+// Mirrors sfl/sfu.
+func applyStderrColorProfile() {
+	if !stderrIsTTY() {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
 }
 
 func uiModeString(m uiMode) string {

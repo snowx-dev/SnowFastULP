@@ -164,6 +164,46 @@ func TestGroupArchiveVolumesRarStillGroups(t *testing.T) {
 	}
 }
 
+// TestGroupArchiveVolumesNeedsNoDirectoryRead proves perf #3: grouping builds
+// every multi-part set from the in-memory archives list, never re-listing the
+// directory. The part paths point at a directory that does NOT exist, so any
+// os.ReadDir would fail and collapse the set to a single item; full grouping
+// here means the listing was avoided entirely.
+func TestGroupArchiveVolumesNeedsNoDirectoryRead(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("precondition: dir must not exist, stat err=%v", err)
+	}
+	archives := sortPaths([]string{
+		filepath.Join(dir, "big.zip.001"),
+		filepath.Join(dir, "big.zip.002"),
+		filepath.Join(dir, "big.zip.003"),
+		filepath.Join(dir, "set.part1.rar"),
+		filepath.Join(dir, "set.part2.rar"),
+	})
+
+	items := groupArchiveVolumes(archives, fixedWeight, idKey)
+
+	var split, rar *workItem
+	for i := range items {
+		switch items[i].assembly {
+		case assemblySplitParts:
+			split = &items[i]
+		case assemblyRarVolumes:
+			rar = &items[i]
+		}
+	}
+	if split == nil || len(split.volumes) != 3 {
+		t.Fatalf("split set not fully grouped without a directory read: %+v", items)
+	}
+	if rar == nil || len(rar.volumes) != 2 {
+		t.Fatalf("rar set not fully grouped without a directory read: %+v", items)
+	}
+	if split.weight != 300 || rar.weight != 200 {
+		t.Fatalf("weights = split %d / rar %d, want 300 / 200", split.weight, rar.weight)
+	}
+}
+
 // TestBuildWorklistDiscoversSplitParts proves the discover.go change: a split
 // set under the input root is enqueued as one assemblySplitParts item rather
 // than dropped (its .NNN extension is not a recognised archive ext).

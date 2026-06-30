@@ -172,17 +172,67 @@ func splitPartSet(first string) (parts []string, complete bool) {
 // single item. weightOf and keyOf are injected so volumes.go stays decoupled
 // from fileWeight/logGroupKey.
 func groupArchiveVolumes(archives []string, weightOf func(string) int64, keyOf func(string) string) []workItem {
+	type numbered struct {
+		n int
+		p string
+	}
+	// Group every discovered multi-part file by its set key in a single pass
+	// over the in-memory list, instead of re-listing the directory per set.
+	// Discovery enqueues all parts of both schemes (".partN.rar" satisfies the
+	// archive filter; split ".NNN" parts are added via isSplitArchivePart), so
+	// this list is the complete set — and on an RDP/SMB share it avoids K extra
+	// directory round-trips.
+	rarSets := map[string][]numbered{}
+	splitSets := map[string][]numbered{}
 	rarFirst := map[string]bool{}
 	splitFirst := map[string]bool{}
 	for _, a := range archives {
-		if isVol, isFirst, key := rarVolumeRole(a); isVol && isFirst {
-			rarFirst[key] = true
+		if isVol, isFirst, key := rarVolumeRole(a); isVol {
+			m := newStyleRarVolume.FindStringSubmatch(filepath.Base(a))
+			n, _ := strconv.Atoi(m[2])
+			rarSets[key] = append(rarSets[key], numbered{n, a})
+			if isFirst {
+				rarFirst[key] = true
+			}
+			continue
 		}
-		if isPart, isFirst, key := splitPartRole(a); isPart && isFirst {
-			splitFirst[key] = true
+		if isPart, isFirst, key := splitPartRole(a); isPart {
+			m := splitPartName.FindStringSubmatch(filepath.Base(a))
+			n, _ := strconv.Atoi(m[2])
+			splitSets[key] = append(splitSets[key], numbered{n, a})
+			if isFirst {
+				splitFirst[key] = true
+			}
 		}
 	}
+	// Order each set's parts by ascending number once, up front.
+	orderParts := func(sets map[string][]numbered) {
+		for k := range sets {
+			v := sets[k]
+			sort.Slice(v, func(i, j int) bool { return v[i].n < v[j].n })
+			sets[k] = v
+		}
+	}
+	orderParts(rarSets)
+	orderParts(splitSets)
 
+	pathsOf := func(v []numbered) []string {
+		out := make([]string, len(v))
+		for i := range v {
+			out[i] = v[i].p
+		}
+		return out
+	}
+	// contiguous reports whether the ordered parts cover 1..N with no gap, so an
+	// incomplete split set (a hole in the concatenated reader) can be skipped.
+	contiguous := func(v []numbered) bool {
+		for i := range v {
+			if v[i].n != i+1 {
+				return false
+			}
+		}
+		return true
+	}
 	sumWeight := func(parts []string) int64 {
 		var w int64
 		for _, p := range parts {
@@ -198,7 +248,7 @@ func groupArchiveVolumes(archives []string, weightOf func(string) int64, keyOf f
 		if isVol, isFirst, key := rarVolumeRole(a); isVol {
 			switch {
 			case isFirst:
-				set := rarVolumeSet(a)
+				set := pathsOf(rarSets[key])
 				items = append(items, workItem{path: a, kind: kindArchive, weight: sumWeight(set), logKey: keyOf(a), volumes: set, assembly: assemblyRarVolumes})
 			case rarFirst[key]:
 				// covered by its first volume.
@@ -211,8 +261,9 @@ func groupArchiveVolumes(archives []string, weightOf func(string) int64, keyOf f
 		if isPart, isFirst, key := splitPartRole(a); isPart {
 			switch {
 			case isFirst:
-				set, complete := splitPartSet(a)
-				if !complete {
+				parts := splitSets[key]
+				set := pathsOf(parts)
+				if !contiguous(parts) {
 					items = append(items, workItem{path: a, kind: kindArchive, weight: sumWeight(set), logKey: keyOf(a), missingFirstVolume: true})
 					continue
 				}

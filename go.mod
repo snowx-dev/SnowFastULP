@@ -40,3 +40,7 @@ require (
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/crypto v0.46.0 // indirect
 )
+
+// Vendored fork with a ZIP64 central-directory parsing fix (members past the
+// 4GB offset boundary). Upstream is unmaintained; see third_party/yekazip.
+replace github.com/yeka/zip => ./third_party/yekazip

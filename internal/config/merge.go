@@ -19,6 +19,20 @@ func NewVisited() Visited {
 
 func (v Visited) set(name string) bool { return v[name] }
 
+// ResolveIntAlias collapses an int flag alias into its canonical flag (used for
+// the worker-count pair: -workers on sfu/sfl, -j on sfs, each accepting the
+// other). An explicitly set canonical always wins. When only the alias was set
+// on the CLI, its value is copied into the canonical pointer and the canonical
+// is marked visited, so the alias beats a config-file value exactly as the
+// canonical flag would. Call after NewVisited, before the Apply* merge.
+func (v Visited) ResolveIntAlias(canonical, alias *int, canonicalName, aliasName string) {
+	if v.set(canonicalName) || !v.set(aliasName) {
+		return
+	}
+	*canonical = *alias
+	v[canonicalName] = true
+}
+
 // SFUFlags holds pointers to sfu flag variables for config merge.
 type SFUFlags struct {
 	O, OD, TempDir          *string

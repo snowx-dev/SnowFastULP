@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/muesli/termenv"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
@@ -139,7 +140,7 @@ func spinnerFrame(now time.Time) string {
 // live terminal width, capped at tuiDisplayWidth. polled per tick so
 // SIGWINCH resizes show up within ~300ms
 func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	w, _, err := term.GetSize(int(os.Stderr.Fd()))
 	if err != nil || w <= 0 {
 		return tuiDisplayWidth
 	}
@@ -152,7 +153,7 @@ func termWidth() int {
 // terminal row count. VT100 24-row default on non-TTY / query failure.
 // used by OD frame to budget per-worker rows
 func termHeight() int {
-	_, h, err := term.GetSize(int(os.Stdout.Fd()))
+	_, h, err := term.GetSize(int(os.Stderr.Fd()))
 	if err != nil || h <= 0 {
 		return 24
 	}
@@ -314,12 +315,25 @@ func tuiVisibleWidth(s string) int {
 	return n
 }
 
-func stdoutIsCharDevice() bool {
-	fi, err := os.Stdout.Stat()
+// stderrIsCharDevice gates the live TUI: the alt-screen and per-tick frames
+// render to stderr (keeping stdout clean for `sfu -o ./out | grep`), so the
+// gate must follow stderr's TTY status, not stdout's.
+func stderrIsCharDevice() bool {
+	fi, err := os.Stderr.Stat()
 	if err != nil {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// applyStderrColorProfile downgrades lipgloss to plain ASCII when stderr is not
+// a terminal. Both the live TUI and the DONE summary render to stderr, so when
+// stderr is redirected (e.g. `sfu ... 2> run.log`, even with stdout a TTY) the
+// log must stay free of ANSI escapes. Mirrors sfl/sfs.
+func applyStderrColorProfile() {
+	if !stderrIsCharDevice() {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
 }
 
 // fixed multi-line status block on the alt-screen. each draw homes the cursor,
@@ -340,7 +354,7 @@ func (f *tuiFrame) close() {
 		return
 	}
 	// reset any scroll region defensively before leaving the alt-screen.
-	fmt.Print("\033[r" + ansiShowCursor + altScreenLeave)
+	fmt.Fprint(os.Stderr, "\033[r"+ansiShowCursor+altScreenLeave)
 	f.altOn = false
 }
 
@@ -351,7 +365,7 @@ func (f *tuiFrame) redrawOnResize() {
 	if !f.tty || !f.altOn {
 		return
 	}
-	fmt.Print("\033[2J\033[H")
+	fmt.Fprint(os.Stderr, "\033[2J\033[H")
 }
 
 func (f *tuiFrame) draw(lines []string) {
@@ -372,7 +386,7 @@ func (f *tuiFrame) draw(lines []string) {
 	// Clamp to one row shy of the terminal height so the bottom line can't
 	// scroll the buffer; Compose erases any stale rows below.
 	b.WriteString(tuiframe.Compose(rows, termHeight()-1))
-	fmt.Print(b.String())
+	fmt.Fprint(os.Stderr, b.String())
 }
 
 func trimToDisplayWidth(s string, max int) string {

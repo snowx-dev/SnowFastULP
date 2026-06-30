@@ -39,10 +39,15 @@ type runConfig struct {
 	NoUpdateCheck bool
 	UpdateChecker *selfupdate.Checker
 	Started       time.Time
+	// ForcePlainTUI is set when VT processing can't be enabled (legacy Windows
+	// console), forcing plain output so ANSI escapes never leak as raw text.
+	ForcePlainTUI bool
 }
 
 func main() {
-	console.EnableVT()
+	// vtOK is false only on a legacy Windows console that can't render ANSI;
+	// it flows into runConfig to force plain mode so escapes never leak.
+	vtOK := console.EnableVT()
 	started := time.Now()
 
 	flag.Usage = func() { printHelp(filepath.Base(os.Args[0]), os.Stderr) }
@@ -71,6 +76,7 @@ func main() {
 	outDedup := flag.String("od", "", "sfu library directory")
 	password := flag.String("p", "", "archive password or password-list file")
 	workers := flag.Int("workers", 0, "parser/archive worker count (0=auto)")
+	workersAlias := flag.Int("j", 0, "alias for -workers")
 	tempDir := flag.String("temp-dir", "", "directory for temp files")
 	noTUI := flag.Bool("no-tui", false, "disable live TUI")
 	zst := flag.Bool("zst", false, "compress classic output with zstd")
@@ -84,6 +90,9 @@ func main() {
 		os.Exit(2)
 	}
 	visited := config.NewVisited()
+	// Accept -j as an alias for -workers (sfs uses -j) so the same invocation
+	// works across all three CLIs; explicit -workers wins.
+	visited.ResolveIntAlias(workers, workersAlias, "workers", "j")
 	if err := fileCfg.ApplySFL(visited, config.SFLFlags{
 		O: out, OD: outDedup, TempDir: tempDir, Password: password,
 		Workers: workers,
@@ -116,7 +125,7 @@ func main() {
 		Input: inputArg, OutputDir: *out, LibraryDir: *outDedup, Password: *password,
 		TempDir: *tempDir, Workers: w, Compress: *zst, DeleteSources: *delSrc,
 		NoURI: *noURI, NoTUI: *noTUI, Debug: *debug, NoUpdateCheck: *noUpdateCheck,
-		Started: started,
+		Started: started, ForcePlainTUI: !vtOK,
 	}
 	cfg.UpdateChecker = selfupdate.NewChecker(version.String, os.Args[0], cfg.NoUpdateCheck)
 	cfg.UpdateChecker.Start()
@@ -192,7 +201,7 @@ func run(cfg runConfig) error {
 	dbg.Header(cfg, len(passwords), snk.outPath)
 
 	prog := sflog.NewProgress()
-	tuiOff := cfg.NoTUI || !stderrIsTTY()
+	tuiOff := cfg.NoTUI || !stderrIsTTY() || cfg.ForcePlainTUI
 	monDone := make(chan struct{})
 	var monWG sync.WaitGroup
 	if !tuiOff {
@@ -344,19 +353,20 @@ type sink struct {
 
 func openSink(cfg runConfig) (*sink, error) {
 	if cfg.LibraryDir != "" {
-		parent := cfg.TempDir
-		if parent == "" {
-			libAbs, err := absClean(cfg.LibraryDir)
-			if err != nil {
-				return nil, err
-			}
-			parent = filepath.Dir(libAbs)
-		}
-		// 0700: decrypted credentials must not land in a world-readable dir.
-		if err := os.MkdirAll(parent, 0o700); err != nil {
+		libAbs, err := absClean(cfg.LibraryDir)
+		if err != nil {
 			return nil, err
 		}
-		workDir, err := os.MkdirTemp(parent, "sfl-od-*")
+		// Decrypted-ULP staging. Prefer the library's parent so the library dir
+		// stays clean, but if that isn't writable — e.g. -od /tmp derives parent
+		// "/" — fall back to a subdir inside the library itself: always writable
+		// (we ingest into it), same volume (a multi-GB ULP never hits tmpfs), and
+		// invisible to the library reader. If neither works, fail in plain words.
+		primary := cfg.TempDir
+		if primary == "" {
+			primary = filepath.Dir(libAbs)
+		}
+		workDir, err := makeStagingDir(primary, libAbs)
 		if err != nil {
 			return nil, err
 		}
@@ -369,7 +379,6 @@ func openSink(cfg runConfig) (*sink, error) {
 			_ = os.RemoveAll(workDir)
 			return nil, err
 		}
-		libAbs, _ := absClean(cfg.LibraryDir)
 		return &sink{w: f, file: f, outPath: ulpPath, ulpPath: ulpPath, workDir: workDir,
 			protected: []string{workDir, libAbs}}, nil
 	}
@@ -635,6 +644,36 @@ func createOutputPath(cfg runConfig) (string, error) {
 		name += ".zst"
 	}
 	return filepath.Join(cfg.OutputDir, name), nil
+}
+
+// makeStagingDir creates a 0700 dir to hold the decrypted ULP. It tries primary
+// first, then a subdir inside the library (guaranteed writable, same volume).
+// On total failure it returns a plain-language error listing every path tried
+// and how to fix it.
+func makeStagingDir(primary, libDir string) (string, error) {
+	tried := []string{primary}
+	if libDir != "" && libDir != primary {
+		tried = append(tried, libDir)
+	}
+	var lastErr error
+	for _, dir := range tried {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			lastErr = err
+			continue
+		}
+		workDir, err := os.MkdirTemp(dir, "sfl-od-*")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return workDir, nil
+	}
+	return "", fmt.Errorf(
+		"could not create a temporary folder for decrypted logs.\n"+
+			"  tried: %s\n"+
+			"  reason: %v\n"+
+			"  fix: pass -temp-dir <a writable directory>, or set -od to a writable path",
+		strings.Join(tried, ", "), lastErr)
 }
 
 func fatalf(format string, args ...any) {

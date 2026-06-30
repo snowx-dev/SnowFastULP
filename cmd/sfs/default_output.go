@@ -62,3 +62,17 @@ func pathAvailable(path string) (bool, error) {
 	}
 	return false, fmt.Errorf("check output path %q: %w", path, err)
 }
+
+// finalizeEmptyOutput discards a generated-default output file that received
+// zero hits so a fruitless search never litters CWD with a 0-byte
+// sfs_results_*.txt, and returns what to display as the summary's output:
+// "(no matches)" when the empty file was removed, otherwise the path unchanged.
+// An explicit -o is always preserved (generated=false). removed reports whether
+// the file was unlinked, so the caller can log it.
+func finalizeEmptyOutput(outFile string, generated bool, hits int64) (summaryOut string, removed bool) {
+	if generated && hits == 0 {
+		_ = os.Remove(outFile)
+		return "(no matches)", true
+	}
+	return outFile, false
+}

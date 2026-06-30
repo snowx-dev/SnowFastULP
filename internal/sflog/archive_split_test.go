@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bodgit/sevenzip"
 	zipenc "github.com/yeka/zip"
 )
 
@@ -190,6 +191,77 @@ func TestReadSplitArchive7z(t *testing.T) {
 	}
 	if !anyContains(*dbg, "opening split set") || !anyContains(*dbg, ".7z") {
 		t.Fatalf("missing 7z split debug line: %v", *dbg)
+	}
+}
+
+// TestReadSevenZipMembersCreditsBytes proves a 7z credits on-disk bytes as its
+// credential members are read (so the TUI bar moves) instead of staying at 0
+// until finish() jumps to 100%. It drives readSevenZipMembers directly so no
+// finish() top-up can mask the per-member crediting.
+func TestReadSevenZipMembersCreditsBytes(t *testing.T) {
+	bin := first7z()
+	if bin == "" {
+		t.Skip("no 7z packer found; skipping 7z crediting test")
+	}
+	dir := t.TempDir()
+	var names []string
+	for i := 0; i < 6; i++ {
+		n := fmt.Sprintf("Passwords-%d.txt", i)
+		names = append(names, n)
+		body := fmt.Sprintf("URL: https://z%d.example\nUSER: a\nPASS: p\n", i) + strings.Repeat("# pad line\n", 3000)
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Default compression (uncompressed >> on-disk) exercises the scaleFor
+	// mapping: crediting raw decoded bytes 1:1 would overshoot, so the scale must
+	// map them back onto the on-disk weight.
+	cmd := exec.Command(bin, append([]string{"a", "-y", "-bso0", "-bsp0", "out.7z"}, names...)...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("7z create failed: %v\n%s", err, out)
+	}
+	path := filepath.Join(dir, "out.7z")
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weight := fi.Size()
+
+	rc, err := sevenzip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	prog := &Progress{}
+	prog.total.Store(weight)
+	cr := newCreditor(prog, weight, 1)
+	creds := 0
+	ec := extractCtx{
+		display: path,
+		p:       prog,
+		emit:    func(Credential) { creds++ },
+		onIssue: func(string, IssueKind, error) {},
+	}
+
+	// No cr.finish(): whatever is credited is purely per-member.
+	scan, had, err := readSevenZipMembers(context.Background(), ec, &rc.Reader, cr)
+	if err != nil {
+		t.Fatalf("readSevenZipMembers: %v", err)
+	}
+	if !had || creds == 0 || scan.files == 0 {
+		t.Fatalf("had=%v creds=%d files=%d, want members parsed", had, creds, scan.files)
+	}
+	done := prog.DoneBytes()
+	if done <= 0 {
+		t.Fatalf("DoneBytes = %d; 7z credential members never credited the bar", done)
+	}
+	if done > weight {
+		t.Fatalf("DoneBytes = %d overshot weight %d (scale not applied)", done, weight)
+	}
+	if done < weight/2 {
+		t.Fatalf("DoneBytes = %d of %d (<50%%); crediting too coarse to move the bar", done, weight)
 	}
 }
 
