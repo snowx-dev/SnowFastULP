@@ -209,6 +209,15 @@ func (ec extractCtx) item(label string) {
 	}
 }
 
+// countCredFile records one successfully parsed credential file: it bumps the
+// scan's committed tally and ticks the live Progress counter so the TUI "files"
+// number advances mid-extraction instead of jumping at archive EOF. Live ticks
+// are atomic (parallel zip pool) and nil-safe (hermetic callers).
+func (ec extractCtx) countCredFile(scan *archiveScan) {
+	scan.files++
+	ec.p.addFile()
+}
+
 // minParallelZipMembers is the member count below which a zip is read
 // sequentially: tiny archives aren't worth the goroutine/merge overhead and stay
 // trivially deterministic.
@@ -625,7 +634,7 @@ func readZipCredMember(ctx context.Context, f *zipenc.File, ec extractCtx, pw st
 		o.issues = append(o.issues, pendingIssue{name, IssueParseError, firstErr(parseErr, closeErr)})
 		return o
 	}
-	o.scan.files++
+	ec.countCredFile(&o.scan)
 	o.creds = creds
 	return o
 }
@@ -992,7 +1001,7 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 				if perr != nil {
 					return perr
 				}
-				o.scan.files++
+				ec.countCredFile(&o.scan)
 				o.creds = creds
 			}
 		}
@@ -1154,7 +1163,7 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 				if perr != nil {
 					return perr
 				}
-				o.scan.files++
+				ec.countCredFile(&o.scan)
 				o.creds = creds
 			}
 			cr.add(h.PackedSize)
@@ -1311,7 +1320,7 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 		if parseErr != nil || closeErr != nil {
 			return scan, hadMembers, firstErr(parseErr, closeErr)
 		}
-		scan.files++
+		ec.countCredFile(&scan)
 		for _, c := range creds {
 			ec.emit(c)
 		}

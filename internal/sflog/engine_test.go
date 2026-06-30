@@ -241,3 +241,31 @@ func TestEngineProgressReachesTotal(t *testing.T) {
 		t.Fatalf("done=%d total=%d frac=%.3f", prog.DoneBytes(), prog.Total(), prog.Fraction())
 	}
 }
+
+// The live files counter must reflect archive members, not just top-level loose
+// files. Before countCredFile, an all-archive workload left prog.Files() at 0
+// for the whole run (members credited only the summary stat at EOF). 10 members
+// trips the parallel zip pool, so this also guards the atomic credit under -race.
+func TestEngineProgressFilesCountsArchiveMembersLive(t *testing.T) {
+	root := t.TempDir()
+	files := make(map[string]string, 10)
+	for i := 0; i < 10; i++ {
+		files[fmt.Sprintf("victim%d/Passwords.txt", i)] =
+			fmt.Sprintf("URL: https://s%d.example.com\nUSER: u%d\nPASS: p%d\n", i, i, i)
+	}
+	writeTestZip(t, filepath.Join(root, "logs.zip"), files)
+
+	prog := NewProgress()
+	var out bytes.Buffer
+	eng := &Engine{Workers: 4, Passwords: []string{""}, Progress: prog}
+	stats, _, err := eng.Run(context.Background(), root, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.FilesScanned == 0 {
+		t.Fatal("FilesScanned = 0, want >0 (archive members not counted)")
+	}
+	if got := prog.Files(); got != int64(stats.FilesScanned) {
+		t.Fatalf("prog.Files() = %d, want %d (live counter must match FilesScanned)", got, stats.FilesScanned)
+	}
+}
