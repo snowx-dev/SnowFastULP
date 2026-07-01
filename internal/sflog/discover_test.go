@@ -60,6 +60,8 @@ func TestIsPasswordFileCoversNonRedLineFamilies(t *testing.T) {
 		"Logins_Chrome_Default.txt", // HESOYAM flat
 		"Mozilla Firefox_ab12cd34.default-release_logins.txt",              // Firefox export
 		filepath.Join("Browser", "Logins", "Chrome_Default[d70b625c].txt"), // Rhadamanthys dir
+		filepath.Join("Browsers", "Passwords", "Chrome.txt"),               // HESOYAM/Lumma dir
+		filepath.Join("Browsers", "Passwords", "Microsoft Edge.txt"),
 	}
 	for _, name := range accept {
 		if !isPasswordFile(filepath.Join("/root/log", name)) {

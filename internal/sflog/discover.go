@@ -102,8 +102,14 @@ func isPasswordFile(path string) bool {
 		// exports) and never contains the "password" token.
 		return true
 	}
-	// Rhadamanthys drops per-browser dumps into a Logins/ directory with
-	// browser-only filenames (Chrome_Default[..].txt), so the name carries no
-	// credential token — key off the parent directory instead.
-	return strings.EqualFold(filepath.Base(filepath.Dir(path)), "logins")
+	// Some families drop per-browser dumps into a Passwords/ or Logins/
+	// directory with browser-only filenames (Chrome.txt, Chrome_Default[..].txt),
+	// so the name carries no credential token — key off the parent directory.
+	// HESOYAM even ships a decoy root Passwords.txt (Telegram advert, zero
+	// creds) while the real credentials live in Passwords/<Browser>.txt.
+	switch strings.ToLower(filepath.Base(filepath.Dir(path))) {
+	case "logins", "passwords":
+		return true
+	}
+	return false
 }
