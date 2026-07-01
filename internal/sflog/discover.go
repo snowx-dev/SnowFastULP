@@ -91,8 +91,19 @@ func isPasswordFile(path string) bool {
 	}
 	base := strings.TrimSuffix(strings.TrimSuffix(name, ".txt"), ".log")
 	switch base {
-	case "passwords", "all passwords", "password list", "_allpasswords_list":
+	case "passwords", "all passwords", "password list", "_allpasswords_list", "pws":
+		// "pws" is Raccoon's credential dump; the rest are the common
+		// aggregate names emitted by RedLine/Vidar/Lumma/StealC/Meta.
 		return true
 	}
-	return strings.Contains(name, "password")
+	if strings.Contains(name, "password") || strings.Contains(name, "logins") {
+		// "logins" catches non-RedLine families whose dump is named
+		// Logins_<Browser>.txt (HESOYAM) or <profile>_logins.txt (Firefox
+		// exports) and never contains the "password" token.
+		return true
+	}
+	// Rhadamanthys drops per-browser dumps into a Logins/ directory with
+	// browser-only filenames (Chrome_Default[..].txt), so the name carries no
+	// credential token — key off the parent directory instead.
+	return strings.EqualFold(filepath.Base(filepath.Dir(path)), "logins")
 }

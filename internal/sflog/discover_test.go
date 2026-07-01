@@ -52,6 +52,36 @@ func TestDiscoverPasswordFilesAcceptsLogExtension(t *testing.T) {
 	}
 }
 
+func TestIsPasswordFileCoversNonRedLineFamilies(t *testing.T) {
+	accept := []string{
+		"passwords.txt",
+		"All Passwords.txt",
+		"pws.txt",                   // Raccoon
+		"Logins_Chrome_Default.txt", // HESOYAM flat
+		"Mozilla Firefox_ab12cd34.default-release_logins.txt",              // Firefox export
+		filepath.Join("Browser", "Logins", "Chrome_Default[d70b625c].txt"), // Rhadamanthys dir
+	}
+	for _, name := range accept {
+		if !isPasswordFile(filepath.Join("/root/log", name)) {
+			t.Errorf("expected %q to be treated as a credential file", name)
+		}
+	}
+
+	reject := []string{
+		"Cookies_Chrome_Default.txt",
+		"Autofills_Chrome_Default.txt",
+		"System.txt",
+		"passwordcracker.txt",
+		"Chrome.txt", // bare browser name is ambiguous, intentionally skipped
+		filepath.Join("Cookies", "Chrome_Default.txt"),
+	}
+	for _, name := range reject {
+		if isPasswordFile(filepath.Join("/root/log", name)) {
+			t.Errorf("expected %q NOT to be treated as a credential file", name)
+		}
+	}
+}
+
 func TestDiscoverPasswordFilesAcceptsSinglePasswordFile(t *testing.T) {
 	root := t.TempDir()
 	p := filepath.Join(root, "passwords.txt")
