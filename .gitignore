@@ -10,13 +10,7 @@
 
 # local scratch / test data — never commit (may contain real credential dumps)
 /tmp/
-/demo/migration-test/scratch/
-/demo/migration-test/v1-library/
-/demo/migration-test/.bin/
-/demo/windows-vm/shared/
-/demo/windows-vm/windows-data/
-/demo/windows-vm/oem/bin/
-/demo/migration-test/MANIFEST.txt
+/demo/
 .DS_Store
 
 # default output and shard temp files when running from repo root

@@ -10,9 +10,9 @@ SCRATCH="$HERE/scratch"
 LIB="$HERE/v1-library"
 WORKTREE="/tmp/sfu-v01-build-$$"
 
-SOURCE_DIR="${SOURCE_DIR:-/run/media/bigboi/b992e755-c9c0-4d4d-8ed5-81cbb85ccec5/Data_Archive/ulp/raws/txt}"
+SOURCE_DIR="${SOURCE_DIR:?set SOURCE_DIR to your ULP raws directory (e.g. export SOURCE_DIR=/path/to/raws/txt)}"
 SAMPLE_A="${SAMPLE_A:-$SOURCE_DIR/0623_ulp.txt}"
-SAMPLE_B="${SAMPLE_B:-$SOURCE_DIR/🔒 June26. - mo-on.cloud - #842.txt}"
+SAMPLE_B="${SAMPLE_B:-$SOURCE_DIR/sample-b.txt}"
 # 0 = entire file (default). Set to N to slice for quicker smoke tests.
 SAMPLE_A_LINES="${SAMPLE_A_LINES:-0}"
 SAMPLE_B_LINES="${SAMPLE_B_LINES:-0}"

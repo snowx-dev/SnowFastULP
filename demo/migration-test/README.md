@@ -5,19 +5,27 @@ Manual fixture for checking the **v2→v3 sidecar migration** TUI on a real ULP 
 ## What you get
 
 - A **v0.1-format library** under `v1-library/` (full archive ingest, legacy **unsorted v2** `.idx` sidecars)
-- Data from your archive at  
-  `/run/media/bigboi/.../Data_Archive/ulp/raws/txt/`
-- `scratch/migration-probe.txt` — symlink to the full `0623_ulp.txt` for the second dev run (re-ingest, mostly duplicates, triggers migration)
+- Data from **your** ULP raws directory — set `SOURCE_DIR` when running `prepare.sh` (see below)
+- `scratch/migration-probe.txt` — symlink to sample A for the second dev run (re-ingest, mostly duplicates, triggers migration)
 
 Built with **`sfu` v0.1** (from git tag), not the v0.1.1 release zip (that build already writes v3 sidecars).
 
 ## Prepare (or refresh) the fixture
 
 ```bash
-./demo/migration-test/prepare.sh
+SOURCE_DIR=/path/to/your/ulp/raws/txt ./demo/migration-test/prepare.sh
 ```
 
-Defaults: **full** `0623_ulp.txt` (~7.9M lines) + full June26 file (~3.2M lines), split at 250k unique lines per part (~45 archives). Expect several minutes of ingest time.
+Point `SAMPLE_A` / `SAMPLE_B` at your own files if the defaults do not exist:
+
+```bash
+SOURCE_DIR=/path/to/raws \
+  SAMPLE_A="$SOURCE_DIR/my-a.txt" \
+  SAMPLE_B="$SOURCE_DIR/my-b.txt" \
+  ./demo/migration-test/prepare.sh
+```
+
+Defaults when only `SOURCE_DIR` is set: `0623_ulp.txt` and `sample-b.txt` under that dir.
 
 Quick smoke test (small subset):
 
