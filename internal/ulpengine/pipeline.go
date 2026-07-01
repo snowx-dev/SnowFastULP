@@ -263,7 +263,7 @@ func runBucketed(ctx context.Context, r *Resolved, m *Metrics) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(runDir)
+	defer RemoveTreeLogged(runDir)
 	// force-exit safety net: 2nd Ctrl-C bypasses deferred RemoveAll,
 	// cleanup registry surfaces this path to the user
 	RegisterCleanupPath(runDir)

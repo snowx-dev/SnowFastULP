@@ -11,6 +11,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/search"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
@@ -55,10 +56,20 @@ var (
 )
 
 var (
-	gradStart, _      = colorful.Hex("#5A56E0")
-	gradEnd, _        = colorful.Hex("#EE6FF8")
-	footerGradA, _    = colorful.Hex("#3D7EA6")
-	footerGradB, _    = colorful.Hex("#F2F8FC")
+	gradStart, _ = colorful.Hex("#5A56E0")
+	gradEnd, _   = colorful.Hex("#EE6FF8")
+
+	// footer taglines, ice blue → icy white
+	footerGradA, _ = colorful.Hex("#7DD3E8")
+	footerGradB, _ = colorful.Hex("#F2F8FC")
+
+	// box frames / progress bars, frost blue → icy white
+	frostGradA, _ = colorful.Hex("#3D7EA6")
+	frostGradB, _ = colorful.Hex("#F2F8FC")
+
+	// open-source heart in the footer, bright red ❤️
+	heartRed = lipgloss.Color("#FF2B2B")
+
 	interruptStart, _ = colorful.Hex("#E0B040")
 	interruptEnd, _   = colorful.Hex("#C04030")
 )
@@ -165,7 +176,7 @@ func runUI(cfg uiConfig, done *sync.WaitGroup) {
 			return
 		case now := <-ticker.C:
 			if cfg.Signaled != nil && cfg.Signaled() {
-				frame.draw(renderInterrupt(now.Sub(cfg.Start), termWidth()))
+				frame.draw(renderInterrupt(now.Sub(cfg.Start), termWidth(), ulpengine.SnapshotCleanupLog()))
 				continue
 			}
 			curRates := rates.sample(now, cfg.Metrics)
@@ -227,12 +238,17 @@ func renderHeader(left, right string, width int) string {
 	return left + strings.Repeat(" ", pad) + right
 }
 
-func renderInterrupt(elapsed time.Duration, width int) []string {
+func renderInterrupt(elapsed time.Duration, width int, cleanupLog []string) []string {
 	header := renderHeader(
 		interruptWarnStyle.Render("[!]")+"  "+phaseStyle.Render("INTERRUPTED — cleaning up"),
 		timeStyle.Render(elapsed.Truncate(time.Second).String()),
 		width,
 	)
+	out := []string{"", header}
+	if block := renderCleanupLogAbove(cleanupLog, termWidthFull()); len(block) > 0 {
+		out = append(out, "")
+		out = append(out, block...)
+	}
 	inner := []string{
 		"Stopping index and search workers.",
 		"This usually takes a few seconds; please wait.",
@@ -241,8 +257,27 @@ func renderInterrupt(elapsed time.Duration, width int) []string {
 	}
 	box := gradientBox(inner, contentWidth(width), interruptStart, interruptEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
-	out := append([]string{"", header, ""}, boxLines...)
+	out = append(out, "")
+	out = append(out, boxLines...)
 	return append(out, renderLiveScreenFooter(width)...)
+}
+
+// renderCleanupLogAbove is grey, full-terminal-width cleanup narration printed
+// above the interrupt box.
+func renderCleanupLogAbove(lines []string, width int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	pad := strings.Repeat(" ", leftPad)
+	budget := width - leftPad
+	if budget < 8 {
+		budget = 8
+	}
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, pad+trimToDisplayWidth(mutedStyle.Render(ln), budget))
+	}
+	return out
 }
 
 func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern string) []string {
@@ -499,6 +534,11 @@ func renderFrostTagline(text string, spanStart, spanEnd float64) string {
 	}
 	var b strings.Builder
 	for i, r := range run {
+		// the open-source heart keeps its own bright red, not the frost ramp
+		if r == '❤' || r == '\uFE0F' {
+			b.WriteString(lipgloss.NewStyle().Foreground(heartRed).Render(string(r)))
+			continue
+		}
 		t := spanStart
 		if len(run) > 1 {
 			t = spanStart + (spanEnd-spanStart)*float64(i)/float64(len(run)-1)
@@ -596,8 +636,8 @@ func formatBytes(n int64) string {
 
 func phaseVisuals(phase int32, m *search.Metrics) (pct float64, label string, boxStart, boxEnd, barStart, barEnd colorful.Color) {
 	label = indexPhaseLabel(m)
-	boxStart, boxEnd = footerGradA, footerGradB
-	barStart, barEnd = footerGradA, footerGradB
+	boxStart, boxEnd = frostGradA, frostGradB
+	barStart, barEnd = frostGradA, frostGradB
 	switch phase {
 	case search.PhaseSearch:
 		label = "SEARCHING"
@@ -689,7 +729,7 @@ func renderLabeledProgressBars(phase int32, m *search.Metrics, barWidth int, sta
 		}
 	default:
 		return [2]string{
-			indentStr + progressBarLabel("Index") + gradientBarWithPercent(indexPercent(m), body, footerGradA, footerGradB),
+			indentStr + progressBarLabel("Index") + gradientBarWithPercent(indexPercent(m), body, frostGradA, frostGradB),
 			indentStr + progressBarLabel("Search") + pendingBar(body),
 		}
 	}

@@ -551,7 +551,7 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 		// interrupt overrides phase layout for the rest of process
 		// lifetime. prev* not updated, rates meaningless in shutdown
 		if signaled != nil && signaled() {
-			frame.draw(renderInterruptLines(elapsed, w))
+			frame.draw(renderInterruptLines(elapsed, w, ulpengine.SnapshotCleanupLog()))
 			return
 		}
 

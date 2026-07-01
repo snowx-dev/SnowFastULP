@@ -116,9 +116,16 @@ var (
 	doneStart, _ = colorful.Hex("#3CC451") // vivid medium green
 	doneEnd, _   = colorful.Hex("#88FF7B") // bright lime, ~xterm 82
 
-	// live footer taglines, frost blue → icy white
-	footerGradA, _ = colorful.Hex("#3D7EA6")
+	// live footer taglines, ice blue → icy white
+	footerGradA, _ = colorful.Hex("#7DD3E8")
 	footerGradB, _ = colorful.Hex("#F2F8FC")
+
+	// box frames / mini progress bars, frost blue → icy white
+	frostGradA, _ = colorful.Hex("#3D7EA6")
+	frostGradB, _ = colorful.Hex("#F2F8FC")
+
+	// open-source heart in the footer, bright red ❤️
+	heartRed = lipgloss.Color("#FF2B2B")
 
 	// interrupt frame, amber → muted red
 	interruptStart, _ = colorful.Hex("#E0B040")
@@ -140,11 +147,18 @@ func spinnerFrame(now time.Time) string {
 // live terminal width, capped at tuiDisplayWidth. polled per tick so
 // SIGWINCH resizes show up within ~300ms
 func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stderr.Fd()))
-	if err != nil || w <= 0 {
+	w := termWidthFull()
+	if w > tuiDisplayWidth {
 		return tuiDisplayWidth
 	}
-	if w > tuiDisplayWidth {
+	return w
+}
+
+// termWidthFull is the real terminal width, uncapped. The muted cleanup log
+// above the interrupt box uses this so long paths truncate as late as possible.
+func termWidthFull() int {
+	w, _, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil || w <= 0 {
 		return tuiDisplayWidth
 	}
 	return w
@@ -850,6 +864,11 @@ func renderFrostTagline(text string, spanStart, spanEnd float64) string {
 	}
 	var b strings.Builder
 	for i, r := range run {
+		// the open-source heart keeps its own bright red, not the frost ramp
+		if r == '❤' || r == '\uFE0F' {
+			b.WriteString(lipgloss.NewStyle().Foreground(heartRed).Render(string(r)))
+			continue
+		}
 		t := spanStart
 		if len(run) > 1 {
 			t = spanStart + (spanEnd-spanStart)*float64(i)/float64(len(run)-1)
@@ -1563,7 +1582,7 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 		)
 	}
 
-	box := gradientBox(innerLines, contentWidth(width), footerGradA, footerGradB)
+	box := gradientBox(innerLines, contentWidth(width), frostGradA, frostGradB)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	// per-worker rows OUTSIDE the frame, between box and main bar so
@@ -1667,7 +1686,7 @@ func renderWorkerRow(idx int, ws *ulpengine.WorkerStatus, innerWidth, idxMarkerW
 			pct = 1
 		}
 	}
-	bar := miniGradientBar(pct, workerBarBodyW, footerGradA, footerGradB)
+	bar := miniGradientBar(pct, workerBarBodyW, frostGradA, frostGradB)
 	var pctText string
 	if bytesTotal > 0 {
 		pctText = fmt.Sprintf("%3d%%", int(pct*100))
@@ -1793,9 +1812,16 @@ func compactArchiveName(name string) string {
 }
 
 // "cleaning up after Ctrl-C" notice in place of active phase frame.
-// same indent/box width as live phases so eye doesnt relocate the frame
-func renderInterruptLines(elapsed time.Duration, width int) []string {
+// cleanupLog lines render full-width above the box (muted grey), matching sfl's
+// issue block above the summary frame.
+func renderInterruptLines(elapsed time.Duration, width int, cleanupLog []string) []string {
 	header := renderHeader(interruptWarnStyle.Render("[!]"), "INTERRUPTED — cleaning up", elapsed, width)
+
+	out := []string{"", header}
+	if block := renderCleanupLogAbove(cleanupLog, termWidthFull()); len(block) > 0 {
+		out = append(out, "")
+		out = append(out, block...)
+	}
 
 	innerLines := []string{
 		"Flushing output and removing temp shards.",
@@ -1807,8 +1833,26 @@ func renderInterruptLines(elapsed time.Duration, width int) []string {
 	box := gradientBox(innerLines, contentWidth(width), interruptStart, interruptEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
-	out := []string{"", header, ""}
+	out = append(out, "")
 	out = append(out, boxLines...)
 	out = append(out, renderLiveScreenFooter(width)...)
+	return out
+}
+
+// renderCleanupLogAbove is grey, full-terminal-width cleanup narration printed
+// above the interrupt box. Uses leftPad so the block aligns with the header.
+func renderCleanupLogAbove(lines []string, width int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	pad := strings.Repeat(" ", leftPad)
+	budget := width - leftPad
+	if budget < 8 {
+		budget = 8
+	}
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, pad+trimToDisplayWidth(mutedStyle.Render(ln), budget))
+	}
 	return out
 }

@@ -532,6 +532,15 @@ func buildWorklist(input string, prog *Progress) ([]workItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A single-file input names only one part of a multi-volume / split set; the
+	// walk never sees its siblings, so weight (bar pacing) and the "part N/M"
+	// label would be wrong even though rardecode / the split reader follow the
+	// chain on disk regardless. Expand to the full on-disk set so accounting is
+	// correct. One ReadDir for the one named file -- no RDP fan-out, and the
+	// directory-walk path (which already enqueues every part) is untouched.
+	if !rootIsDir && len(archivesP) == 1 {
+		archivesP = VolumeSet(archivesP[0])
+	}
 	sort.Strings(filesP)
 	sort.Strings(archivesP)
 

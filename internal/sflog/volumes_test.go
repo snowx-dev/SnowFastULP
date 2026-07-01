@@ -240,6 +240,39 @@ func TestBuildWorklistDiscoversSplitParts(t *testing.T) {
 	}
 }
 
+// TestBuildWorklistExpandsSingleFileRarVolumeSet covers single-file input naming
+// the first part of a multi-volume RAR set: the walk sees only that part, so
+// without expansion weight (bar pacing) and the volume count ("part N/M" label)
+// would reflect one part while rardecode reads the whole chain. Discovery must
+// expand to the full on-disk set.
+func TestBuildWorklistExpandsSingleFileRarVolumeSet(t *testing.T) {
+	dir := t.TempDir()
+	sizes := map[string]int{"set.part1.rar": 100, "set.part2.rar": 200, "set.part3.rar": 300}
+	for name, n := range sizes {
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items, err := buildWorklist(filepath.Join(dir, "set.part1.rar"), NewProgress())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1 (collapsed set): %+v", len(items), items)
+	}
+	it := items[0]
+	if it.assembly != assemblyRarVolumes {
+		t.Fatalf("assembly = %v, want assemblyRarVolumes", it.assembly)
+	}
+	if len(it.volumes) != 3 {
+		t.Fatalf("volumes = %v, want all 3 parts", it.volumes)
+	}
+	if it.weight != 600 {
+		t.Fatalf("weight = %d, want 600 (sum of all parts, not just part1)", it.weight)
+	}
+}
+
 // TestRealSplitWorklist is a fast, extraction-free check on real public data:
 // point SFL_REAL_SPLIT at a dir holding multi-part archives (e.g. fullz/test4
 // with .zip.NNN sets and .partN.rar sets) and confirm discovery+grouping turn

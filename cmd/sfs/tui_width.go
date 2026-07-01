@@ -14,11 +14,16 @@ const (
 )
 
 func termWidth() int {
-	w, _, err := term.GetSize(os.Stderr.Fd())
-	if err != nil || w <= 0 {
+	w := termWidthFull()
+	if w > tuiDisplayWidth {
 		return tuiDisplayWidth
 	}
-	if w > tuiDisplayWidth {
+	return w
+}
+
+func termWidthFull() int {
+	w, _, err := term.GetSize(os.Stderr.Fd())
+	if err != nil || w <= 0 {
 		return tuiDisplayWidth
 	}
 	return w

@@ -232,7 +232,7 @@ func run(cfg runConfig) error {
 	// removeSpill is idempotent (os.RemoveAll no-ops on a missing path), so the
 	// graceful interrupt paths below can clean up explicitly before exitWithCode
 	// — which os.Exits and therefore skips this defer — without any double-free.
-	removeSpill := func() { _ = os.RemoveAll(spillDir) }
+	removeSpill := func() { ulpengine.RemoveTreeLogged(spillDir) }
 	defer removeSpill()
 
 	eng := buildEngine(cfg, passwords, prog, dbg, spillDir)
@@ -246,10 +246,11 @@ func run(cfg runConfig) error {
 	// Extraction/finalize failures tear the live frame down before any stderr so
 	// frames never interleave with the error.
 	if extractErr != nil {
-		stopMonitor()
-		snk.cleanup()
 		if signaled() {
-			removeSpill()
+			interruptCleanup(snk, removeSpill)
+		}
+		stopMonitor()
+		if signaled() {
 			printInterruptSummary(cfg)
 			exitWithCode(130)
 		}
@@ -280,17 +281,19 @@ func run(cfg runConfig) error {
 			// the summary.
 			dbg.Event("ingest: start lib=%q ulp=%q emitted=%d", cfg.LibraryDir, snk.ulpPath, stats.Emitted)
 			ingestRes, ingestMet, err = ingestToLibrary(ctx, cfg, snk.ulpPath, prog)
-			stopMonitor()
 			if err != nil {
 				dbg.Event("ingest: ended early: %v (signaled=%v)", err, signaled())
-				snk.cleanup()
 				if signaled() {
-					removeSpill()
+					interruptCleanup(snk, removeSpill)
+				}
+				stopMonitor()
+				if signaled() {
 					printInterruptSummary(cfg)
 					exitWithCode(130)
 				}
 				return err
 			}
+			stopMonitor()
 			dbg.Event("ingest: done")
 		}
 	} else {
@@ -424,15 +427,20 @@ func (s *sink) finalize(failed bool) error {
 		}
 	}
 	if failed && s.workDir == "" {
-		_ = os.Remove(s.outPath)
+		ulpengine.RemovePathLogged(s.outPath)
 	}
 	return err
 }
 
 func (s *sink) cleanup() {
 	if s.workDir != "" {
-		_ = os.RemoveAll(s.workDir)
+		ulpengine.RemoveTreeLogged(s.workDir)
 	}
+}
+
+func interruptCleanup(snk *sink, removeSpill func()) {
+	snk.cleanup()
+	removeSpill()
 }
 
 func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *debugLogger, spillDir string) *sflog.Engine {
@@ -623,7 +631,7 @@ func startedOrNow(cfg runConfig) time.Time {
 }
 
 func printInterruptSummary(cfg runConfig) {
-	for _, ln := range renderInterruptSummary(time.Since(startedOrNow(cfg))) {
+	for _, ln := range renderInterruptSummary(time.Since(startedOrNow(cfg)), ulpengine.SnapshotCleanupLog()) {
 		fmt.Fprintln(os.Stderr, ln)
 	}
 }

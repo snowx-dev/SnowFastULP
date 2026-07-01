@@ -21,6 +21,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/index"
 	"github.com/snowx-dev/SnowFastULP/internal/search"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
 
@@ -548,6 +549,11 @@ func run(ctx context.Context, cfg runConfig) error {
 
 	var emitted int
 	limitReached := false
+	defer func() {
+		if ctx.Err() != nil && !limitReached && cfg.outFile != "" {
+			discardInterruptedOutput(cfg.outFile, out)
+		}
+	}()
 
 	// handleHit records one hit. Returns stop=true when the -l limit is reached
 	// (cancel() halts workers; limitReached makes the ctx-cancelled state below a
@@ -652,6 +658,18 @@ drainHits:
 		return searchErr
 	}
 	return nil
+}
+
+// discardInterruptedOutput removes a partial -o file after a graceful Ctrl-C so
+// interrupted runs do not leave half-written hit lists behind.
+func discardInterruptedOutput(path string, f *os.File) {
+	if path == "" {
+		return
+	}
+	if f != nil {
+		_ = f.Close()
+	}
+	ulpengine.RemovePathLogged(path)
 }
 
 func indexArchives(ctx context.Context, archives []string, workers int, metrics *search.Metrics, dbg *debugLog, note func(string)) (map[string]*index.Sidecar, error) {

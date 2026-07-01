@@ -73,5 +73,45 @@ func TestPrintManualCleanupHintEmptyIsNoOp(t *testing.T) {
 func resetCleanupRegistry() {
 	cleanupMu.Lock()
 	cleanupPaths = nil
+	cleanupLog = nil
 	cleanupMu.Unlock()
+}
+
+func TestLogCleanupLineSnapshot(t *testing.T) {
+	t.Cleanup(resetCleanupRegistry)
+	resetCleanupRegistry()
+
+	LogCleanupLine("removed /tmp/foo")
+	LogCleanupLine("")
+	LogCleanupLine("removed /tmp/bar")
+
+	got := SnapshotCleanupLog()
+	want := []string{"removed /tmp/foo", "removed /tmp/bar"}
+	if len(got) != len(want) {
+		t.Fatalf("snapshot len=%d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRemovePathLogged(t *testing.T) {
+	t.Cleanup(resetCleanupRegistry)
+	resetCleanupRegistry()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "partial.zst")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	RemovePathLogged(path)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file should be gone: %v", err)
+	}
+	log := SnapshotCleanupLog()
+	if len(log) != 1 || !strings.Contains(log[0], "removed") || !strings.Contains(log[0], "partial.zst") {
+		t.Fatalf("unexpected log: %v", log)
+	}
 }

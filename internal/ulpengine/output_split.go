@@ -65,9 +65,10 @@ func removeOutputFiles(paths []string) {
 		if p == "" {
 			continue
 		}
-		_ = os.Remove(p)
-		_ = os.Remove(sidecarPathForArchive(p))
-		_ = os.Remove(searchSidecarPathForArchive(p))
+		RemovePathLogged(p)
+		sc := sidecarPathForArchive(p)
+		RemovePathLogged(sc)
+		RemovePathLogged(searchSidecarPathForArchive(p))
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
 
@@ -37,25 +38,31 @@ const (
 )
 
 var (
-	sflTitleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#D4F1F9")).Bold(true)
-	sflOkStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#8FE7FF")).Bold(true)
-	sflMutedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#8BA7B1"))
-	sflWarnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
-	sflLabelStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#B8D8E0")).Bold(true)
-	sflSpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8FE7FF")).Bold(true)
-	sflBoxStyle     = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#5BA4C9")).
-			Padding(0, 2)
+	sflTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFDDE6")).Bold(true)
+	sflOkStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA6")).Bold(true)
+	sflMutedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6818F"))
+	sflWarnStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
+	sflLabelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#E8B6C6")).Bold(true)
+	sflSpinnerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA6")).Bold(true)
 	sflInterruptBoxStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("#E0B040")).
 				Padding(0, 2)
-	sflEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#33464F"))
+	sflEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A242E"))
 
-	// icy gradient: deep frost -> icy white, distinct from sfu's purple/pink
-	iceStart, _ = colorful.Hex("#1E5F8C")
-	iceEnd, _   = colorful.Hex("#CAF0F8")
+	// elegant red gradient: muted plum-raspberry -> heart-emoji red (Twemoji ❤️
+	// #DD2E44). Heart red is the main color; the start is a light, close plum so
+	// it reads as a hint of purple without a long color span. Distinct from
+	// sfu/sfs's light indigo->magenta and the amber interrupt accent.
+	gradStart, _ = colorful.Hex("#9E3A6E")
+	gradEnd, _   = colorful.Hex("#DD2E44")
+
+	// footer taglines, ice blue → icy white (unified with sfu/sfs footers)
+	footerGradA, _ = colorful.Hex("#7DD3E8")
+	footerGradB, _ = colorful.Hex("#F2F8FC")
+
+	// open-source heart in the footer, bright red ❤️
+	heartRed = lipgloss.Color("#FF2B2B")
 )
 
 // ASCII spinner, 4 frames at 100ms keyed off wall-clock (no animation tick).
@@ -101,7 +108,8 @@ func headerLine(spinnerStyled, tag string, elapsed time.Duration, width int) str
 	return left + strings.Repeat(" ", pad) + right
 }
 
-// frostTagline renders text along the icy gradient, faint, for the footer.
+// frostTagline renders text along the ice-blue footer gradient, faint, for the
+// footer. The open-source heart keeps its own bright red.
 func frostTagline(text string, spanStart, spanEnd float64) string {
 	run := []rune(text)
 	if len(run) == 0 {
@@ -109,11 +117,15 @@ func frostTagline(text string, spanStart, spanEnd float64) string {
 	}
 	var b strings.Builder
 	for i, r := range run {
+		if r == '❤' || r == '\uFE0F' {
+			b.WriteString(lipgloss.NewStyle().Foreground(heartRed).Render(string(r)))
+			continue
+		}
 		t := spanStart
 		if len(run) > 1 {
 			t = spanStart + (spanEnd-spanStart)*float64(i)/float64(len(run)-1)
 		}
-		c := iceStart.BlendLuv(iceEnd, t)
+		c := footerGradA.BlendLuv(footerGradB, t)
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Faint(true).Render(string(r)))
 	}
 	return b.String()
@@ -297,7 +309,7 @@ func trimToDisplayWidth(s string, max int) string {
 	return b.String()
 }
 
-// gradientBar renders an icy progress bar with a right-aligned percent suffix.
+// gradientBar renders a red progress bar with a right-aligned percent suffix.
 func gradientBar(percent float64, width int) string {
 	if width < barSuffixWidth+2 {
 		width = barSuffixWidth + 2
@@ -322,7 +334,7 @@ func gradientBar(percent float64, width int) string {
 		if body > 1 {
 			t = float64(i) / float64(body-1)
 		}
-		c := iceStart.BlendLuv(iceEnd, t)
+		c := gradStart.BlendLuv(gradEnd, t)
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render("█"))
 	}
 	if rem := body - fill; rem > 0 {
@@ -401,7 +413,7 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 	draw := func() {
 		now := time.Now()
 		if signaled != nil && signaled() {
-			frame.draw(renderInterrupt(now.Sub(started), spinnerFrame(now), termWidth()))
+			frame.draw(renderInterrupt(now.Sub(started), spinnerFrame(now), termWidth(), ulpengine.SnapshotCleanupLog()))
 			return
 		}
 		cur := prog.DoneBytes()
@@ -445,7 +457,8 @@ func boxInner(width int) int {
 }
 
 // insetBox renders body inside style and indents every line by leftPad so the
-// frame sits balanced in the terminal instead of flush-left.
+// frame sits balanced in the terminal instead of flush-left. Used for the solid
+// amber interrupt/warn box; the live/summary boxes use sflGradientBox.
 func insetBox(style lipgloss.Style, body []string, width int) []string {
 	rendered := style.Width(boxInner(width) + 4).Render(strings.Join(body, "\n"))
 	pad := strings.Repeat(" ", sflLeftPad)
@@ -454,6 +467,62 @@ func insetBox(style lipgloss.Style, body []string, width int) []string {
 		lines[i] = pad + lines[i]
 	}
 	return lines
+}
+
+// sflPadOrTrim pads s with trailing spaces (or trims with an ellipsis) to exactly
+// width printable columns, measuring by visible width so ANSI-styled body lines
+// stay aligned inside the box.
+func sflPadOrTrim(s string, width int) string {
+	if width < 0 {
+		width = 0
+	}
+	vw := tuiVisibleWidth(s)
+	if vw == width {
+		return s
+	}
+	if vw < width {
+		return s + strings.Repeat(" ", width-vw)
+	}
+	return trimToDisplayWidth(s, width)
+}
+
+// sflGradientBox is insetBox's gradient sibling: it frames body in a rounded box
+// whose top/bottom borders carry a per-char start->end LUV gradient (the
+// verticals use the gradient midpoint), then indents every line by sflLeftPad. It
+// reproduces insetBox's geometry exactly (outer = boxInner+6) so swapping a solid
+// box for a gradient one never shifts the layout.
+func sflGradientBox(body []string, width int, start, end colorful.Color) []string {
+	inner := boxInner(width)
+	outer := inner + 6
+	mid := start.BlendLuv(end, 0.5)
+	midStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
+	border := func(left, right string) string {
+		var b strings.Builder
+		for i := 0; i < outer; i++ {
+			t := 0.0
+			if outer > 1 {
+				t = float64(i) / float64(outer-1)
+			}
+			c := start.BlendLuv(end, t)
+			ch := "─"
+			switch i {
+			case 0:
+				ch = left
+			case outer - 1:
+				ch = right
+			}
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render(ch))
+		}
+		return b.String()
+	}
+	pad := strings.Repeat(" ", sflLeftPad)
+	rows := make([]string, 0, len(body)+2)
+	rows = append(rows, pad+border("╭", "╮"))
+	for _, ln := range body {
+		rows = append(rows, pad+midStyle.Render("│")+"  "+sflPadOrTrim(ln, inner)+"  "+midStyle.Render("│"))
+	}
+	rows = append(rows, pad+border("╰", "╯"))
+	return rows
 }
 
 // frame is the shared shape for every render: a blank top margin, the header /
@@ -484,7 +553,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, t
 		if iv.Status != "" {
 			body = append(body, sflMutedStyle.Render(iv.Status))
 		}
-		return frame(header, insetBox(sflBoxStyle, body, width), width)
+		return frame(header, sflGradientBox(body, width, gradStart, gradEnd), width)
 	}
 
 	scanning := prog.Phase() == phaseDiscoverVal || prog.Total() == 0
@@ -506,14 +575,11 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, t
 		}
 	} else {
 		bar := gradientBar(prog.Fraction(), inner)
-		counts := fmt.Sprintf("%s / %s logs  ·  %s unique  ·  %s dupes",
-			formatInt(int(prog.Logs())), formatInt(int(prog.LogsTotal())),
-			formatInt(int(prog.Emitted())), formatInt(int(prog.Duplicates())))
-		detail := sflMutedStyle.Render(fmt.Sprintf("%s files · %s archives · %s / %s · %s/s%s",
-			formatInt(int(prog.Files())), formatInt(int(prog.Archives())),
-			formatBytes(prog.DoneBytes()), formatBytes(prog.Total()), formatBytes(int64(rate)),
-			formatETA(prog.Total()-prog.DoneBytes(), rate)))
-		body = []string{bar, counts, detail}
+		body = append([]string{bar}, renderExtractStatsRows(
+			prog.Files(), prog.Archives(),
+			prog.Logs(), prog.LogsTotal(), prog.Emitted(), prog.Duplicates(),
+			prog.DoneBytes(), prog.Total(), rate,
+		)...)
 		// Surface the concurrent workers: a per-slot panel makes the
 		// parallelism visible even when the byte bar crawls. Falls back to the
 		// single current path when no registry is wired (back-compat).
@@ -524,7 +590,25 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, t
 		}
 	}
 
-	return frame(header, insetBox(sflBoxStyle, body, width), width)
+	return frame(header, sflGradientBox(body, width, gradStart, gradEnd), width)
+}
+
+// renderExtractStatsRows is the labeled live-stats block during extraction.
+// One metric group per row mirrors recapCountRows so large counts and ETA never
+// compete for width inside the box.
+func renderExtractStatsRows(files, archives, logs, logsTotal, emitted, dupes, doneBytes, totalBytes int64, rate float64) []string {
+	eta := sflMutedStyle.Render(formatETADisplay(totalBytes-doneBytes, rate))
+	return []string{
+		recapRow("Logs", sflOkStyle.Render(formatInt(int(logs)))+
+			sflMutedStyle.Render(" / "+formatInt(int(logsTotal)))),
+		recapRow("Unique", sflOkStyle.Render(formatInt(int(emitted)))+
+			sflMutedStyle.Render("  ·  "+formatInt(int(dupes))+" dupes")),
+		recapRow("Sources", sflMutedStyle.Render(fmt.Sprintf("%s files  ·  %s archives",
+			formatInt(int(files)), formatInt(int(archives))))),
+		recapRow("Bytes", sflMutedStyle.Render(fmt.Sprintf("%s / %s  ·  %s/s",
+			formatBytes(doneBytes), formatBytes(totalBytes), formatBytes(int64(rate))))),
+		recapRow("ETA", eta),
+	}
 }
 
 // sfl worker-panel sizing. A small floor keeps the "many things at once" feel
@@ -533,8 +617,8 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, t
 const (
 	sflMaxWorkerRows = 8
 	// rows the extract frame needs for non-worker content (margins, header,
-	// box borders, bar, counts, detail, footer), with margin for SIGWINCH.
-	sflWorkerReservedRows = 12
+	// box borders, bar, five labeled stats rows, footer), with margin for SIGWINCH.
+	sflWorkerReservedRows = 15
 	// widest stage label ("testing password"); the stage column is padded to
 	// this so paths line up across rows.
 	sflStageColW = 16
@@ -578,10 +662,10 @@ func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner, tick int) [
 	idxMarkerW := lipgloss.Width(fmt.Sprintf("[%d]", total))
 	out := make([]string, 0, len(active)+1)
 	// Only call out the worker count when 2+ are genuinely busy: a single active
-	// row reading "1 of N workers active" makes a (correctly) one-stream archive
+	// row plus a "1 workers active" header makes a (correctly) one-stream archive
 	// look like wasted cores, so collapse to just the row in that case.
 	if len(active) >= 2 {
-		out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d of %d workers active", len(active), total)))
+		out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d workers active", len(active))))
 	}
 	for _, w := range active {
 		out = append(out, renderSflWorkerRow(w, inner, idxMarkerW, tick))
@@ -628,14 +712,37 @@ func termHeight() int {
 
 // renderInterrupt is the frame shown after a graceful Ctrl-C while in-flight
 // reads finish and partial output is discarded.
-func renderInterrupt(elapsed time.Duration, spinner string, width int) []string {
+func renderInterrupt(elapsed time.Duration, spinner string, width int, cleanupLog []string) []string {
 	header := headerLine(sflWarnStyle.Render(spinner), sflWarnStyle.Render("[!] INTERRUPTED — cleaning up"), elapsed, width)
 	body := []string{
 		"Finishing in-flight reads and discarding partial output.",
 		"",
 		sflMutedStyle.Render("A second Ctrl+C will force-exit immediately."),
 	}
-	return frame(header, insetBox(sflInterruptBoxStyle, body, width), width)
+	var box []string
+	if block := renderCleanupLogAbove(cleanupLog, termWidthFull()); len(block) > 0 {
+		box = append(box, block...)
+		box = append(box, "")
+	}
+	box = append(box, insetBox(sflInterruptBoxStyle, body, width)...)
+	return frame(header, box, width)
+}
+
+// renderCleanupLogAbove is grey, full-terminal-width cleanup narration printed
+// above the interrupt box.
+func renderCleanupLogAbove(lines []string, width int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	budget := width - sflLeftPad
+	if budget < 8 {
+		budget = 8
+	}
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, sflIndent+sflMutedStyle.Render(clampHead(ln, budget)))
+	}
+	return out
 }
 
 const (
@@ -679,7 +786,7 @@ func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, noti
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
 	body := append(recapCountRows(stats), "", sflMutedStyle.Render("Output: ")+outPath)
-	box := append(mutedAbove(stats, termWidthFull()), insetBox(sflBoxStyle, body, width)...)
+	box := append(mutedAbove(stats, termWidthFull()), sflGradientBox(body, width, gradStart, gradEnd)...)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
 
@@ -698,7 +805,7 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
-	box := append(mutedAbove(stats, termWidthFull()), insetBox(sflBoxStyle, body, width)...)
+	box := append(mutedAbove(stats, termWidthFull()), sflGradientBox(body, width, gradStart, gradEnd)...)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
 
@@ -721,7 +828,7 @@ func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, al
 			sflMutedStyle.Render(" new  ·  "+formatInt(int(alreadyInLib))+" already in library")),
 	)
 	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
-	box := append(mutedAbove(stats, termWidthFull()), insetBox(sflBoxStyle, body, width)...)
+	box := append(mutedAbove(stats, termWidthFull()), sflGradientBox(body, width, gradStart, gradEnd)...)
 	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
@@ -734,20 +841,26 @@ func libraryTotalBox(libraryLines int64, width int) []string {
 		sflOkStyle.Render(formatInt(int(libraryLines))),
 		sflMutedStyle.Render("lines in library"),
 	}
-	return insetBox(sflBoxStyle, body, width)
+	return sflGradientBox(body, width, gradStart, gradEnd)
 }
 
 // renderInterruptSummary is printed on the normal screen after a graceful
 // Ctrl-C, replacing a bare "interrupted" line with a styled notice so the exit
 // reads as deliberate rather than a crash.
-func renderInterruptSummary(elapsed time.Duration) []string {
+func renderInterruptSummary(elapsed time.Duration, cleanupLog []string) []string {
 	width := termWidth()
 	title := sflIndent + sflWarnStyle.Render("⚠ SnowFastLog INTERRUPTED")
 	body := []string{
 		"Stopped before completion — partial output discarded.",
 		sflMutedStyle.Render(fmt.Sprintf("Ran for %s · re-run to start over.", formatDuration(elapsed))),
 	}
-	return frame(title, insetBox(sflInterruptBoxStyle, body, width), width)
+	var box []string
+	if block := renderCleanupLogAbove(cleanupLog, termWidthFull()); len(block) > 0 {
+		box = append(box, block...)
+		box = append(box, "")
+	}
+	box = append(box, insetBox(sflInterruptBoxStyle, body, width)...)
+	return frame(title, box, width)
 }
 
 // plural picks the singular or plural noun by count (1 → singular).
@@ -885,20 +998,36 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
 }
 
-// formatETA renders a muted "  ·  ETA <d>" suffix for the extract detail line,
-// or "" when an estimate would mislead: unknown total / near-complete (rem<=0),
-// a stalled or not-yet-measured rate (<=1 B/s), or an absurdly long horizon
-// from an early near-zero rate. It converges on the long single-archive tail,
-// which is exactly when users stare at it.
-func formatETA(remaining int64, rate float64) string {
+// etaDuration returns a remaining-time estimate when it would be meaningful:
+// not near-complete (rem<=0), not stalled (rate<=1 B/s), not sub-second, and
+// not an absurd horizon (>=99h) from an early near-zero rate.
+func etaDuration(remaining int64, rate float64) (time.Duration, bool) {
 	if remaining <= 0 || rate <= 1 {
-		return ""
+		return 0, false
 	}
 	secs := float64(remaining) / rate
 	if secs < 1 || secs >= 99*3600 {
-		return ""
+		return 0, false
 	}
-	return "  ·  ETA " + formatDuration(time.Duration(secs * float64(time.Second)))
+	return time.Duration(secs * float64(time.Second)), true
+}
+
+// formatETADisplay renders an ETA duration for the labeled stats row, or "—"
+// when an estimate would mislead (mirrors sfs's always-present ETA row).
+func formatETADisplay(remaining int64, rate float64) string {
+	if d, ok := etaDuration(remaining, rate); ok {
+		return formatDuration(d)
+	}
+	return "—"
+}
+
+// formatETA renders a muted "  ·  ETA <d>" suffix for legacy single-line layouts,
+// or "" when an estimate would mislead.
+func formatETA(remaining int64, rate float64) string {
+	if d, ok := etaDuration(remaining, rate); ok {
+		return "  ·  ETA " + formatDuration(d)
+	}
+	return ""
 }
 
 func formatBytes(n int64) string {

@@ -170,7 +170,7 @@ func TestRenderSflWorkerPanelShowsConcurrentStages(t *testing.T) {
 	}
 	joined := strings.Join(renderSflWorkerPanel(active, 4, 72, 0), "\n")
 	for _, want := range []string{
-		"3 of 4 workers active",
+		"3 workers active",
 		"testing password",
 		"extracting",
 		"parsing",
@@ -183,9 +183,9 @@ func TestRenderSflWorkerPanelShowsConcurrentStages(t *testing.T) {
 }
 
 // TestRenderSflWorkerPanelHidesHeaderWhenOne proves a single active row drops
-// the "N of M workers active" header (so a correctly one-stream archive doesn't
+// the "N workers active" header (so a correctly one-stream archive doesn't
 // look like wasted cores) but still shows the worker row, and that 2+ active
-// restores the honest count.
+// restores the count header.
 func TestRenderSflWorkerPanelHidesHeaderWhenOne(t *testing.T) {
 	one := []sflog.ActiveWorker{{Index: 0, Path: "/data/big.rar", Stage: sflog.StageExtracting}}
 	joined := strings.Join(renderSflWorkerPanel(one, 16, 72, 0), "\n")
@@ -196,7 +196,7 @@ func TestRenderSflWorkerPanelHidesHeaderWhenOne(t *testing.T) {
 		t.Fatalf("single worker row missing:\n%s", joined)
 	}
 	two := append(one, sflog.ActiveWorker{Index: 1, Path: "/data/b.zip", Stage: sflog.StageParsing})
-	if j := strings.Join(renderSflWorkerPanel(two, 16, 72, 0), "\n"); !strings.Contains(j, "2 of 16 workers active") {
+	if j := strings.Join(renderSflWorkerPanel(two, 16, 72, 0), "\n"); !strings.Contains(j, "2 workers active") {
 		t.Fatalf("two active workers must show the count header:\n%s", j)
 	}
 }
@@ -225,6 +225,70 @@ func TestFormatETA(t *testing.T) {
 		if !c.wantETA && got != "" {
 			t.Errorf("%s: formatETA(%d,%v)=%q, want empty", c.name, c.remaining, c.rate, got)
 		}
+		display := formatETADisplay(c.remaining, c.rate)
+		if c.wantETA && display == "—" {
+			t.Errorf("%s: formatETADisplay(%d,%v)=%q, want a duration", c.name, c.remaining, c.rate, display)
+		}
+		if !c.wantETA && display != "—" {
+			t.Errorf("%s: formatETADisplay(%d,%v)=%q, want em dash", c.name, c.remaining, c.rate, display)
+		}
+	}
+}
+
+func TestRenderExtractStatsRowsLargeNumbers(t *testing.T) {
+	const (
+		files    = 12_345_678
+		archives = 678_901
+		logs     = 1_234
+		logsTot  = 5_678
+		emitted  = 9_012_345
+		dupes    = 3_456_789
+		total    = 45 << 40 // ~45.0TB
+		done     = total - (100 << 20)
+		rate     = 10 << 20 // 10MB/s → ~10s ETA on 100MB remaining
+	)
+	joined := strings.Join(renderExtractStatsRows(files, archives, logs, logsTot, emitted, dupes, done, total, rate), "\n")
+	for _, want := range []string{
+		"12,345,678", "678,901",
+		"1,234", "5,678",
+		"9,012,345", "3,456,789",
+		"45.0TB", "10.0MB/s",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("large-number stats missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("stats rows must not truncate with ellipsis:\n%s", joined)
+	}
+	if !strings.Contains(joined, "10s") && !strings.Contains(joined, "9s") {
+		t.Fatalf("expected ETA duration in stats rows:\n%s", joined)
+	}
+}
+
+func TestRenderExtractStatsRowsETAHidden(t *testing.T) {
+	joined := strings.Join(renderExtractStatsRows(1, 1, 1, 1, 1, 0, 100, 100, 0.5), "\n")
+	if !strings.Contains(joined, "—") {
+		t.Fatalf("stalled rate should show em-dash ETA:\n%s", joined)
+	}
+}
+
+func TestRenderExtractStatsRowsLabels(t *testing.T) {
+	rows := renderExtractStatsRows(10, 2, 3, 5, 7, 1, 1<<20, 10<<20, 5<<20)
+	for _, label := range []string{"Logs", "Unique", "Sources", "Bytes", "ETA"} {
+		found := false
+		for _, row := range rows {
+			if strings.Contains(row, label) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing label %q in rows:\n%v", label, rows)
+		}
+	}
+	if len(rows) != 5 {
+		t.Fatalf("want 5 stats rows, got %d", len(rows))
 	}
 }
 
@@ -283,7 +347,7 @@ func TestSflWorkerRowCap(t *testing.T) {
 		{"no workers", 50, 0, 0},
 		{"very short term keeps floor", 16, 16, sflMaxWorkerRows},
 		{"floor capped by total", 16, 4, 4},
-		{"mid term below total", 24, 16, 12},
+		{"mid term below total", 24, 16, 9},
 		{"tall term expands toward total", 60, 16, 16},
 		{"tall term capped at total", 100, 12, 12},
 	}
@@ -381,8 +445,8 @@ func TestSummaryIssuesAppearAboveBoxMuted(t *testing.T) {
 	if !strings.Contains(joined, "locked.zip  —  in a.rar") {
 		t.Fatalf("missing inner/outer provenance form:\n%s", joined)
 	}
-	// #8BA7B1 (muted grey), never #F2C14E (warn yellow), in a completion frame.
-	if !strings.Contains(lines[headerIdx], "139;167;177") {
+	// #A6818F (muted mauve), never #F2C14E (warn yellow), in a completion frame.
+	if !strings.Contains(lines[headerIdx], "166;129;143") {
 		t.Fatalf("issue header is not muted-styled: %q", lines[headerIdx])
 	}
 	if strings.Contains(joined, "242;193;78") {
@@ -446,11 +510,21 @@ func TestSflFrameRowsClampToWidth(t *testing.T) {
 }
 
 func TestRenderInterruptShowsCleanupNotice(t *testing.T) {
-	lines := renderInterrupt(0, "/", 80)
+	lines := renderInterrupt(0, "/", 80, nil)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"INTERRUPTED", "force-exit"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("interrupt frame missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderInterruptShowsCleanupLog(t *testing.T) {
+	log := []string{"removed temp dir /tmp/sfl-spill-abc", "removed /out/sfl_partial.txt"}
+	joined := strings.Join(renderInterrupt(0, "/", 80, log), "\n")
+	for _, want := range log {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("interrupt frame missing cleanup line %q:\n%s", want, joined)
 		}
 	}
 }
