@@ -79,9 +79,26 @@ func (d *debugLogger) Completion(stats sflog.ExtractStats) {
 		return
 	}
 	d.Event("complete: logs=%d files=%d archives=%d credentials=%d emitted=%d duplicates=%d "+
-		"skippedFiles=%d skippedArchives=%d passwordNotFound=%d parseErrors=%d openErrors=%d noULP=%d",
+		"skippedFiles=%d skippedArchives=%d passwordNotFound=%d parseIssues=%d openIssues=%d noULP=%d",
 		stats.Logs, stats.FilesScanned, stats.ArchivesScanned, stats.Credentials, stats.Emitted, stats.Duplicates,
 		stats.SkippedFiles, stats.SkippedArchives, stats.PasswordNotFound, stats.ParseErrors, stats.OpenErrors, stats.NoULP)
+}
+
+// Issues logs each recorded issue with path, kind, and detail for post-run review.
+func (d *debugLogger) Issues(stats sflog.ExtractStats) {
+	if d == nil || len(stats.Issues) == 0 {
+		return
+	}
+	d.Event("issues: %d example(s) recorded (parse=%d open=%d password=%d volume=%d noULP=%d)",
+		len(stats.Issues), stats.ParseErrors, stats.OpenErrors, stats.PasswordNotFound, stats.MissingVolumes, stats.NoULP)
+	for _, is := range stats.Issues {
+		detail := sflog.IssueDetail(is)
+		if detail != "" {
+			d.Event("  %s path=%q detail=%q", is.Kind, is.Path, detail)
+		} else {
+			d.Event("  %s path=%q", is.Kind, is.Path)
+		}
+	}
 }
 
 func (d *debugLogger) Close() {

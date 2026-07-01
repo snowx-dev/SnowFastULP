@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"sync"
 
@@ -47,13 +46,7 @@ func exitWithCode(code int) {
 	os.Exit(code)
 }
 
-// forceExit handles a hard abort (second Ctrl-C or cleanup timeout): it leaves
-// the alt-screen, then on the normal screen lists any engine/work temp paths
-// that deferred cleanup never got to remove (decrypted ULPs, shard dirs) so the
-// analyst can delete them by hand, prints reason, and exits 130.
+// forceExit handles a hard abort (second Ctrl-C or cleanup timeout).
 func forceExit(reason string) {
-	restoreTerminal()
-	ulpengine.PrintManualCleanupHint(os.Stderr)
-	fmt.Fprintln(os.Stderr, reason)
-	os.Exit(130)
+	ulpengine.ForceExit(restoreTerminal, os.Stderr, reason)
 }

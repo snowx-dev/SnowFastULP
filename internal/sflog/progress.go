@@ -81,14 +81,46 @@ type workerSlot struct {
 	stage atomic.Int32
 }
 
+// IngestWorker is one regen/index worker row for the ingest TUI panel.
+type IngestWorker struct {
+	Archive              string
+	PartIdx, PartsTotal  int32
+	BytesDone, BytesTotal int64
+}
+
 // IngestView is a live snapshot of an in-process library ingest, rendered by
 // the TUI's INGESTING frame. It is produced by a caller-supplied closure so
 // sflog stays decoupled from the dedup engine that drives the merge.
 type IngestView struct {
 	Fraction float64 // 0..1 overall ingest progress
-	Unique   int64   // credentials newly added to the library
-	Skipped  int64   // credentials already present in the library
 	Status   string  // short phase label ("merging…", etc.)
+
+	EnginePhase int32 // ulpengine.Phase*
+
+	// Library / regen (-od phase 0)
+	ODPhase          int32
+	ArchivesTotal    int32
+	PartsRegenDone   int32
+	PartsRegenTotal  int32
+	RegenBytesRead   int64
+	RegenBytesTotal  int64
+	RegenBPS         float64
+
+	// ULP read (shard)
+	ULPBytes  int64
+	BytesRead int64
+	LinesRead int64
+
+	// Dedup merge
+	ShowMerge          bool
+	Unique             int64
+	Skipped            int64
+	BucketsDone        int64
+	BucketsTotal       int64
+	BucketsBytesRead   int64
+	BucketsBytesTotal  int64
+
+	Workers []IngestWorker
 }
 
 const (

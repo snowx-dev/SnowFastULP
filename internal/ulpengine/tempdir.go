@@ -13,6 +13,13 @@ const tempSubdirPrefix = ".sfu-tmp-"
 
 const staleTempDirAge = 24 * time.Hour
 
+// WorkDirPrefixes lists orphan temp-dir name prefixes swept on startup.
+var WorkDirPrefixes = []string{
+	tempSubdirPrefix,
+	"sfl-od-",
+	"sfl-spill-",
+}
+
 // creates .sfu-tmp-<stamp>-<pid> under parent
 func PrepareTempDir(parent, stamp string) (subdir string, err error) {
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -30,9 +37,19 @@ func PrepareTempDir(parent, stamp string) (subdir string, err error) {
 	return sub, nil
 }
 
-// removes old .sfu-tmp-* dirs except exclude, skips fresh ones to avoid
-// stomping on concurrent runs
-func SweepStaleTempDirs(parent, exclude string) int {
+func matchesWorkDirPrefix(name string) bool {
+	for _, prefix := range WorkDirPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// SweepStaleWorkDirs removes old work-dir orphans under parent matching any
+// WorkDirPrefixes entry. Skips dirs newer than staleTempDirAge and the exclude
+// name (current run). Best-effort: read errors are silent.
+func SweepStaleWorkDirs(parent, excludeDirName string) int {
 	entries, err := os.ReadDir(parent)
 	if err != nil {
 		return 0
@@ -44,10 +61,10 @@ func SweepStaleTempDirs(parent, exclude string) int {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasPrefix(name, tempSubdirPrefix) {
+		if !matchesWorkDirPrefix(name) {
 			continue
 		}
-		if exclude != "" && name == exclude {
+		if excludeDirName != "" && name == excludeDirName {
 			continue
 		}
 		info, err := e.Info()
@@ -59,4 +76,9 @@ func SweepStaleTempDirs(parent, exclude string) int {
 		}
 	}
 	return removed
+}
+
+// SweepStaleTempDirs is a compatibility alias for SweepStaleWorkDirs.
+func SweepStaleTempDirs(parent, exclude string) int {
+	return SweepStaleWorkDirs(parent, exclude)
 }

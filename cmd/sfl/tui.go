@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,11 @@ const (
 var (
 	sflTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFDDE6")).Bold(true)
 	sflOkStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA6")).Bold(true)
+	sflUniqueStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
+	sflAcceptStyle       = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
+	sflCountStyle        = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "51"})
+	sflByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "178", Dark: "222"})
+	sflTimeStyle         = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "162", Dark: "213"})
 	sflMutedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6818F"))
 	sflWarnStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
 	sflLabelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#E8B6C6")).Bold(true)
@@ -408,7 +414,8 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 
 	var prevAt time.Time
 	var prevBytes int64
-	var rate float64
+	var byteRate float64 // instant throughput for the Bytes row
+	var etaRate float64  // slow EMA for ETA (archive bursts skew short windows)
 
 	draw := func() {
 		now := time.Now()
@@ -420,19 +427,15 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 		if !prevAt.IsZero() {
 			if dt := now.Sub(prevAt).Seconds(); dt >= 0.05 {
 				inst := float64(cur-prevBytes) / dt
-				// EMA smooths the bursty per-tick delta (tiny files scream, a big
-				// single stream crawls) so the rate and its ETA read steadily
-				// instead of jumping every tick.
-				const emaAlpha = 0.3
-				if rate == 0 {
-					rate = inst
-				} else {
-					rate = emaAlpha*inst + (1-emaAlpha)*rate
-				}
+				byteRate = inst
+				// Time-based EMA (see sfs rateEMATau): a fixed alpha per 200ms
+				// tick still swings 5–50m when one archive member finishes between
+				// samples; ~10s tau ignores micro-stalls and single-tick spikes.
+				etaRate = sflRateEMAUpdate(etaRate, inst, dt)
 			}
 		}
 		prevAt, prevBytes = now, cur
-		frame.draw(renderProgress(now.Sub(started), prog, rate, spinnerTick(now), termWidth()))
+		frame.draw(renderProgress(now.Sub(started), prog, byteRate, etaRate, spinnerTick(now), termWidth()))
 	}
 
 	for {
@@ -537,21 +540,39 @@ func frameWithFooter(header string, box []string, width int, footer []string) []
 	return append(out, footer...)
 }
 
-func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, tick int, width int) []string {
+const (
+	sflRateEMATau = 10.0  // seconds, ETA throughput smoothing window
+	sflMinETARate = 1024.0 // B/s floor before ETA is shown (micro-stall guard)
+)
+
+// sflRateEMAUpdate is a time-constant EMA matching cmd/sfs/tui_rates.go.
+func sflRateEMAUpdate(prev, instant, dtSec float64) float64 {
+	if instant <= 0 && prev <= 0 {
+		return 0
+	}
+	if prev <= 0 {
+		return instant
+	}
+	alpha := 1 - math.Exp(-dtSec/sflRateEMATau)
+	return alpha*instant + (1-alpha)*prev
+}
+
+func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, etaRate float64, tick int, width int) []string {
 	inner := boxInner(width)
 	spinner := lineSpinnerFrames[mod(tick, len(lineSpinnerFrames))]
 
-	// Ingest carries the same icy frame so the screen never hands off: a single
-	// bar + "added / already-in-library" counts driven by the dedup engine.
+	// Ingest carries the same icy frame so the screen never hands off: labeled
+	// stats rows (mirroring extract) plus optional regen worker rows.
 	if prog.Phase() == phaseIngestVal {
 		iv, _ := prog.IngestSnapshot()
 		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] INGESTING"), elapsed, width)
 		bar := gradientBar(iv.Fraction, inner)
-		counts := fmt.Sprintf("%s added  ·  %s already in library",
-			formatInt(int(iv.Unique)), formatInt(int(iv.Skipped)))
-		body := []string{bar, counts}
+		body := append([]string{bar}, renderIngestStatsRows(iv)...)
 		if iv.Status != "" {
 			body = append(body, sflMutedStyle.Render(iv.Status))
+		}
+		if panel := renderIngestRegenPanel(iv.Workers, inner, tick); len(panel) > 0 {
+			body = append(body, panel...)
 		}
 		return frame(header, sflGradientBox(body, width, gradStart, gradEnd), width)
 	}
@@ -571,14 +592,16 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, t
 		// During discovery the total weight is unknown, so show a live "found"
 		// count instead of a frozen 0% bar.
 		body = []string{
-			sflMutedStyle.Render(fmt.Sprintf("discovering sources… %s found", formatInt(int(prog.Discovered())))),
+			sflMutedStyle.Render("discovering sources… ") +
+				sflCountStyle.Render(formatInt(int(prog.Discovered()))) +
+				sflMutedStyle.Render(" found"),
 		}
 	} else {
 		bar := gradientBar(prog.Fraction(), inner)
 		body = append([]string{bar}, renderExtractStatsRows(
 			prog.Files(), prog.Archives(),
 			prog.Logs(), prog.LogsTotal(), prog.Emitted(), prog.Duplicates(),
-			prog.DoneBytes(), prog.Total(), rate,
+			prog.DoneBytes(), prog.Total(), byteRate, etaRate,
 		)...)
 		// Surface the concurrent workers: a per-slot panel makes the
 		// parallelism visible even when the byte bar crawls. Falls back to the
@@ -596,19 +619,185 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, rate float64, t
 // renderExtractStatsRows is the labeled live-stats block during extraction.
 // One metric group per row mirrors recapCountRows so large counts and ETA never
 // compete for width inside the box.
-func renderExtractStatsRows(files, archives, logs, logsTotal, emitted, dupes, doneBytes, totalBytes int64, rate float64) []string {
-	eta := sflMutedStyle.Render(formatETADisplay(totalBytes-doneBytes, rate))
+func renderExtractStatsRows(files, archives, logs, logsTotal, emitted, dupes, doneBytes, totalBytes int64, byteRate, etaRate float64) []string {
 	return []string{
-		recapRow("Logs", sflOkStyle.Render(formatInt(int(logs)))+
+		recapRow("Logs", sflCountStyle.Render(formatInt(int(logs)))+
 			sflMutedStyle.Render(" / "+formatInt(int(logsTotal)))),
-		recapRow("Unique", sflOkStyle.Render(formatInt(int(emitted)))+
-			sflMutedStyle.Render("  ·  "+formatInt(int(dupes))+" dupes")),
-		recapRow("Sources", sflMutedStyle.Render(fmt.Sprintf("%s files  ·  %s archives",
-			formatInt(int(files)), formatInt(int(archives))))),
-		recapRow("Bytes", sflMutedStyle.Render(fmt.Sprintf("%s / %s  ·  %s/s",
-			formatBytes(doneBytes), formatBytes(totalBytes), formatBytes(int64(rate))))),
-		recapRow("ETA", eta),
+		recapRow("Unique", sflUniqueStyle.Render(formatInt(int(emitted)))+
+			sflMutedStyle.Render("  ·  ")+sflCountStyle.Render(formatInt(int(dupes)))+
+			sflMutedStyle.Render(" dupes")),
+		recapRow("Sources", sflCountStyle.Render(formatInt(int(files)))+
+			sflMutedStyle.Render(" files  ·  ")+sflCountStyle.Render(formatInt(int(archives)))+
+			sflMutedStyle.Render(" archives")),
+		recapRow("Bytes", sflByteStyle.Render(formatBytes(doneBytes))+
+			sflMutedStyle.Render(" / "+formatBytes(totalBytes)+"  ·  ")+
+			sflByteStyle.Render(formatBytes(int64(byteRate))+"/s")),
+		recapRow("ETA", formatETADisplayStyled(totalBytes-doneBytes, etaRate)),
 	}
+}
+
+// renderIngestStatsRows is the labeled live-stats block during library ingest.
+// Rows appear only when relevant so regen/shard phases never show a frozen 0/0.
+func renderIngestStatsRows(iv sflog.IngestView) []string {
+	var rows []string
+	if ingestShowLibraryRow(iv) {
+		rows = append(rows, recapRow("Library", renderIngestLibraryValue(iv)))
+	}
+	if ingestShowULPRow(iv) {
+		rows = append(rows, recapRow("ULP", sflByteStyle.Render(formatBytes(iv.BytesRead))+
+			sflMutedStyle.Render(" / "+formatBytes(iv.ULPBytes)+"  ·  ")+
+			sflAcceptStyle.Render(formatInt(int(iv.LinesRead)))+
+			sflMutedStyle.Render(" lines")))
+	}
+	if iv.ShowMerge {
+		merge := sflUniqueStyle.Render(formatInt(int(iv.Unique))) + sflMutedStyle.Render(" added") +
+			sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(iv.Skipped))) +
+			sflMutedStyle.Render(" already in library")
+		if iv.BucketsTotal > 0 {
+			merge += sflMutedStyle.Render("  ·  bucket ") +
+				sflCountStyle.Render(formatInt(int(iv.BucketsDone))) +
+				sflMutedStyle.Render(" / ") +
+				sflCountStyle.Render(formatInt(int(iv.BucketsTotal)))
+		}
+		rows = append(rows, recapRow("Merge", merge))
+	}
+	return rows
+}
+
+func ingestShowLibraryRow(iv sflog.IngestView) bool {
+	if iv.EnginePhase == ulpengine.PhaseIndex {
+		return true
+	}
+	if iv.PartsRegenTotal > 0 || iv.RegenBytesTotal > 0 {
+		return true
+	}
+	if iv.ArchivesTotal > 0 && iv.EnginePhase != ulpengine.PhaseDedup && iv.EnginePhase != ulpengine.PhaseDone {
+		return true
+	}
+	return false
+}
+
+func ingestShowULPRow(iv sflog.IngestView) bool {
+	if iv.ULPBytes <= 0 {
+		return false
+	}
+	if iv.BytesRead < iv.ULPBytes || iv.LinesRead > 0 {
+		return true
+	}
+	switch iv.EnginePhase {
+	case ulpengine.PhaseInit, ulpengine.PhasePhase0, ulpengine.PhaseShard:
+		return true
+	}
+	return false
+}
+
+func renderIngestLibraryValue(iv sflog.IngestView) string {
+	var parts []string
+	if iv.PartsRegenTotal > 0 {
+		parts = append(parts, sflCountStyle.Render(formatInt(int(iv.PartsRegenDone)))+
+			sflMutedStyle.Render(" / "+formatInt(int(iv.PartsRegenTotal))+" parts"))
+	}
+	if iv.RegenBytesTotal > 0 {
+		parts = append(parts, sflByteStyle.Render(formatBytes(iv.RegenBytesRead))+
+			sflMutedStyle.Render(" / "+formatBytes(iv.RegenBytesTotal)))
+	}
+	if iv.RegenBPS > 0 {
+		parts = append(parts, sflMutedStyle.Render("·  ")+
+			sflByteStyle.Render(formatBytes(int64(iv.RegenBPS))+"/s"))
+	}
+	if len(parts) == 0 && iv.ArchivesTotal > 0 {
+		parts = append(parts, sflCountStyle.Render(formatInt(int(iv.ArchivesTotal)))+
+			sflMutedStyle.Render(" archives"))
+	}
+	return strings.Join(parts, " ")
+}
+
+const (
+	sflIngestReservedRows = 18
+	sflIngestMaxRegenRows = 8
+)
+
+// sflIngestRegenRowCap limits regen worker rows shown during ingest.
+func sflIngestRegenRowCap(termHeight, totalWorkers int) int {
+	if totalWorkers <= 0 {
+		return 0
+	}
+	available := termHeight - sflIngestReservedRows
+	if available < sflIngestMaxRegenRows {
+		available = sflIngestMaxRegenRows
+	}
+	if available > totalWorkers {
+		available = totalWorkers
+	}
+	return available
+}
+
+// renderIngestRegenPanel shows per-archive regen/index worker activity during ingest.
+func renderIngestRegenPanel(workers []sflog.IngestWorker, inner, tick int) []string {
+	if len(workers) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(workers)+1)
+	if len(workers) >= 2 {
+		out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d workers active", len(workers))))
+	}
+	for i, w := range workers {
+		out = append(out, renderIngestRegenRow(w, inner, tick, i))
+	}
+	return out
+}
+
+func renderIngestRegenRow(w sflog.IngestWorker, inner, tick, idx int) string {
+	name := compactIngestArchiveName(w.Archive)
+	partAnnot := ""
+	if w.PartsTotal > 1 {
+		partAnnot = fmt.Sprintf(" (%d/%d)", w.PartIdx, w.PartsTotal)
+	}
+	var pct float64
+	if w.BytesTotal > 0 {
+		pct = float64(w.BytesDone) / float64(w.BytesTotal)
+		if pct > 1 {
+			pct = 1
+		}
+	}
+	barW := 12
+	if barW+40 > inner {
+		barW = inner - 40
+		if barW < 6 {
+			barW = 6
+		}
+	}
+	bar := gradientBar(pct, barW)
+	var pctText string
+	if w.BytesTotal > 0 {
+		pctText = fmt.Sprintf("%3d%%", int(pct*100))
+	} else {
+		pctText = "  ?%"
+	}
+	bytesText := ""
+	if w.BytesTotal > 0 {
+		bytesText = formatBytes(w.BytesDone) + " / " + formatBytes(w.BytesTotal)
+	}
+	// spinner + name + part + bar + pct + bytes
+	nameW := inner - barW - lipgloss.Width(partAnnot) - lipgloss.Width(pctText) - 12
+	if nameW < 8 {
+		nameW = 8
+	}
+	line := sflSpinnerStyle.Render(workerSpinnerFrame(tick, idx)) + " " +
+		sflMutedStyle.Render(truncatePath(name, nameW)+partAnnot) + "  " +
+		bar + " " + sflCountStyle.Render(pctText)
+	if bytesText != "" {
+		line += "  " + sflByteStyle.Render(bytesText)
+	}
+	return line
+}
+
+func compactIngestArchiveName(path string) string {
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, "sfu_") && strings.HasSuffix(base, ".txt.zst") {
+		base = strings.TrimSuffix(strings.TrimPrefix(base, "sfu_"), ".txt.zst")
+	}
+	return base
 }
 
 // sfl worker-panel sizing. A small floor keeps the "many things at once" feel
@@ -752,7 +941,7 @@ const (
 )
 
 // sflRecapLabelW is the label column width so recap values line up in a clean
-// gutter (matches sfu's "Input "/"Unique " labels and fits "Ingested").
+// gutter (matches sfu's "Input "/"Unique "/"Removed " labels).
 const sflRecapLabelW = 10
 
 // recapRow is one "Label   value" line with the label padded to a fixed gutter
@@ -766,16 +955,49 @@ func recapRow(label, value string) string {
 
 // recapCountRows is the labeled metric block (one row per group so big counts
 // never wrap mid-number). Kept separate from the issue block so the ingest
-// frame can slot its "Ingested" row in before the issues.
+// frame can slot library-ingest rows before the issues block.
 func recapCountRows(stats sflog.ExtractStats) []string {
 	return []string{
 		recapRow("Logs", sflOkStyle.Render(formatInt(stats.Logs))+
 			sflMutedStyle.Render("  ·  "+formatInt(stats.Credentials)+" parsed")),
-		recapRow("Unique", sflOkStyle.Render(formatInt(stats.Emitted))+
+		recapRow("Unique", sflUniqueStyle.Render(formatInt(stats.Emitted))+
 			sflMutedStyle.Render("  ·  "+formatInt(stats.Duplicates)+" duplicates")),
 		recapRow("Sources", sflMutedStyle.Render(fmt.Sprintf("%s files  ·  %s archives  ·  %s skipped",
 			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)))),
 	}
+}
+
+// renderSflRemovedRows mirrors sfu's Removed recap: one line when it fits, else
+// stacked bullets under the label.
+func renderSflRemovedRows(bullets []string, maxInnerWidth int) []string {
+	if len(bullets) == 0 {
+		return nil
+	}
+	const label = "Removed  "
+	sep := sflMutedStyle.Render(" · ")
+	singleLineRest := strings.Join(bullets, sep)
+	totalWidth := lipgloss.Width(label) + lipgloss.Width(singleLineRest)
+	if totalWidth <= maxInnerWidth {
+		return []string{sflLabelStyle.Render(label) + singleLineRest}
+	}
+	indent := strings.Repeat(" ", lipgloss.Width(label))
+	rows := []string{sflLabelStyle.Render(label) + bullets[0]}
+	for _, b := range bullets[1:] {
+		rows = append(rows, indent+b)
+	}
+	return rows
+}
+
+func renderIngestLibraryRows(newToLib, alreadyInLib int64, innerWidth int) []string {
+	var rows []string
+	rows = append(rows, recapRow("Unique", sflUniqueStyle.Render(formatInt(int(newToLib)))+
+		sflMutedStyle.Render(" entries")))
+	if alreadyInLib > 0 {
+		rows = append(rows, renderSflRemovedRows([]string{
+			sflCountStyle.Render(formatInt(int(alreadyInLib))) + " " + sflMutedStyle.Render("already in library"),
+		}, innerWidth)...)
+	}
+	return rows
 }
 
 func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
@@ -813,32 +1035,61 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 // what this run contributed (new vs already-present), and the resulting library
 // line count and path, so the single icy frame ends the run instead of handing
 // off to sfu's summary.
-func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats) []string {
-	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, stats, nil)
+func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, outputPaths []string) []string {
+	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, stats, outputPaths, nil)
 }
 
-func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
+func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, outputPaths []string, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
-	// Box holds clean stats only: counts, the Ingested row, and the library path.
+	// Box holds clean stats: extraction recap, Unique/Removed ingest rows, library path.
 	// Failures/skips live in the muted block above; the running library total
 	// gets its own box below (mirrors sfu's renderODSummary).
-	body := append(recapCountRows(stats),
-		recapRow("Ingested", sflOkStyle.Render(formatInt(int(newToLib)))+
-			sflMutedStyle.Render(" new  ·  "+formatInt(int(alreadyInLib))+" already in library")),
-	)
+	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, boxInner(width))...)
 	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
 	box := append(mutedAbove(stats, termWidthFull()), sflGradientBox(body, width, gradStart, gradEnd)...)
 	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
-	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
+	out := []string{"", title, ""}
+	out = append(out, box...)
+	out = append(out, renderIngestOutputFooter(outputPaths)...)
+	out = append(out, summaryFooterLines(width, notice)...)
+	return out
+}
+
+// renderIngestOutputFooter lists archive(s) written this run below the ingest
+// summary boxes, mirroring sfu's renderDoneOutputFooter layout.
+func renderIngestOutputFooter(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	const label = "Output   "
+	mid := gradStart.BlendLuv(gradEnd, 0.5)
+	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
+	labelCell := sflLabelStyle.Render(label)
+	labelW := lipgloss.Width(labelCell)
+	prefix := strings.Repeat(" ", sflLeftPad) + border.Render("┃") + "  "
+	blankLabel := strings.Repeat(" ", labelW)
+
+	out := []string{""}
+	for i, p := range paths {
+		pathCell := sflOkStyle.Render(p)
+		var line string
+		if i == 0 {
+			line = prefix + labelCell + pathCell
+		} else {
+			line = prefix + blankLabel + pathCell
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // libraryTotalBox is the standalone "<N> lines in library" box, the single
 // headline number after ingestion (prior library + new unique this run).
 func libraryTotalBox(libraryLines int64, width int) []string {
 	body := []string{
-		sflOkStyle.Render(formatInt(int(libraryLines))),
+		sflUniqueStyle.Render(formatInt(int(libraryLines))),
 		sflMutedStyle.Render("lines in library"),
 	}
 	return sflGradientBox(body, width, gradStart, gradEnd)
@@ -906,14 +1157,15 @@ func clampHead(s string, max int) string {
 	return string(r[:max-1]) + "…"
 }
 
-// mutedIssueBlock is the grey warnings/errors block printed ABOVE the summary
+// mutedIssueBlock is the grey warnings/issues block printed ABOVE the summary
 // box. Each non-zero issue kind gets a header line plus a few indented example
-// paths (full provenance), with the exact counter driving "+N more". Labels are
-// pluralised so a single fail never reads as "1 errors". Returns nil for a clean
-// run so the frame shows no empty gap.
+// paths (full provenance) and a short reason when known, with the exact counter
+// driving "+N more". Labels are pluralised so a single fail never reads as
+// "1 issues". Returns nil for a clean run so the frame shows no empty gap.
 func mutedIssueBlock(stats sflog.ExtractStats, width int) []string {
 	var out []string
 	budget := width - sflLeftPad - 2
+	detailBudget := budget - 2
 	add := func(n int, kind sflog.IssueKind, one, many string) {
 		if n <= 0 {
 			return
@@ -925,6 +1177,9 @@ func mutedIssueBlock(stats sflog.ExtractStats, width int) []string {
 				continue
 			}
 			out = append(out, sflIndent+"  "+sflMutedStyle.Render(clampHead(issueProvenance(is.Path), budget)))
+			if detail := sflog.IssueDetail(is); detail != "" {
+				out = append(out, sflIndent+"    "+sflMutedStyle.Render(clampHead(detail, detailBudget)))
+			}
 			shown++
 		}
 		if n > shown {
@@ -932,8 +1187,8 @@ func mutedIssueBlock(stats sflog.ExtractStats, width int) []string {
 		}
 	}
 	add(stats.PasswordNotFound, sflog.IssuePasswordNotFound, "password not found", "passwords not found")
-	add(stats.ParseErrors, sflog.IssueParseError, "parse error", "parse errors")
-	add(stats.OpenErrors, sflog.IssueOpenError, "open error", "open errors")
+	add(stats.ParseErrors, sflog.IssueParseError, "parse issue", "parse issues")
+	add(stats.OpenErrors, sflog.IssueOpenError, "open issue", "open issues")
 	add(stats.MissingVolumes, sflog.IssueMissingVolume, "incomplete set", "incomplete sets")
 	add(stats.NoULP, sflog.IssueNoULP, "source with no ULP", "sources with no ULP")
 	return out
@@ -1002,7 +1257,7 @@ func formatDuration(d time.Duration) string {
 // not near-complete (rem<=0), not stalled (rate<=1 B/s), not sub-second, and
 // not an absurd horizon (>=99h) from an early near-zero rate.
 func etaDuration(remaining int64, rate float64) (time.Duration, bool) {
-	if remaining <= 0 || rate <= 1 {
+	if remaining <= 0 || rate < sflMinETARate {
 		return 0, false
 	}
 	secs := float64(remaining) / rate
@@ -1010,6 +1265,15 @@ func etaDuration(remaining int64, rate float64) (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Duration(secs * float64(time.Second)), true
+}
+
+// formatETADisplayStyled renders ETA for the labeled stats row with timeStyle
+// when known, em dash when hidden.
+func formatETADisplayStyled(remaining int64, rate float64) string {
+	if d, ok := etaDuration(remaining, rate); ok {
+		return sflTimeStyle.Render(formatDuration(d))
+	}
+	return sflMutedStyle.Render("—")
 }
 
 // formatETADisplay renders an ETA duration for the labeled stats row, or "—"

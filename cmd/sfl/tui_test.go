@@ -8,6 +8,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
 func TestWorkerPathLabel(t *testing.T) {
@@ -74,15 +75,17 @@ func TestRenderIngestSummaryShowsNewVsAlreadyAndLibrarySize(t *testing.T) {
 		Logs:        2,
 		Credentials: 8,
 		Emitted:     8,
-	})
+	}, []string{"/data/Library/sfu_20260701_part1.txt.zst"})
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"INGESTED",
-		"new",
+		"entries",
+		"Removed",
 		"already in library",
 		"lines in library",
 		"1,234",
 		"/data/Library",
+		"sfu_20260701_part1.txt.zst",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ingest summary missing %q:\n%s", want, joined)
@@ -123,7 +126,7 @@ func TestRenderFinalSummaryReportsOpenErrors(t *testing.T) {
 		},
 	})
 	joined := strings.Join(lines, "\n")
-	for _, want := range []string{"open errors", "victimA-Passwords.txt", "victimB-Passwords.txt"} {
+	for _, want := range []string{"open issues", "victimA-Passwords.txt", "victimB-Passwords.txt"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("summary missing %q:\n%s", want, joined)
 		}
@@ -132,7 +135,7 @@ func TestRenderFinalSummaryReportsOpenErrors(t *testing.T) {
 
 func TestRenderProgressScanningStateIsCenteredWithSpinner(t *testing.T) {
 	prog := sflog.NewProgress() // discovery phase, unknown total
-	lines := renderProgress(0, prog, 0, 0, 80)
+	lines := renderProgress(0, prog, 0, 0, 0, 80)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"[sfl]", "SCANNING", "discovering sources"} {
 		if !strings.Contains(joined, want) {
@@ -154,7 +157,7 @@ func TestRenderProgressScanningStateIsCenteredWithSpinner(t *testing.T) {
 
 func TestRenderProgressShowsFooter(t *testing.T) {
 	prog := sflog.NewProgress()
-	joined := strings.Join(renderProgress(0, prog, 0, 0, 80), "\n")
+	joined := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
 	for _, want := range []string{"sfl is open-source", "snowx.dev"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("frame missing footer %q:\n%s", want, joined)
@@ -235,6 +238,28 @@ func TestFormatETA(t *testing.T) {
 	}
 }
 
+func TestSflRateEMAUpdate(t *testing.T) {
+	const dt = 0.2 // monitor tick
+	steady := float64(10 << 20) // 10 MB/s
+	var ema float64
+	for range 50 { // 10s of ticks
+		ema = sflRateEMAUpdate(ema, steady, dt)
+	}
+	if ema < steady*0.9 {
+		t.Fatalf("EMA after 10s steady input=%v, want ~%v", ema, steady)
+	}
+	// One burst tick at 10× should not move ETA rate more than ~25%.
+	spike := sflRateEMAUpdate(ema, steady*10, dt)
+	if spike > ema*1.25 {
+		t.Fatalf("single spike EMA=%v, prev=%v; too reactive", spike, ema)
+	}
+	// Micro-stall (0 B/s) should decay slowly, not zero out.
+	stall := sflRateEMAUpdate(ema, 0, dt)
+	if stall < ema*0.95 {
+		t.Fatalf("single zero tick EMA=%v, prev=%v; dropped too fast", stall, ema)
+	}
+}
+
 func TestRenderExtractStatsRowsLargeNumbers(t *testing.T) {
 	const (
 		files    = 12_345_678
@@ -247,7 +272,7 @@ func TestRenderExtractStatsRowsLargeNumbers(t *testing.T) {
 		done     = total - (100 << 20)
 		rate     = 10 << 20 // 10MB/s → ~10s ETA on 100MB remaining
 	)
-	joined := strings.Join(renderExtractStatsRows(files, archives, logs, logsTot, emitted, dupes, done, total, rate), "\n")
+	joined := strings.Join(renderExtractStatsRows(files, archives, logs, logsTot, emitted, dupes, done, total, rate, rate), "\n")
 	for _, want := range []string{
 		"12,345,678", "678,901",
 		"1,234", "5,678",
@@ -267,14 +292,14 @@ func TestRenderExtractStatsRowsLargeNumbers(t *testing.T) {
 }
 
 func TestRenderExtractStatsRowsETAHidden(t *testing.T) {
-	joined := strings.Join(renderExtractStatsRows(1, 1, 1, 1, 1, 0, 100, 100, 0.5), "\n")
+	joined := strings.Join(renderExtractStatsRows(1, 1, 1, 1, 1, 0, 100, 100, 0.5, 0), "\n")
 	if !strings.Contains(joined, "—") {
 		t.Fatalf("stalled rate should show em-dash ETA:\n%s", joined)
 	}
 }
 
 func TestRenderExtractStatsRowsLabels(t *testing.T) {
-	rows := renderExtractStatsRows(10, 2, 3, 5, 7, 1, 1<<20, 10<<20, 5<<20)
+	rows := renderExtractStatsRows(10, 2, 3, 5, 7, 1, 1<<20, 10<<20, 5<<20, 5<<20)
 	for _, label := range []string{"Logs", "Unique", "Sources", "Bytes", "ETA"} {
 		found := false
 		for _, row := range rows {
@@ -289,6 +314,89 @@ func TestRenderExtractStatsRowsLabels(t *testing.T) {
 	}
 	if len(rows) != 5 {
 		t.Fatalf("want 5 stats rows, got %d", len(rows))
+	}
+}
+
+func TestRenderIngestStatsRowsRegen(t *testing.T) {
+	joined := strings.Join(renderIngestStatsRows(sflog.IngestView{
+		EnginePhase:       ulpengine.PhasePhase0,
+		PartsRegenDone:    3,
+		PartsRegenTotal:   16,
+		RegenBytesRead:    12 << 30,
+		RegenBytesTotal:   80 << 30,
+		RegenBPS:          128 << 20,
+		ArchivesTotal:     8,
+	}), "\n")
+	for _, want := range []string{"Library", "3", "16", "parts", "12.0GB", "80.0GB", "128.0MB/s"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("regen stats missing %q:\n%s", want, joined)
+		}
+	}
+	for _, bad := range []string{"Merge", "0 added", "already in library"} {
+		if strings.Contains(joined, bad) {
+			t.Fatalf("regen stats should not contain %q:\n%s", bad, joined)
+		}
+	}
+}
+
+func TestRenderIngestStatsRowsShard(t *testing.T) {
+	joined := strings.Join(renderIngestStatsRows(sflog.IngestView{
+		EnginePhase: ulpengine.PhaseShard,
+		ULPBytes:    189 << 20,
+		BytesRead:   90 << 20,
+		LinesRead:   1_200_000,
+	}), "\n")
+	for _, want := range []string{"ULP", "90.0MB", "189.0MB", "1,200,000"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("shard stats missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "Merge") {
+		t.Fatalf("shard stats should hide Merge row:\n%s", joined)
+	}
+}
+
+func TestRenderIngestStatsRowsDedup(t *testing.T) {
+	joined := strings.Join(renderIngestStatsRows(sflog.IngestView{
+		EnginePhase:  ulpengine.PhaseDedup,
+		ShowMerge:    true,
+		Unique:       5,
+		Skipped:      120,
+		BucketsDone:  4,
+		BucketsTotal: 64,
+	}), "\n")
+	for _, want := range []string{"Merge", "5", "added", "120", "already in library", "bucket", "4", "64"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("dedup stats missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderIngestRegenPanel(t *testing.T) {
+	longName := "/data/lib/sfu_20260101_120000_part04.txt.zst"
+	panel := renderIngestRegenPanel([]sflog.IngestWorker{
+		{Archive: longName, PartIdx: 4, PartsTotal: 16, BytesDone: 1 << 30, BytesTotal: 2 << 30},
+		{Archive: "/data/lib/sfu_20260101_120000_part05.txt.zst", PartIdx: 5, PartsTotal: 16, BytesDone: 512 << 20, BytesTotal: 1 << 30},
+	}, 80, 0)
+	if len(panel) < 3 {
+		t.Fatalf("expected header + 2 worker rows, got %d:\n%v", len(panel), panel)
+	}
+	joined := strings.Join(panel, "\n")
+	if !strings.Contains(joined, "2 workers active") {
+		t.Fatalf("missing worker header:\n%s", joined)
+	}
+	if strings.Contains(joined, "sfu_") {
+		t.Fatalf("archive name should be compacted:\n%s", joined)
+	}
+	if !strings.Contains(joined, "50%") {
+		t.Fatalf("missing percent on worker row:\n%s", joined)
+	}
+}
+
+func TestCompactIngestArchiveName(t *testing.T) {
+	got := compactIngestArchiveName("/lib/sfu_20260101_120000_part04.txt.zst")
+	if got != "20260101_120000_part04" {
+		t.Fatalf("compact = %q", got)
 	}
 }
 
@@ -385,19 +493,19 @@ func TestMutedIssueBlockPluralizeByCount(t *testing.T) {
 	one := strings.Join(mutedIssueBlock(sflog.ExtractStats{
 		ParseErrors: 1, OpenErrors: 1, PasswordNotFound: 1, MissingVolumes: 1, NoULP: 1,
 	}, 80), "\n")
-	for _, want := range []string{"1 parse error", "1 open error", "1 password not found", "1 incomplete set", "1 source with no ULP"} {
+	for _, want := range []string{"1 parse issue", "1 open issue", "1 password not found", "1 incomplete set", "1 source with no ULP"} {
 		if !strings.Contains(one, want) {
 			t.Fatalf("singular issue label missing %q:\n%s", want, one)
 		}
 	}
-	if strings.Contains(one, "errors") || strings.Contains(one, "passwords") || strings.Contains(one, "sets") || strings.Contains(one, "sources") {
+	if strings.Contains(one, "passwords") || strings.Contains(one, "sets") || strings.Contains(one, "sources") {
 		t.Fatalf("singular counts should not pluralize:\n%s", one)
 	}
 
 	many := strings.Join(mutedIssueBlock(sflog.ExtractStats{
 		ParseErrors: 3, OpenErrors: 2, PasswordNotFound: 4, MissingVolumes: 6, NoULP: 5,
 	}, 80), "\n")
-	for _, want := range []string{"3 parse errors", "2 open errors", "4 passwords not found", "6 incomplete sets", "5 sources with no ULP"} {
+	for _, want := range []string{"3 parse issues", "2 open issues", "4 passwords not found", "6 incomplete sets", "5 sources with no ULP"} {
 		if !strings.Contains(many, want) {
 			t.Fatalf("plural issue label missing %q:\n%s", want, many)
 		}
@@ -407,6 +515,38 @@ func TestMutedIssueBlockPluralizeByCount(t *testing.T) {
 // TestSummaryIssuesAppearAboveBoxMuted proves failures render in the grey block
 // ABOVE the stats box (not inside it), carry the muted style rather than the
 // yellow warn style, and show full inner/outer provenance.
+func TestMutedIssueBlockShowsDetail(t *testing.T) {
+	block := strings.Join(mutedIssueBlock(sflog.ExtractStats{
+		ParseErrors: 1,
+		Issues: []sflog.Issue{
+			{Path: "/data/bad.7z", Kind: sflog.IssueParseError, Err: sflog.ErrNotAnArchive},
+		},
+	}, 100), "\n")
+	if !strings.Contains(block, "1 parse issue") {
+		t.Fatalf("missing parse issue header:\n%s", block)
+	}
+	if !strings.Contains(block, "signature mismatch") {
+		t.Fatalf("missing issue detail:\n%s", block)
+	}
+}
+
+func TestRenderIngestOutputFooter(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	lines := renderIngestOutputFooter([]string{
+		"/lib/sfu_20260701_part1.txt.zst",
+		"/lib/sfu_20260701_part2.txt.zst",
+	})
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"Output", "part1.txt.zst", "part2.txt.zst"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("footer missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestSummaryIssuesAppearAboveBoxMuted(t *testing.T) {
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -419,7 +559,7 @@ func TestSummaryIssuesAppearAboveBoxMuted(t *testing.T) {
 			{Path: "/logs/a.rar!sub/locked.zip", Kind: sflog.IssuePasswordNotFound},
 			{Path: "/logs/b.rar!sub/sealed.7z", Kind: sflog.IssuePasswordNotFound},
 		},
-	})
+	}, nil)
 
 	headerIdx, borderIdx := -1, -1
 	for i, ln := range lines {

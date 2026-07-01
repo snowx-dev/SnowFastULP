@@ -177,6 +177,8 @@ func run(cfg runConfig) error {
 	// both target stderr, so color follows stderr's TTY status.
 	applyStderrColorProfile()
 
+	sweepOrphanWorkDirs(cfg)
+
 	ctx, cancel, signaled := signalContext()
 	defer cancel()
 
@@ -238,6 +240,7 @@ func run(cfg runConfig) error {
 	eng := buildEngine(cfg, passwords, prog, dbg, spillDir)
 	stats, results, extractErr := eng.Run(ctx, cfg.Input, snk.w)
 	dbg.Completion(stats)
+	dbg.Issues(stats)
 	if extractErr != nil {
 		dbg.Event("extract ended early: %v (signaled=%v)", extractErr, signaled())
 	}
@@ -247,7 +250,7 @@ func run(cfg runConfig) error {
 	// frames never interleave with the error.
 	if extractErr != nil {
 		if signaled() {
-			interruptCleanup(snk, removeSpill)
+			interruptCleanup()
 		}
 		stopMonitor()
 		if signaled() {
@@ -284,7 +287,7 @@ func run(cfg runConfig) error {
 			if err != nil {
 				dbg.Event("ingest: ended early: %v (signaled=%v)", err, signaled())
 				if signaled() {
-					interruptCleanup(snk, removeSpill)
+					interruptCleanup()
 				}
 				stopMonitor()
 				if signaled() {
@@ -331,7 +334,7 @@ func run(cfg runConfig) error {
 			newToLib = ingestMet.LinesUnique.Load()
 			alreadyInLib = ingestMet.LinesSkippedByDest.Load()
 		}
-		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, stats, updateNotice)
+		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, stats, ingestOutputPaths(ingestRes), updateNotice)
 	default:
 		summary = renderFinalSummaryWithNotice(outPath, stats, updateNotice)
 	}
@@ -438,9 +441,47 @@ func (s *sink) cleanup() {
 	}
 }
 
-func interruptCleanup(snk *sink, removeSpill func()) {
-	snk.cleanup()
-	removeSpill()
+func interruptCleanup() {
+	ulpengine.FlushRegisteredCleanup()
+}
+
+func sweepOrphanWorkDirs(cfg runConfig) {
+	for _, parent := range collectSweepParents(cfg) {
+		if err := os.MkdirAll(parent, 0o755); err == nil {
+			ulpengine.SweepStaleWorkDirs(parent, "")
+		}
+	}
+}
+
+func collectSweepParents(cfg runConfig) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		abs, err := absClean(dir)
+		if err != nil {
+			return
+		}
+		if _, ok := seen[abs]; ok {
+			return
+		}
+		seen[abs] = struct{}{}
+		out = append(out, abs)
+	}
+	add(cfg.TempDir)
+	if cfg.LibraryDir != "" {
+		if lib, err := absClean(cfg.LibraryDir); err == nil {
+			add(filepath.Dir(lib))
+			add(lib)
+		}
+	}
+	if cfg.OutputDir != "" {
+		add(cfg.OutputDir)
+	}
+	return out
 }
 
 func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *debugLogger, spillDir string) *sflog.Engine {
@@ -470,8 +511,22 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 	// lastFrac clamps the bar monotonically. The closure is polled only by the
 	// monitor goroutine, so a plain captured float needs no synchronization.
 	var lastFrac float64
+	var prevRegenAt time.Time
+	var prevRegenBytes int64
 	prog.BeginIngest(func() sflog.IngestView {
-		v := ingestView(m, od.Load(), ulpBytes)
+		odSnap := od.Load()
+		regenBPS := 0.0
+		if odSnap != nil {
+			cur := odSnap.RegenBytesRead.Load()
+			now := time.Now()
+			if !prevRegenAt.IsZero() {
+				if dt := now.Sub(prevRegenAt).Seconds(); dt >= 0.05 {
+					regenBPS = float64(cur-prevRegenBytes) / dt
+				}
+			}
+			prevRegenAt, prevRegenBytes = now, cur
+		}
+		v := ingestView(m, odSnap, ulpBytes, regenBPS)
 		v.Fraction = monotonic(v.Fraction, &lastFrac)
 		return v
 	})
@@ -498,6 +553,16 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 	}
 	r, err := ulpengine.Ingest(ctx, opts, m)
 	return r, m, err
+}
+
+func ingestOutputPaths(res *ulpengine.Resolved) []string {
+	if res == nil {
+		return nil
+	}
+	if len(res.OutputPaths) > 0 {
+		return res.OutputPaths
+	}
+	return nil
 }
 
 // monotonic returns the larger of cur and *last, updating *last to that value.
@@ -534,17 +599,79 @@ func newIngestDebugLog(cfg runConfig) *ulpengine.DebugLog {
 	return elog
 }
 
-// ingestView snapshots the dedup engine's atomics into the icy INGESTING frame:
-// an overall fraction blended across the engine phases plus added/already-there
-// counts.
-func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64) sflog.IngestView {
+// ingestView snapshots the dedup engine's atomics into the icy INGESTING frame.
+func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64, regenBPS float64) sflog.IngestView {
 	frac, status := ingestProgress(m, od, ulpBytes)
-	return sflog.IngestView{
-		Fraction: frac,
-		Unique:   m.LinesUnique.Load(),
-		Skipped:  m.LinesSkippedByDest.Load(),
-		Status:   status,
+	v := sflog.IngestView{
+		Fraction:          frac,
+		Status:            status,
+		EnginePhase:       m.Phase.Load(),
+		ULPBytes:          ulpBytes,
+		BytesRead:         m.BytesRead.Load(),
+		LinesRead:         m.LinesRead.Load(),
+		ShowMerge:         ingestShowMerge(m),
+		Unique:            m.LinesUnique.Load(),
+		Skipped:           m.LinesSkippedByDest.Load(),
+		BucketsDone:       m.BucketsDone.Load(),
+		BucketsTotal:      m.BucketsTotal.Load(),
+		BucketsBytesRead:  m.BucketsBytesRead.Load(),
+		BucketsBytesTotal: m.BucketsBytesTotal.Load(),
+		RegenBPS:          regenBPS,
 	}
+	if od != nil {
+		v.ODPhase = int32(od.Phase.Load())
+		v.ArchivesTotal = od.ArchivesTotal.Load()
+		v.PartsRegenDone = od.PartsRegenDone.Load()
+		v.PartsRegenTotal = od.PartsRegenTotal.Load()
+		v.RegenBytesRead = od.RegenBytesRead.Load()
+		v.RegenBytesTotal = od.RegenBytesTotal.Load()
+		v.Workers = snapshotIngestWorkers(od)
+	}
+	return v
+}
+
+func ingestShowMerge(m *ulpengine.Metrics) bool {
+	if m == nil {
+		return false
+	}
+	switch m.Phase.Load() {
+	case ulpengine.PhaseDedup, ulpengine.PhaseIndex, ulpengine.PhaseDone:
+		return true
+	}
+	if m.LinesUnique.Load()+m.LinesSkippedByDest.Load() > 0 {
+		return true
+	}
+	return m.BucketsBytesRead.Load() > 0
+}
+
+func snapshotIngestWorkers(od *ulpengine.ODMetrics) []sflog.IngestWorker {
+	if od == nil {
+		return nil
+	}
+	ph := ulpengine.ODPhase(od.Phase.Load())
+	if ph != ulpengine.ODPhaseRegen && ph != ulpengine.ODPhaseIndexOwn {
+		return nil
+	}
+	cap := sflIngestRegenRowCap(termHeight(), od.WorkerCount())
+	active := od.ActiveWorkers(cap)
+	if len(active) == 0 {
+		return nil
+	}
+	out := make([]sflog.IngestWorker, 0, len(active))
+	for _, ws := range active {
+		namePtr := ws.ArchivePath.Load()
+		if namePtr == nil {
+			continue
+		}
+		out = append(out, sflog.IngestWorker{
+			Archive:     *namePtr,
+			PartIdx:     ws.PartIdx.Load(),
+			PartsTotal:  ws.PartsTotal.Load(),
+			BytesDone:   ws.BytesDone.Load(),
+			BytesTotal:  ws.BytesTotal.Load(),
+		})
+	}
+	return out
 }
 
 // ingestProgress maps the engine's phase + byte counters onto a 0..1 bar.

@@ -86,3 +86,37 @@ func TestSweepStaleTempDirsExcludesCurrent(t *testing.T) {
 		t.Fatalf("excluded subdir was removed: %v", err)
 	}
 }
+
+func TestSweepStaleWorkDirsRemovesSFLPrefixes(t *testing.T) {
+	parent := t.TempDir()
+	orphanOD := filepath.Join(parent, "sfl-od-1234567890")
+	orphanSpill := filepath.Join(parent, "sfl-spill-9876543210")
+	recent := filepath.Join(parent, "sfl-od-recent")
+	keep := filepath.Join(parent, "my-library")
+	for _, d := range []string{orphanOD, orphanSpill, recent, keep} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-(staleTempDirAge + time.Hour))
+	for _, d := range []string{orphanOD, orphanSpill} {
+		if err := os.Chtimes(d, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := SweepStaleWorkDirs(parent, ""); got != 2 {
+		t.Fatalf("swept %d, want 2", got)
+	}
+	for _, d := range []string{orphanOD, orphanSpill} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Fatalf("%q should be removed: %v", d, err)
+		}
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Fatalf("recent sfl dir should be kept: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("non-work dir was removed: %v", err)
+	}
+}

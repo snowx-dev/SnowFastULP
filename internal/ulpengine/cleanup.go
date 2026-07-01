@@ -88,20 +88,63 @@ func RemoveTreeLogged(path string) {
 	LogCleanupLine(fmt.Sprintf("removed temp dir %s", path))
 }
 
-// stderr warning for force-exit branch. no-op if nothing survives
-func PrintManualCleanupHint(w io.Writer) {
+// FlushRegisteredCleanup attempts to remove every registered path. Missing
+// paths are skipped; failures are logged for the interrupt UI.
+func FlushRegisteredCleanup() {
+	for _, p := range SnapshotCleanupPaths() {
+		flushOnePath(p)
+	}
+}
+
+func flushOnePath(path string) {
+	if path == "" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if fi.IsDir() {
+		RemoveTreeLogged(path)
+		return
+	}
+	RemovePathLogged(path)
+}
+
+// survivingCleanupPaths returns registered paths that still exist on disk.
+func survivingCleanupPaths() []string {
 	paths := SnapshotCleanupPaths()
-	surviving := paths[:0]
+	var surviving []string
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
 			surviving = append(surviving, p)
 		}
 	}
+	return surviving
+}
+
+// PrintManualCleanupHint flushes registered paths first, then warns about any
+// that could not be removed. No-op when the registry is empty and everything
+// was deleted.
+func PrintManualCleanupHint(w io.Writer) {
+	FlushRegisteredCleanup()
+	surviving := survivingCleanupPaths()
 	if len(surviving) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "\nforce-exit: cleanup skipped. Please remove manually:")
+	fmt.Fprintln(w, "\ncould not remove automatically — delete manually:")
 	for _, p := range surviving {
 		fmt.Fprintln(w, "  "+p)
 	}
+}
+
+// ForceExit restores the terminal, flushes registered scratch paths, prints
+// manual hints for survivors, and exits 130. Shared by sfu/sfl force-exit paths.
+func ForceExit(restore func(), w io.Writer, reason string) {
+	if restore != nil {
+		restore()
+	}
+	PrintManualCleanupHint(w)
+	fmt.Fprintln(w, reason)
+	os.Exit(130)
 }

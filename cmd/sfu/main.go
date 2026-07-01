@@ -314,7 +314,7 @@ func main() {
 	// sweep orphan shard subdirs from crashed runs. best-effort,
 	// failures silent in sweepStaleTempDirs
 	if err := os.MkdirAll(r.TempDir, 0o755); err == nil {
-		if n := ulpengine.SweepStaleTempDirs(r.TempDir, ""); n > 0 {
+		if n := ulpengine.SweepStaleWorkDirs(r.TempDir, ""); n > 0 {
 			dbg.Event("swept %d orphan temp dir(s) under %s", n, r.TempDir)
 		}
 	}
@@ -374,6 +374,7 @@ func main() {
 			} else {
 				fmt.Fprintln(os.Stderr, "\ninterrupted")
 			}
+			ulpengine.PrintManualCleanupHint(os.Stderr)
 			os.Exit(130)
 		}
 		fmt.Fprintf(os.Stderr, "\nerror: %v\n", runErr)
@@ -447,12 +448,7 @@ func signalContext() (context.Context, context.CancelFunc, func() bool) {
 		// races b/c ctx is already cancelled, Go picks randomly and
 		// would silently swallow every other 2nd Ctrl-C
 		<-ch
-		// Leave the alt-screen + restore the cursor via the frame's guarded
-		// close (serialized with the monitor's draw) rather than a raw write.
-		restoreTerminal()
-		ulpengine.PrintManualCleanupHint(os.Stderr)
-		fmt.Fprintln(os.Stderr, "force-exit (signal received twice).")
-		os.Exit(130)
+		ulpengine.ForceExit(restoreTerminal, os.Stderr, "force-exit (signal received twice).")
 	}()
 	return ctx, cancel, sigFlag.Load
 }

@@ -32,29 +32,68 @@ func TestRegisterCleanupPathDedupe(t *testing.T) {
 	}
 }
 
-func TestPrintManualCleanupHintFiltersMissing(t *testing.T) {
+func TestFlushRegisteredCleanupRemovesDirAndFile(t *testing.T) {
 	t.Cleanup(resetCleanupRegistry)
 	resetCleanupRegistry()
 
 	dir := t.TempDir()
-	alive := filepath.Join(dir, "alive")
-	if err := os.WriteFile(alive, []byte("x"), 0o644); err != nil {
+	tree := filepath.Join(dir, "scratch")
+	if err := os.Mkdir(tree, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dead := filepath.Join(dir, "dead-no-such-file")
+	file := filepath.Join(dir, "partial.zst")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	RegisterCleanupPath(tree)
+	RegisterCleanupPath(file)
 
-	RegisterCleanupPath(alive)
+	FlushRegisteredCleanup()
+
+	if _, err := os.Stat(tree); !os.IsNotExist(err) {
+		t.Fatalf("tree should be gone: %v", err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("file should be gone: %v", err)
+	}
+	log := SnapshotCleanupLog()
+	if len(log) < 2 {
+		t.Fatalf("expected cleanup log entries, got %v", log)
+	}
+}
+
+func TestPrintManualCleanupHintFlushesFirst(t *testing.T) {
+	t.Cleanup(resetCleanupRegistry)
+	resetCleanupRegistry()
+
+	dir := t.TempDir()
+	tree := filepath.Join(dir, "orphan")
+	if err := os.Mkdir(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	RegisterCleanupPath(tree)
+
+	var buf bytes.Buffer
+	PrintManualCleanupHint(&buf)
+	if buf.Len() != 0 {
+		t.Errorf("expected no hint after successful flush, got %q", buf.String())
+	}
+	if _, err := os.Stat(tree); !os.IsNotExist(err) {
+		t.Fatalf("tree should be flushed: %v", err)
+	}
+}
+
+func TestPrintManualCleanupHintFiltersMissing(t *testing.T) {
+	t.Cleanup(resetCleanupRegistry)
+	resetCleanupRegistry()
+
+	dead := filepath.Join(t.TempDir(), "dead-no-such-file")
 	RegisterCleanupPath(dead)
 
 	var buf bytes.Buffer
 	PrintManualCleanupHint(&buf)
-	out := buf.String()
-
-	if !strings.Contains(out, alive) {
-		t.Errorf("expected surviving path %q in hint, got: %q", alive, out)
-	}
-	if strings.Contains(out, dead) {
-		t.Errorf("missing path %q should have been filtered, got: %q", dead, out)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for missing-only registry, got %q", buf.String())
 	}
 }
 

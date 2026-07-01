@@ -32,7 +32,7 @@ var errNestTooDeep = errors.New("archive nesting too deep")
 // contain decoy/browser files named *.7z or *.zip that aren't archives; this
 // lets the readers skip them as a parse/skip issue instead of burning a full
 // password sweep and mislabeling them "password not found".
-var errNotAnArchive = errors.New("not a recognized archive")
+var errNotAnArchive = ErrNotAnArchive
 
 // errIncompleteVolumeSet marks a multi-volume RAR set whose continuation
 // volumes run past the parts present on disk (a truncated download). The parts
