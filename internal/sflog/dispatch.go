@@ -34,6 +34,35 @@ func (ec extractCtx) parse(r io.Reader, provenance string) ([]Credential, error)
 	return defaultProcessor.Process(r, provenance)
 }
 
+// SecretSink receives raw member bytes for out-of-band secret scanning. It is
+// the secrets analogue of the credential emit path: the readers call it for
+// members they would otherwise skip. Implementations must be concurrency-safe.
+type SecretSink interface {
+	ScanSecrets(ctx context.Context, content []byte, provenance string)
+}
+
+// defaultSecretMaxLen caps how much of each scanned member is read into memory.
+const defaultSecretMaxLen = 4 << 20 // 4 MiB
+
+// scanSecrets reads up to secretMaxLen bytes of r and hands them to the sink.
+// No-op when no sink is wired, so the credential path is unchanged with -secrets
+// off. Read errors are swallowed: secret scanning is best-effort and must never
+// fail an extraction.
+func (ec extractCtx) scanSecrets(ctx context.Context, r io.Reader, provenance string) {
+	if ec.secrets == nil {
+		return
+	}
+	max := ec.secretMaxLen
+	if max <= 0 {
+		max = defaultSecretMaxLen
+	}
+	buf, err := io.ReadAll(io.LimitReader(r, max))
+	if err != nil || len(buf) == 0 {
+		return
+	}
+	ec.secrets.ScanSecrets(ctx, buf, provenance)
+}
+
 // slotSinks builds the stage/item publishers bound to a leased TUI slot so a
 // dispatched task drives its own panel row instead of the producer's.
 func slotSinks(p *Progress, idx int) (func(WorkerStage), func(string)) {

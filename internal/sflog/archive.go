@@ -186,6 +186,11 @@ type extractCtx struct {
 	// call ec.parse, never ParseCredentials directly, so the seam stays in one
 	// place.
 	processor Processor
+	// secrets (may be nil) receives non-credential member bytes for scanning.
+	// secretMaxLen caps how much of each member is read (0 -> defaultSecretMaxLen).
+	// Copied across recursion so nested members are scanned too.
+	secrets      SecretSink
+	secretMaxLen int64
 }
 
 // stage publishes s to the worker slot if a stage sink is wired (no-op for
