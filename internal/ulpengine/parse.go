@@ -23,6 +23,10 @@ func parse(line string) (host, url, login, password string, ok bool) {
 		return "", "", "", "", false
 	}
 
+	if h, u, l, p, ok := parseAndroid(line); ok {
+		return h, u, l, p, ok
+	}
+
 	if idx := ulpPattern.FindStringSubmatchIndex(line); idx != nil && len(idx) >= 8 {
 		url = line[idx[2]:idx[3]]
 		login = line[idx[4]:idx[5]]
@@ -34,6 +38,44 @@ func parse(line string) (host, url, login, password string, ok bool) {
 		return finishParse(url, login, password)
 	}
 	return "", "", "", "", false
+}
+
+// androidScheme is the Google Autofill / Smart Lock credential prefix seen in
+// stealer logs: android://<base64 signing-cert hash>==@<package.name>/. The
+// strict ULP host class can't express the base64 authority, so these creds
+// (real email:password for com.instagram.android, com.netflix.mediaclient, ...)
+// were being dropped at ingest.
+const androidScheme = "android://"
+
+// parseAndroid admits android://<authority>[/…]:login:password verbatim. host
+// and url are the ENTIRE android URL (through the authority), so the dedup key
+// is the whole line, cert included: an android cred stays distinct from its web
+// twin and from the same login under a different signing cert. The authority
+// carries no colon (base64 + '@' + dotted package), so the first colon past the
+// scheme is the url/login boundary; login carries no colon either, and the
+// password takes the remainder (which may itself contain colons). Reachable
+// from parse(), and thus from parseLoose/parseUnion (both run parse first), so
+// ingest, loose, and regen/round-trip all key these identically.
+func parseAndroid(line string) (host, url, login, password string, ok bool) {
+	if !strings.HasPrefix(line, androidScheme) {
+		return "", "", "", "", false
+	}
+	rel := line[len(androidScheme):] // authority[/path]:login:password
+	sep := strings.IndexByte(rel, ':')
+	if sep <= 0 { // empty authority, or no login/password
+		return "", "", "", "", false
+	}
+	url = line[:len(androidScheme)+sep]
+	rest := rel[sep+1:]
+	c := strings.IndexByte(rest, ':')
+	if c <= 0 { // missing or empty login
+		return "", "", "", "", false
+	}
+	login = rest[:c]
+	if password = rest[c+1:]; password == "" {
+		return "", "", "", "", false
+	}
+	return url, url, login, password, true
 }
 
 // login:password:scheme://url via byte scan. login class excludes `:` so the
@@ -140,6 +182,20 @@ func formatRecord(host, url, login, password string, noURI bool) string {
 	b.WriteByte(':')
 	b.WriteString(password)
 	return b.String()
+}
+
+// DedupKeyForLine returns the library's canonical dedup key (xxhash64 of
+// host:login:password) for an already-formatted ULP line — the same key Ingest
+// derives for that line. ok=false when the line doesn't parse (the library would
+// reject it). This lets an upstream producer (sfl's extraction) pre-dedup on the
+// exact key the library uses, so its "unique" count reconciles with what ingest
+// actually adds instead of over-counting path-only variants.
+func DedupKeyForLine(line string, loose bool) (uint64, bool) {
+	host, _, login, password, ok := parseFor(line, loose)
+	if !ok {
+		return 0, false
+	}
+	return xxhash.Sum64String(dedupKey(host, login, password)), true
 }
 
 // host:login:password dedup key. hot path uses lineFormatter.HashKey instead

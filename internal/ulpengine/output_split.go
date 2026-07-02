@@ -72,6 +72,24 @@ func removeOutputFiles(paths []string) {
 	}
 }
 
+// discardEmptyOutput drops a run's generated output shard(s) and their sidecars
+// when the run wrote zero unique lines. sfu and sfl always name the output
+// sfu_<stamp> (the user picks a directory, never the file), so a 0-line run
+// leaves nothing but a ~13-byte empty zstd frame plus a 0-key .idx — clutter
+// that also makes the summary point at a file holding nothing. A completed run
+// only ever leaves ONE empty shard: the chunked sink opens a new part solely to
+// hold a line it is about to write, so an empty part never trails. Returns the
+// surviving paths (nil once the empty shard is dropped) so callers set
+// r.OutputPaths straight from it. Shared by the fast and bucketed paths so both
+// tools behave identically.
+func discardEmptyOutput(m *Metrics, paths []string) []string {
+	if m == nil || m.LinesUnique.Load() > 0 {
+		return paths
+	}
+	removeOutputFiles(paths)
+	return nil
+}
+
 // removes collected inputs after success. skips paths matching outputs
 // (after Abs+Clean and inode check). returns partial list on err
 func DeleteParsedInputs(inputs, outputs []string) ([]string, error) {

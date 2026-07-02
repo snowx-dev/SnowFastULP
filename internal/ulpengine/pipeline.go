@@ -382,8 +382,13 @@ func runBucketed(ctx context.Context, r *Resolved, m *Metrics) error {
 		if r.Cfg.Debug != nil {
 			r.Cfg.Debug.printfPhase("PHASE dedup END (no buckets to process)", time.Since(tDedup))
 		}
+		// close before discarding: an open sink's deferred close would recreate
+		// the sidecar we're about to remove.
+		if err := sink.close(); err != nil {
+			return fmt.Errorf("sink close: %w", err)
+		}
 		success = true
-		r.OutputPaths = sinkOutputPaths(sink)
+		r.OutputPaths = discardEmptyOutput(m, sinkOutputPaths(sink))
 		m.Phase.Store(phaseDone)
 		return nil
 	}
@@ -415,7 +420,9 @@ func runBucketed(ctx context.Context, r *Resolved, m *Metrics) error {
 	if err := sink.close(); err != nil {
 		return fmt.Errorf("sink close: %w", err)
 	}
-	r.OutputPaths = sinkOutputPaths(sink)
+	// a 0-unique run leaves an empty shard + 0-key sidecar; drop them so the
+	// library/summary never carry a file that holds nothing.
+	r.OutputPaths = discardEmptyOutput(m, sinkOutputPaths(sink))
 
 	if r.Cfg.DestDedup && r.Cfg.Debug != nil {
 		for _, p := range r.OutputPaths {
@@ -491,7 +498,8 @@ func runFastPath(ctx context.Context, r *Resolved, m *Metrics) error {
 		return err
 	}
 	success = true
-	r.OutputPaths = sinkOutputPaths(sink)
+	// drop an empty shard (all input rejected/deduped) so no 0-line file lingers.
+	r.OutputPaths = discardEmptyOutput(m, sinkOutputPaths(sink))
 	if r.Cfg.Debug != nil {
 		r.Cfg.Debug.printfPhase("PHASE fastpath END", time.Since(tFast))
 	}

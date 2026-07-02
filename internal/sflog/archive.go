@@ -62,18 +62,6 @@ func isWrongPassword(err error) bool {
 	return strings.Contains(s, "incorrect password") || strings.Contains(s, "checksum error")
 }
 
-// commitBuffered flushes a streaming archive pass's buffered creds and issues to
-// the real sinks once the pass is accepted (clean EOF or a salvageable truncated
-// set). rar/7z buffer first so a wrong password can never leak partial garbage.
-func commitBuffered(ec extractCtx, creds []Credential, issues []pendingIssue) {
-	for _, c := range creds {
-		ec.emit(c)
-	}
-	for _, is := range issues {
-		ec.onIssue(is.path, is.kind, is.err)
-	}
-}
-
 // volumeSetName collapses a multi-volume member path to the set's base name
 // (".../name.part01.rar" -> "name") for a compact worker-line label.
 func volumeSetName(display string) string {
@@ -162,7 +150,14 @@ type extractCtx struct {
 	display   string // logical provenance prefix, e.g. "a.zip!b.zip"
 	emit      func(Credential)
 	onIssue   func(path string, kind IssueKind, err error)
-	p         *Progress
+	// confirm (may be nil) is wired by newGatedSink. A stream reader calls it
+	// (via ec.confirmPassword) once the password is proven -- i.e. the archive
+	// decoded past its first member -- so the gate flushes what it buffered and
+	// streams every later credential straight to the writer. That is what makes
+	// the live "found" counter climb during a long extraction instead of jumping
+	// at EOF, while still never leaking a wrong password's partial garbage.
+	confirm func()
+	p       *Progress
 	// setStage (may be nil) publishes this worker's current archive stage to
 	// the live TUI. Copied across recursion so nested members report too.
 	setStage func(WorkerStage)
@@ -206,6 +201,14 @@ func (ec extractCtx) stage(s WorkerStage) {
 func (ec extractCtx) item(label string) {
 	if ec.setItem != nil {
 		ec.setItem(label)
+	}
+}
+
+// confirmPassword tells the gate the archive is proven decodable so it may flush
+// and pass through. No-op for hermetic/unbuffered callers (nil confirm).
+func (ec extractCtx) confirmPassword() {
+	if ec.confirm != nil {
+		ec.confirm()
 	}
 }
 
@@ -686,23 +689,63 @@ func resolveZipPassword(m *zipenc.File, passwords []string) (string, bool) {
 	return "", false
 }
 
-// credBuffer holds a streaming pass's output until it is accepted. rar/7z buffer
-// so a wrong password (which fails mid-stream) can never leak partial output;
-// the merge into it runs on the stream goroutine only, so the plain slices are
-// safe.
-type credBuffer struct {
-	creds  []Credential
-	issues []pendingIssue
+// gatedSink withholds a streaming pass's output only until the password is
+// proven, then flushes it and passes everything after straight to the real
+// sinks. rar/7z can't stream blindly: a wrong password fails mid-decode, so
+// emitting eagerly would leak garbage. But holding the WHOLE archive back means
+// the live "found" counter sits at 0 for minutes then jumps at EOF. The gate
+// splits the difference: buffer up to the first proven member (confirm()), then
+// stream. All methods run on the single stream goroutine, so the plain slices
+// and bool need no locking; the real sinks it wraps have the same invariant.
+type gatedSink struct {
+	realEmit  func(Credential)
+	realIssue func(path string, kind IssueKind, err error)
+	creds     []Credential
+	issues    []pendingIssue
+	confirmed bool
 }
 
-// bufferingEc returns a copy of ec whose emit/onIssue append into a fresh buffer
-// instead of the real sinks, plus that buffer. commitBuffered flushes it once the
-// pass is accepted.
-func bufferingEc(ec extractCtx) (extractCtx, *credBuffer) {
-	buf := &credBuffer{}
-	ec.emit = func(c Credential) { buf.creds = append(buf.creds, c) }
-	ec.onIssue = func(p string, k IssueKind, e error) { buf.issues = append(buf.issues, pendingIssue{p, k, e}) }
-	return ec, buf
+func (g *gatedSink) emit(c Credential) {
+	if g.confirmed {
+		g.realEmit(c)
+		return
+	}
+	g.creds = append(g.creds, c)
+}
+
+func (g *gatedSink) issue(p string, k IssueKind, e error) {
+	if g.confirmed {
+		g.realIssue(p, k, e)
+		return
+	}
+	g.issues = append(g.issues, pendingIssue{p, k, e})
+}
+
+// confirm flushes what was held and flips to pass-through. Idempotent, so a
+// reader can call it at every member boundary without tracking prior calls. An
+// unconfirmed gate (wrong password) is simply dropped, discarding its buffer.
+func (g *gatedSink) confirm() {
+	if g.confirmed {
+		return
+	}
+	g.confirmed = true
+	for _, c := range g.creds {
+		g.realEmit(c)
+	}
+	for _, is := range g.issues {
+		g.realIssue(is.path, is.kind, is.err)
+	}
+	g.creds, g.issues = nil, nil
+}
+
+// newGatedSink wraps ec so emit/onIssue route through a fresh gate and confirm
+// drives it. Returns the wrapped ec (pass it to the stream reader) and the gate.
+func newGatedSink(ec extractCtx) (extractCtx, *gatedSink) {
+	g := &gatedSink{realEmit: ec.emit, realIssue: ec.onIssue}
+	ec.emit = g.emit
+	ec.onIssue = g.issue
+	ec.confirm = g.confirm
+	return ec, g
 }
 
 // processSpilled runs the recursive reader over an already-spilled nested-archive
@@ -923,14 +966,15 @@ func extractRarOnce(ctx context.Context, ec extractCtx, diskPath, pw string, cr 
 		_ = f.Close()
 		return archiveScan{}, err
 	}
-	bufEc, buf := bufferingEc(ec)
-	scan, streamErr := readRarStream(ctx, bufEc, rr)
+	// The gate streams creds through once the password is proven (past the first
+	// member); a wrong password fails before that, so its buffer is dropped here.
+	gatedEc, _ := newGatedSink(ec)
+	scan, streamErr := readRarStream(ctx, gatedEc, rr)
 	unreg()
 	_ = f.Close()
 	switch {
 	case streamErr == nil:
-		commitBuffered(ec, buf.creds, buf.issues)
-		return scan, nil
+		return scan, nil // creds already streamed to the writer
 	case ctx.Err() != nil:
 		return archiveScan{}, ctx.Err()
 	case isWrongPassword(streamErr):
@@ -944,11 +988,12 @@ func extractRarOnce(ctx context.Context, ec extractCtx, diskPath, pw string, cr 
 }
 
 // readRarStream walks a single-file rar's members on one (forward-only) stream
-// goroutine: credential files parse inline (cheap), nested archives spill inline
-// then offload their recursive processing to the pool (or run inline if the pool
-// is saturated). All children join before the deterministic, stream-ordered
-// merge at EOF. The caller (extractRarOnce) wraps ec in a buffer and commits only
-// on a clean EOF.
+// goroutine: credential files parse and emit inline (cheap), nested archives
+// spill inline then offload their recursive processing to the pool (or run
+// inline if the pool is saturated), joining before a deterministic merge at EOF.
+// The caller (extractRarOnce) wraps ec in a gatedSink, so creds emitted here are
+// withheld only until ec.confirmPassword() fires at the first proven member
+// boundary -- then they stream to the writer, never before the password proves.
 func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (archiveScan, error) {
 	ec.stage(StageExtracting)
 	var scan archiveScan
@@ -962,6 +1007,13 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 				return ctx.Err()
 			}
 			h, err := rr.Next()
+			// Crossing a member boundary cleanly (next header or EOF) proves the
+			// prior member decoded, so the password is right: let the gate flush
+			// and stream from here. A non-EOF error means the prior member failed
+			// to decode (wrong password) -- do not confirm.
+			if members > 0 && (err == nil || errors.Is(err, io.EOF)) {
+				ec.confirmPassword()
+			}
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
@@ -995,14 +1047,18 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 					return derr
 				}
 			case isPasswordFile(h.Name):
-				o := &memberOutcome{}
-				outcomes = append(outcomes, o)
+				// Emit inline in stream order: pre-confirm the gate buffers these,
+				// post-confirm they stream straight to the writer so the live
+				// found-counter climbs. Nested archives stay on the outcome path
+				// (merged at EOF) since they finish out of order.
 				creds, perr := ec.parse(rr, ec.display+"!"+h.Name)
 				if perr != nil {
 					return perr
 				}
-				ec.countCredFile(&o.scan)
-				o.creds = creds
+				ec.countCredFile(&scan)
+				for _, c := range creds {
+					ec.emit(c)
+				}
 			}
 		}
 	}
@@ -1058,9 +1114,9 @@ func readRarVolumes(ctx context.Context, volumes []string, ec extractCtx, weight
 }
 
 // extractRarVolumesOnce runs one full pass over a volume set with pw. Like the
-// single-file pass it buffers and commits on a clean EOF; it additionally treats
-// a missing trailing volume as a salvageable skip (commit what decoded, flag the
-// gap) rather than a failure.
+// single-file pass it streams creds through a gatedSink (held only until the
+// password proves, then live); it additionally treats a missing trailing volume
+// as a salvageable skip (keep what decoded, flag the gap) rather than a failure.
 func extractRarVolumesOnce(ctx context.Context, ec extractCtx, first, pw string, cr *creditor, total int, firstAttempt bool) (archiveScan, error) {
 	if firstAttempt {
 		ec.debugf("archive %s: extracting (multi-volume, %d parts)", ec.display, total)
@@ -1072,24 +1128,27 @@ func extractRarVolumesOnce(ctx context.Context, ec extractCtx, first, pw string,
 	if err != nil {
 		return archiveScan{}, err
 	}
-	bufEc, buf := bufferingEc(ec)
-	scan, streamErr := readRarVolumeStream(ctx, bufEc, rc, cr, total)
+	// The gate streams creds through once the password is proven; keep its handle
+	// so the salvage path can force a flush when a truncation error interrupts
+	// the normal boundary-confirm.
+	gatedEc, gate := newGatedSink(ec)
+	scan, streamErr := readRarVolumeStream(ctx, gatedEc, rc, cr, total)
 	nvol := len(rc.Volumes())
 	_ = rc.Close()
 	switch {
 	case streamErr == nil:
-		commitBuffered(ec, buf.creds, buf.issues)
-		return scan, nil
+		return scan, nil // creds already streamed to the writer
 	case ctx.Err() != nil:
 		return archiveScan{}, ctx.Err()
 	case isMissingVolume(streamErr):
 		// Truncated set: every part on disk decoded cleanly and only a trailing
-		// volume is absent. Keep what we read and flag the gap instead of
-		// discarding the pass.
-		commitBuffered(ec, buf.creds, buf.issues)
+		// volume is absent. The missing-volume error is what stopped the stream,
+		// so the last boundary-confirm may not have fired -- flush explicitly to
+		// keep the creds read before the gap, then flag it.
+		gate.confirm()
 		ec.onIssue(ec.display, IssueMissingVolume,
 			fmt.Errorf("%w: next volume missing after %d part(s)", errIncompleteVolumeSet, nvol))
-		ec.debugf("archive %s: incomplete set, next volume missing after %d/%d part(s); committed creds from parts read",
+		ec.debugf("archive %s: incomplete set, next volume missing after %d/%d part(s); kept creds from parts read",
 			ec.display, nvol, total)
 		return scan, nil
 	case isWrongPassword(streamErr):
@@ -1127,6 +1186,13 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 			if cur := len(rc.Volumes()); cur > 0 {
 				ec.item(fmt.Sprintf("%s  ·  part %d/%d", setName, cur, total))
 			}
+			// Crossing a member boundary cleanly proves the prior member decoded
+			// (right password): let the gate flush and stream from here. A non-EOF
+			// error (wrong password, or a genuinely missing volume) skips confirm;
+			// the salvage path flushes explicitly for the missing-volume case.
+			if members > 0 && (err == nil || errors.Is(err, io.EOF)) {
+				ec.confirmPassword()
+			}
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
@@ -1157,14 +1223,16 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 					return derr
 				}
 			case isPasswordFile(h.Name):
-				o := &memberOutcome{}
-				outcomes = append(outcomes, o)
+				// Emit inline in stream order (see readRarStream); nested archives
+				// stay on the outcome path merged at EOF.
 				creds, perr := ec.parse(rc, ec.display+"!"+h.Name)
 				if perr != nil {
 					return perr
 				}
-				ec.countCredFile(&o.scan)
-				o.creds = creds
+				ec.countCredFile(&scan)
+				for _, c := range creds {
+					ec.emit(c)
+				}
 			}
 			cr.add(h.PackedSize)
 		}
@@ -1193,9 +1261,9 @@ func readSevenZipCredentials(ctx context.Context, diskPath string, ec extractCtx
 // the bytes come from. open(pw) returns a reader for one password attempt plus a
 // closer for that attempt; the path caller wraps OpenReaderWithPassword, the
 // split caller wraps NewReaderWithPassword over the concatenated parts. Each
-// candidate is tried in a single pass; credentials/issues are buffered and only
-// committed after every member decrypts and parses cleanly, so a wrong password
-// (which fails mid-read) yields no partial/garbage output.
+// candidate is tried in a single pass; a gatedSink withholds creds until the
+// first member proves the password, then streams the rest live (so hits climb),
+// while a wrong password (which fails before proof) still yields no output.
 func readSevenZip(ctx context.Context, ec extractCtx, weight int64, open func(pw string) (*sevenzip.Reader, func() error, error)) (archiveScan, error) {
 	cr := newCreditor(ec.p, weight, 1)
 	defer cr.finish()
@@ -1227,14 +1295,11 @@ passwordLoop:
 			continue
 		}
 
-		var bufCreds []Credential
-		var bufIssues []pendingIssue
-		bufEc := ec
-		bufEc.emit = func(c Credential) { bufCreds = append(bufCreds, c) }
-		bufEc.onIssue = func(path string, kind IssueKind, err error) {
-			bufIssues = append(bufIssues, pendingIssue{path, kind, err})
-		}
-		scan, hadMembers, streamErr := readSevenZipMembers(ctx, bufEc, zr, cr)
+		// Gate this attempt: creds buffer until the first cred member proves the
+		// password (readSevenZipMembers confirms), then stream so hits climb. A
+		// wrong password fails before confirm, so the gate's buffer is dropped.
+		gatedEc, gate := newGatedSink(ec)
+		scan, hadMembers, streamErr := readSevenZipMembers(ctx, gatedEc, zr, cr)
 		_ = closeReader()
 		switch {
 		case streamErr == nil:
@@ -1242,7 +1307,7 @@ passwordLoop:
 				emptyArchive = true
 				break passwordLoop
 			}
-			commitBuffered(ec, bufCreds, bufIssues)
+			gate.confirm() // flush any tail not yet streamed (e.g. nested-only sets)
 			return scan, nil
 		case ctx.Err() != nil:
 			return archiveScan{}, ctx.Err()
@@ -1324,6 +1389,12 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 		for _, c := range creds {
 			ec.emit(c)
 		}
+		// A cleanly-decoded credential member proves the password (content
+		// members fail a wrong password on the first read): flush the gate and
+		// stream subsequent creds live. Nested-only members don't confirm here --
+		// recurseNested swallows their decode errors -- so readSevenZip flushes
+		// the tail on clean EOF instead.
+		ec.confirmPassword()
 	}
 	return scan, hadMembers, nil
 }

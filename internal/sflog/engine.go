@@ -38,6 +38,18 @@ type Engine struct {
 	Passwords []string
 	Progress  *Progress
 	Debug     func(format string, args ...any)
+	// OnIssue, when set, is called once for every issue as it happens — before
+	// the summary's per-kind cap — so a caller can stream a complete,
+	// untruncated issue log. Invoked concurrently from workers; the sink guards
+	// its own state.
+	OnIssue func(path string, kind IssueKind, err error)
+	// DedupKey (optional) maps a formatted ULP line to the canonical library
+	// dedup key (host:login:password). When set, the writer dedups on it instead
+	// of the whole line, so sfl's "unique" count means the same thing the library
+	// (and sfu) mean — path-only variants of the same credential collapse here
+	// instead of surviving extraction only to be merged at ingest. nil hashes the
+	// whole line (path-sensitive), used by direct/test callers with no library.
+	DedupKey func(line string) (uint64, bool)
 	// TempDir is where nested archive members are spilled before being recursed
 	// into. "" falls back to the system temp dir.
 	TempDir string
@@ -104,6 +116,8 @@ type accum struct {
 	mu      sync.Mutex
 	issues  []Issue
 	results []SourceResult
+	// onIssue mirrors Engine.OnIssue: an uncapped per-issue tee (may be nil).
+	onIssue func(path string, kind IssueKind, err error)
 
 	// logRemaining counts unprocessed items per log unit; when a log's last
 	// item finishes, the log is counted done. Guarded by logMu.
@@ -133,6 +147,11 @@ func (a *accum) addIssue(path string, kind IssueKind, err error) {
 		a.issues = append(a.issues, Issue{Path: path, Kind: kind, Err: err})
 	}
 	a.mu.Unlock()
+	// Tee every issue (not just the capped examples) to the streaming sink,
+	// outside the lock so file I/O never serializes the workers on a.mu.
+	if a.onIssue != nil {
+		a.onIssue(path, kind, err)
+	}
 }
 
 func (a *accum) addResult(path string, isArchive, ok, hadIssue bool) {
@@ -203,6 +222,7 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 
 	var acc accum
 	acc.logRemaining = logRemaining
+	acc.onIssue = e.OnIssue
 	jobs := make(chan workItem)
 	lines := make(chan string, 4096)
 
@@ -212,7 +232,7 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	writerWG.Add(1)
 	go func() {
 		defer writerWG.Done()
-		writeStats, writeErr = runWriter(lines, w, e.Progress)
+		writeStats, writeErr = runWriter(lines, w, e.Progress, e.DedupKey)
 		if writeErr != nil {
 			runCancel()
 		}
@@ -481,16 +501,25 @@ func (e *Engine) emitAll(ctx context.Context, lines chan<- string, creds []Crede
 	}
 }
 
-// runWriter is the single fan-in consumer. It deduplicates by xxhash of the
-// formatted line (matching sfu's dedup primitive) so memory stays at ~8 bytes
-// per unique line rather than the full string.
-func runWriter(lines <-chan string, w io.Writer, p *Progress) (WriteStats, error) {
+// runWriter is the single fan-in consumer. It deduplicates by a uint64 key so
+// memory stays at ~8 bytes per unique line rather than the full string. keyOf
+// (when non-nil) yields the library's canonical host:login:password key so the
+// unique set matches what the library stores; lines it can't key (nil keyer, or
+// a line the library would reject) fall back to the whole-line hash so distinct
+// lines never merge.
+func runWriter(lines <-chan string, w io.Writer, p *Progress, keyOf func(string) (uint64, bool)) (WriteStats, error) {
 	bw := bufio.NewWriter(w)
 	seen := make(map[uint64]struct{}, 1<<14)
 	var stats WriteStats
 	for line := range lines {
 		stats.Seen++
-		h := xxhash.Sum64String(line)
+		h, ok := uint64(0), false
+		if keyOf != nil {
+			h, ok = keyOf(line)
+		}
+		if !ok {
+			h = xxhash.Sum64String(line)
+		}
 		if _, ok := seen[h]; ok {
 			stats.Duplicates++
 			p.addDup()

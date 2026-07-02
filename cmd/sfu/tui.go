@@ -1328,10 +1328,6 @@ func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
 	if r == nil {
 		return nil
 	}
-	paths := outputPathsForUI(r)
-	if len(paths) == 0 {
-		return nil
-	}
 	const doneOutputFooterLabel = "Output   "
 	mid := doneStart.BlendLuv(doneEnd, 0.5)
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
@@ -1339,6 +1335,16 @@ func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
 	labelW := lipgloss.Width(labelCell)
 	prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
 	blankLabel := strings.Repeat(" ", labelW)
+
+	// Post-run r.OutputPaths is authoritative (this footer only renders on
+	// success): empty means every line was rejected or already in the library
+	// and the engine discarded the generated shard. Show an explicit note rather
+	// than a path to a removed file -- and don't use outputPathsForUI here, whose
+	// live fallback to Cfg.Output would resurrect that path.
+	if len(r.OutputPaths) == 0 {
+		return []string{"", prefix + labelCell + mutedStyle.Render("(nothing new)")}
+	}
+	paths := r.OutputPaths
 
 	out := []string{""}
 	for i, p := range paths {

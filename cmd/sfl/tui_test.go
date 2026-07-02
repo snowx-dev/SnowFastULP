@@ -71,16 +71,19 @@ func TestRenderFinalSummaryUpdateNoticeFooter(t *testing.T) {
 }
 
 func TestRenderIngestSummaryShowsNewVsAlreadyAndLibrarySize(t *testing.T) {
-	lines := renderIngestSummary("/data/Library", 1234, 5, 3, sflog.ExtractStats{
+	// Emitted 10 == Added 5 + already 3 + dropped 2, the invariant the recap shows.
+	lines := renderIngestSummary("/data/Library", 1234, 5, 3, 2, sflog.ExtractStats{
 		Logs:        2,
-		Credentials: 8,
-		Emitted:     8,
+		Credentials: 10,
+		Emitted:     10,
 	}, []string{"/data/Library/sfu_20260701_part1.txt.zst"})
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"INGESTED",
+		"Added",
 		"entries",
 		"Removed",
+		"rejected",
 		"already in library",
 		"lines in library",
 		"1,234",
@@ -107,16 +110,20 @@ func TestRenderNoIngestSummaryReportsLibraryUnchanged(t *testing.T) {
 		"library unchanged",
 		"Library: ",
 		"/data/Library",
-		"password not found",
-		"locked.zip",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("no-ingest summary missing %q:\n%s", want, joined)
 		}
 	}
+	// Issues are streamed to the -err file, not the stdout summary.
+	for _, absent := range []string{"password not found", "locked.zip"} {
+		if strings.Contains(joined, absent) {
+			t.Fatalf("issue detail %q must not appear on stdout:\n%s", absent, joined)
+		}
+	}
 }
 
-func TestRenderFinalSummaryReportsOpenErrors(t *testing.T) {
+func TestRenderFinalSummaryOmitsOpenErrorsFromStdout(t *testing.T) {
 	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
 		Emitted:    3,
 		OpenErrors: 2,
@@ -126,9 +133,10 @@ func TestRenderFinalSummaryReportsOpenErrors(t *testing.T) {
 		},
 	})
 	joined := strings.Join(lines, "\n")
-	for _, want := range []string{"open issues", "victimA-Passwords.txt", "victimB-Passwords.txt"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("summary missing %q:\n%s", want, joined)
+	// Issues live in the -err file now; stdout stays clean.
+	for _, absent := range []string{"open issues", "victimA-Passwords.txt", "victimB-Passwords.txt"} {
+		if strings.Contains(joined, absent) {
+			t.Fatalf("issue detail %q must not appear on stdout:\n%s", absent, joined)
 		}
 	}
 }
@@ -239,7 +247,7 @@ func TestFormatETA(t *testing.T) {
 }
 
 func TestSflRateEMAUpdate(t *testing.T) {
-	const dt = 0.2 // monitor tick
+	const dt = 0.2              // monitor tick
 	steady := float64(10 << 20) // 10 MB/s
 	var ema float64
 	for range 50 { // 10s of ticks
@@ -319,13 +327,13 @@ func TestRenderExtractStatsRowsLabels(t *testing.T) {
 
 func TestRenderIngestStatsRowsRegen(t *testing.T) {
 	joined := strings.Join(renderIngestStatsRows(sflog.IngestView{
-		EnginePhase:       ulpengine.PhasePhase0,
-		PartsRegenDone:    3,
-		PartsRegenTotal:   16,
-		RegenBytesRead:    12 << 30,
-		RegenBytesTotal:   80 << 30,
-		RegenBPS:          128 << 20,
-		ArchivesTotal:     8,
+		EnginePhase:     ulpengine.PhasePhase0,
+		PartsRegenDone:  3,
+		PartsRegenTotal: 16,
+		RegenBytesRead:  12 << 30,
+		RegenBytesTotal: 80 << 30,
+		RegenBPS:        128 << 20,
+		ArchivesTotal:   8,
 	}), "\n")
 	for _, want := range []string{"Library", "3", "16", "parts", "12.0GB", "80.0GB", "128.0MB/s"} {
 		if !strings.Contains(joined, want) {
@@ -468,7 +476,7 @@ func TestSflWorkerRowCap(t *testing.T) {
 	}
 }
 
-func TestRenderFinalSummaryReportsSkippedCount(t *testing.T) {
+func TestRenderFinalSummaryReportsSkippedButOmitsIssueDetail(t *testing.T) {
 	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
 		ArchivesScanned:  3,
 		Emitted:          4,
@@ -480,53 +488,15 @@ func TestRenderFinalSummaryReportsSkippedCount(t *testing.T) {
 		},
 	})
 	joined := strings.Join(lines, "\n")
-	// The recap count row must surface the total skipped sources alongside the
-	// per-kind fail lines, so failures are never hidden from the end summary.
-	for _, want := range []string{"3 skipped", "2 passwords not found", "locked.zip"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("summary missing %q:\n%s", want, joined)
+	// The clean stats box still surfaces the total skipped sources...
+	if !strings.Contains(joined, "3 skipped") {
+		t.Fatalf("summary missing skipped count:\n%s", joined)
+	}
+	// ...but per-issue detail is streamed to the -err file, never stdout.
+	for _, absent := range []string{"passwords not found", "locked.zip"} {
+		if strings.Contains(joined, absent) {
+			t.Fatalf("issue detail %q must not appear on stdout:\n%s", absent, joined)
 		}
-	}
-}
-
-func TestMutedIssueBlockPluralizeByCount(t *testing.T) {
-	one := strings.Join(mutedIssueBlock(sflog.ExtractStats{
-		ParseErrors: 1, OpenErrors: 1, PasswordNotFound: 1, MissingVolumes: 1, NoULP: 1,
-	}, 80), "\n")
-	for _, want := range []string{"1 parse issue", "1 open issue", "1 password not found", "1 incomplete set", "1 source with no ULP"} {
-		if !strings.Contains(one, want) {
-			t.Fatalf("singular issue label missing %q:\n%s", want, one)
-		}
-	}
-	if strings.Contains(one, "passwords") || strings.Contains(one, "sets") || strings.Contains(one, "sources") {
-		t.Fatalf("singular counts should not pluralize:\n%s", one)
-	}
-
-	many := strings.Join(mutedIssueBlock(sflog.ExtractStats{
-		ParseErrors: 3, OpenErrors: 2, PasswordNotFound: 4, MissingVolumes: 6, NoULP: 5,
-	}, 80), "\n")
-	for _, want := range []string{"3 parse issues", "2 open issues", "4 passwords not found", "6 incomplete sets", "5 sources with no ULP"} {
-		if !strings.Contains(many, want) {
-			t.Fatalf("plural issue label missing %q:\n%s", want, many)
-		}
-	}
-}
-
-// TestSummaryIssuesAppearAboveBoxMuted proves failures render in the grey block
-// ABOVE the stats box (not inside it), carry the muted style rather than the
-// yellow warn style, and show full inner/outer provenance.
-func TestMutedIssueBlockShowsDetail(t *testing.T) {
-	block := strings.Join(mutedIssueBlock(sflog.ExtractStats{
-		ParseErrors: 1,
-		Issues: []sflog.Issue{
-			{Path: "/data/bad.7z", Kind: sflog.IssueParseError, Err: sflog.ErrNotAnArchive},
-		},
-	}, 100), "\n")
-	if !strings.Contains(block, "1 parse issue") {
-		t.Fatalf("missing parse issue header:\n%s", block)
-	}
-	if !strings.Contains(block, "signature mismatch") {
-		t.Fatalf("missing issue detail:\n%s", block)
 	}
 }
 
@@ -547,68 +517,17 @@ func TestRenderIngestOutputFooter(t *testing.T) {
 	}
 }
 
-func TestSummaryIssuesAppearAboveBoxMuted(t *testing.T) {
+// TestRenderIngestOutputFooterNothingNew proves a completed ingest that added
+// nothing (all duplicates -> engine discarded the empty shard -> empty paths)
+// states "(nothing new)" instead of silently dropping the Output row.
+func TestRenderIngestOutputFooterNothingNew(t *testing.T) {
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	defer lipgloss.SetColorProfile(prev)
 
-	lines := renderIngestSummary("/data/Library", 1000, 1, 1, sflog.ExtractStats{
-		Logs: 1, Credentials: 1, Emitted: 1,
-		PasswordNotFound: 2,
-		Issues: []sflog.Issue{
-			{Path: "/logs/a.rar!sub/locked.zip", Kind: sflog.IssuePasswordNotFound},
-			{Path: "/logs/b.rar!sub/sealed.7z", Kind: sflog.IssuePasswordNotFound},
-		},
-	}, nil)
-
-	headerIdx, borderIdx := -1, -1
-	for i, ln := range lines {
-		if headerIdx < 0 && strings.Contains(ln, "passwords not found") {
-			headerIdx = i
-		}
-		if borderIdx < 0 && strings.Contains(ln, "╭") {
-			borderIdx = i
-		}
-	}
-	joined := strings.Join(lines, "\n")
-	if headerIdx < 0 || borderIdx < 0 {
-		t.Fatalf("header (%d) or box border (%d) not found:\n%s", headerIdx, borderIdx, joined)
-	}
-	if headerIdx >= borderIdx {
-		t.Fatalf("issue header at %d is not above the box border at %d:\n%s", headerIdx, borderIdx, joined)
-	}
-	for i := borderIdx; i < len(lines); i++ {
-		if strings.Contains(lines[i], "passwords not found") {
-			t.Fatalf("issue header leaked into/after the box at line %d:\n%s", i, joined)
-		}
-	}
-	if !strings.Contains(joined, "locked.zip  —  in a.rar") {
-		t.Fatalf("missing inner/outer provenance form:\n%s", joined)
-	}
-	// #A6818F (muted mauve), never #F2C14E (warn yellow), in a completion frame.
-	if !strings.Contains(lines[headerIdx], "166;129;143") {
-		t.Fatalf("issue header is not muted-styled: %q", lines[headerIdx])
-	}
-	if strings.Contains(joined, "242;193;78") {
-		t.Fatalf("warn (yellow) styling must not appear in a completion summary:\n%s", joined)
-	}
-}
-
-// TestSummarySurfacesMissingVolume guards the newly surfaced incomplete-set
-// kind, which the prior in-box block never reported.
-func TestSummarySurfacesMissingVolume(t *testing.T) {
-	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
-		Emitted:        3,
-		MissingVolumes: 1,
-		Issues: []sflog.Issue{
-			{Path: "/data/set.part2.rar", Kind: sflog.IssueMissingVolume},
-		},
-	})
-	joined := strings.Join(lines, "\n")
-	for _, want := range []string{"1 incomplete set", "set.part2.rar"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("summary missing %q:\n%s", want, joined)
-		}
+	joined := strings.Join(renderIngestOutputFooter(nil), "\n")
+	if !strings.Contains(joined, "(nothing new)") {
+		t.Fatalf("want (nothing new) footer for empty ingest, got:\n%s", joined)
 	}
 }
 
@@ -665,32 +584,6 @@ func TestRenderInterruptShowsCleanupLog(t *testing.T) {
 	for _, want := range log {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("interrupt frame missing cleanup line %q:\n%s", want, joined)
-		}
-	}
-}
-
-func TestRenderFinalSummaryReportsIssues(t *testing.T) {
-	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
-		ArchivesScanned:  3,
-		Emitted:          5,
-		SkippedArchives:  2,
-		PasswordNotFound: 2,
-		NoULP:            1,
-		Issues: []sflog.Issue{
-			{Path: "/data/locked.zip", Kind: sflog.IssuePasswordNotFound},
-			{Path: "/data/sealed.7z", Kind: sflog.IssuePasswordNotFound},
-			{Path: "/data/victim/Passwords.txt", Kind: sflog.IssueNoULP},
-		},
-	})
-	joined := strings.Join(lines, "\n")
-	for _, want := range []string{
-		"2 passwords not found",
-		"locked.zip",
-		"sealed.7z",
-		"source with no ULP",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("summary missing %q:\n%s", want, joined)
 		}
 	}
 }

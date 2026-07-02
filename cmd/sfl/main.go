@@ -36,6 +36,7 @@ type runConfig struct {
 	NoURI         bool
 	NoTUI         bool
 	Debug         bool
+	ErrFile       bool
 	NoUpdateCheck bool
 	UpdateChecker *selfupdate.Checker
 	Started       time.Time
@@ -83,6 +84,7 @@ func main() {
 	delSrc := flag.Bool("del", false, "delete source files after success")
 	noURI := flag.Bool("no-uri", false, "emit host:login:password")
 	debug := flag.Bool("debug", false, "write structured debug log")
+	errFile := flag.Bool("err", false, "write the full, untruncated issue list to a file")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update check")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
@@ -124,7 +126,7 @@ func main() {
 	cfg := runConfig{
 		Input: inputArg, OutputDir: *out, LibraryDir: *outDedup, Password: *password,
 		TempDir: *tempDir, Workers: w, Compress: *zst, DeleteSources: *delSrc,
-		NoURI: *noURI, NoTUI: *noTUI, Debug: *debug, NoUpdateCheck: *noUpdateCheck,
+		NoURI: *noURI, NoTUI: *noTUI, Debug: *debug, ErrFile: *errFile, NoUpdateCheck: *noUpdateCheck,
 		Started: started, ForcePlainTUI: !vtOK,
 	}
 	cfg.UpdateChecker = selfupdate.NewChecker(version.String, os.Args[0], cfg.NoUpdateCheck)
@@ -191,6 +193,9 @@ func run(cfg runConfig) error {
 	dbg := newDebugLogger(cfg)
 	defer dbg.Close()
 
+	iss := newIssueLogger(cfg)
+	defer iss.Close()
+
 	passwords, err := sflog.LoadPasswords(cfg.Password)
 	if err != nil {
 		return err
@@ -237,7 +242,7 @@ func run(cfg runConfig) error {
 	removeSpill := func() { ulpengine.RemoveTreeLogged(spillDir) }
 	defer removeSpill()
 
-	eng := buildEngine(cfg, passwords, prog, dbg, spillDir)
+	eng := buildEngine(cfg, passwords, prog, dbg, iss, spillDir)
 	stats, results, extractErr := eng.Run(ctx, cfg.Input, snk.w)
 	dbg.Completion(stats)
 	dbg.Issues(stats)
@@ -329,12 +334,15 @@ func run(cfg runConfig) error {
 	case cfg.LibraryDir != "" && libEmpty:
 		summary = renderNoIngestSummaryWithNotice(cfg.LibraryDir, stats, updateNotice)
 	case cfg.LibraryDir != "":
-		var newToLib, alreadyInLib int64
+		var newToLib, alreadyInLib, dropped int64
 		if ingestMet != nil {
 			newToLib = ingestMet.LinesUnique.Load()
 			alreadyInLib = ingestMet.LinesSkippedByDest.Load()
+			// creds the library's parser refused (non-ULP): closes the recap's
+			// arithmetic, Unique == Added + already-in-library + dropped.
+			dropped = ingestMet.LinesRejected.Load()
 		}
-		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, stats, ingestOutputPaths(ingestRes), updateNotice)
+		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, dropped, stats, ingestOutputPaths(ingestRes), updateNotice)
 	default:
 		summary = renderFinalSummaryWithNotice(outPath, stats, updateNotice)
 	}
@@ -484,7 +492,7 @@ func collectSweepParents(cfg runConfig) []string {
 	return out
 }
 
-func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *debugLogger, spillDir string) *sflog.Engine {
+func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *debugLogger, iss *issueLogger, spillDir string) *sflog.Engine {
 	eng := &sflog.Engine{
 		Workers:          cfg.Workers,
 		NoURI:            cfg.NoURI,
@@ -492,9 +500,18 @@ func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *d
 		Progress:         prog,
 		TempDir:          spillDir,
 		FollowedByIngest: cfg.LibraryDir != "",
+		// Dedup extraction on the library's canonical host:login:password key
+		// (strict parse, matching the ingest) so "unique" collapses path-only
+		// variants exactly as sfu/the library do — whether or not -od follows.
+		DedupKey: func(line string) (uint64, bool) {
+			return ulpengine.DedupKeyForLine(line, false)
+		},
 	}
 	if dbg != nil {
 		eng.Debug = dbg.Event
+	}
+	if iss != nil {
+		eng.OnIssue = iss.Record
 	}
 	return eng
 }
@@ -664,11 +681,11 @@ func snapshotIngestWorkers(od *ulpengine.ODMetrics) []sflog.IngestWorker {
 			continue
 		}
 		out = append(out, sflog.IngestWorker{
-			Archive:     *namePtr,
-			PartIdx:     ws.PartIdx.Load(),
-			PartsTotal:  ws.PartsTotal.Load(),
-			BytesDone:   ws.BytesDone.Load(),
-			BytesTotal:  ws.BytesTotal.Load(),
+			Archive:    *namePtr,
+			PartIdx:    ws.PartIdx.Load(),
+			PartsTotal: ws.PartsTotal.Load(),
+			BytesDone:  ws.BytesDone.Load(),
+			BytesTotal: ws.BytesTotal.Load(),
 		})
 	}
 	return out

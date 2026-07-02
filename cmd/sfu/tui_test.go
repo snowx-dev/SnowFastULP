@@ -493,7 +493,8 @@ func TestRenderDoneIncludesAllSummaryFields(t *testing.T) {
 	m.BytesWritten.Store(8_800_000_000) // ~8.2 GB
 	r := &ulpengine.Resolved{
 		Cfg:            ulpengine.Config{Output: "./sfu_20260509_abc123.txt"},
-		TotalInputs:    10_737_418_240, // 10 GB
+		OutputPaths:    []string{"./sfu_20260509_abc123.txt"}, // a real run that wrote lines sets this
+		TotalInputs:    10_737_418_240,                        // 10 GB
 		InputFileCount: 4,
 	}
 	lines := renderFinalStdoutSummary(102*time.Second, m, r, 80, nil)
@@ -821,10 +822,24 @@ func TestRenderDoneOutputFooterListsAllArchivesAligned(t *testing.T) {
 	}
 }
 
+// TestRenderDoneOutputFooterNothingNew proves a run that wrote nothing (engine
+// discarded the empty shard, so OutputPaths is empty) shows "(nothing new)"
+// instead of resurrecting the removed Cfg.Output path via the live fallback.
+func TestRenderDoneOutputFooterNothingNew(t *testing.T) {
+	r := &ulpengine.Resolved{Cfg: ulpengine.Config{Output: "/lib/sfu_20260702_x.txt.zst"}}
+	joined := strings.Join(renderDoneOutputFooter(r), "\n")
+	if !strings.Contains(joined, "(nothing new)") {
+		t.Fatalf("want (nothing new) footer, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "sfu_20260702_x.txt.zst") {
+		t.Fatalf("footer must not point at the removed Cfg.Output path:\n%s", joined)
+	}
+}
+
 func TestRenderDoneOutputFooterPlainLongPath(t *testing.T) {
 	// long suffix built inline, no checked-in personal mount path
 	longPath := filepath.Join(os.TempDir(), strings.Repeat("nest/", 20)+"sfu_20260509-203530.txt")
-	r := &ulpengine.Resolved{Cfg: ulpengine.Config{Output: longPath}}
+	r := &ulpengine.Resolved{Cfg: ulpengine.Config{Output: longPath}, OutputPaths: []string{longPath}}
 	lines := renderFinalStdoutSummary(time.Second, &ulpengine.Metrics{}, r, 80, nil)
 	var pathLine string
 	for _, ln := range lines {

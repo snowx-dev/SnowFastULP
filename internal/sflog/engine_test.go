@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -73,6 +74,58 @@ func TestEngineReportsPasswordNotFound(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].OK || !results[0].IsArchive {
 		t.Fatalf("results = %+v", results)
+	}
+}
+
+// TestEngineOnIssueStreamsEveryIssueUncapped proves the -err tee sees every
+// issue while the in-memory summary list stays bounded by perKindIssueCap.
+func TestEngineOnIssueStreamsEveryIssueUncapped(t *testing.T) {
+	root := t.TempDir()
+	const n = 25 // > perKindIssueCap
+	for i := 0; i < n; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("victim%02d", i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Password-named file with no complete url:user:pass triple → NoULP.
+		if err := os.WriteFile(filepath.Join(dir, "Passwords.txt"),
+			[]byte("Browser: Chrome\nProfile: Default\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var mu sync.Mutex
+	teed := 0
+	var out bytes.Buffer
+	eng := &Engine{
+		Workers:   4,
+		Passwords: []string{""},
+		OnIssue: func(string, IssueKind, error) {
+			mu.Lock()
+			teed++
+			mu.Unlock()
+		},
+	}
+	stats, _, err := eng.Run(context.Background(), root, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.NoULP != n {
+		t.Fatalf("NoULP counter = %d, want %d", stats.NoULP, n)
+	}
+	noULPExamples := 0
+	for _, is := range stats.Issues {
+		if is.Kind == IssueNoULP {
+			noULPExamples++
+		}
+	}
+	if noULPExamples > perKindIssueCap {
+		t.Fatalf("summary kept %d NoULP examples, want <= cap %d", noULPExamples, perKindIssueCap)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if teed != n {
+		t.Fatalf("OnIssue fired %d time(s), want %d (uncapped)", teed, n)
 	}
 }
 
@@ -267,5 +320,59 @@ func TestEngineProgressFilesCountsArchiveMembersLive(t *testing.T) {
 	}
 	if got := prog.Files(); got != int64(stats.FilesScanned) {
 		t.Fatalf("prog.Files() = %d, want %d (live counter must match FilesScanned)", got, stats.FilesScanned)
+	}
+}
+
+// runWriterCollect drives runWriter over in and returns the emitted lines.
+func runWriterCollect(t *testing.T, in []string, keyOf func(string) (uint64, bool)) []string {
+	t.Helper()
+	lines := make(chan string, len(in))
+	for _, l := range in {
+		lines <- l
+	}
+	close(lines)
+	var buf bytes.Buffer
+	if _, err := runWriter(lines, &buf, nil, keyOf); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+}
+
+// With an injected key, lines sharing a key collapse to the first seen — the
+// mechanism that lets sfl dedup on the library's host:login:password key.
+func TestRunWriterDedupsOnInjectedKey(t *testing.T) {
+	keyOf := func(line string) (uint64, bool) {
+		switch line {
+		case "L1", "L2": // same key -> L2 collapses into L1
+			return 100, true
+		case "L3":
+			return 200, true
+		}
+		return 0, false
+	}
+	got := runWriterCollect(t, []string{"L1", "L2", "L3", "L1"}, keyOf)
+	if want := []string{"L1", "L3"}; !equalStrings(got, want) {
+		t.Fatalf("emitted = %v, want %v", got, want)
+	}
+}
+
+// A nil keyer keeps the historical whole-line dedup: only exact-line repeats drop.
+func TestRunWriterNilKeyHashesWholeLine(t *testing.T) {
+	got := runWriterCollect(t, []string{"L1", "L2", "L1"}, nil)
+	if want := []string{"L1", "L2"}; !equalStrings(got, want) {
+		t.Fatalf("emitted = %v, want %v", got, want)
+	}
+}
+
+// A line the keyer can't key (ok=false) must fall back to the whole-line hash so
+// distinct unkeyable lines are never wrongly merged.
+func TestRunWriterUnkeyedFallsBackToWholeLine(t *testing.T) {
+	keyOf := func(string) (uint64, bool) { return 0, false }
+	got := runWriterCollect(t, []string{"A", "B", "A"}, keyOf)
+	if want := []string{"A", "B"}; !equalStrings(got, want) {
+		t.Fatalf("emitted = %v, want %v", got, want)
 	}
 }

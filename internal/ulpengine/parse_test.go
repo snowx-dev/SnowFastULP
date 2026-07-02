@@ -3,6 +3,8 @@ package ulpengine
 import (
 	"strings"
 	"testing"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 func TestParseValid(t *testing.T) {
@@ -76,6 +78,84 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
+func TestParseAndroidCredentials(t *testing.T) {
+	cases := []struct {
+		in                    string
+		host, login, password string
+	}{
+		{
+			in:       "android://2S2AVDtVBrUfxRaWYUMU==@com.netflix.mediaclient/:user@gmail.com:secret",
+			host:     "android://2S2AVDtVBrUfxRaWYUMU==@com.netflix.mediaclient/",
+			login:    "user@gmail.com",
+			password: "secret",
+		},
+		{
+			// [NOT_SAVED] placeholder is a non-empty password -> kept
+			in:       "android://kCyQ_-x==@com.pinterest/:malam.sarfaraz@gmail.com:[NOT_SAVED]",
+			host:     "android://kCyQ_-x==@com.pinterest/",
+			login:    "malam.sarfaraz@gmail.com",
+			password: "[NOT_SAVED]",
+		},
+		{
+			// cert-less form
+			in:       "android://com.spotify.music/:u2:pw2",
+			host:     "android://com.spotify.music/",
+			login:    "u2",
+			password: "pw2",
+		},
+		{
+			// password may contain colons; login never does
+			in:       "android://h@com.x/:user:a:b:c",
+			host:     "android://h@com.x/",
+			login:    "user",
+			password: "a:b:c",
+		},
+	}
+	lf := newLineFormatter()
+	for _, c := range cases {
+		host, url, login, password, ok := parse(c.in)
+		if !ok {
+			t.Fatalf("parse(%q) ok=false, want true", c.in)
+		}
+		if host != c.host || url != c.host || login != c.login || password != c.password {
+			t.Fatalf("parse(%q) = host=%q url=%q login=%q pw=%q; want host=url=%q login=%q pw=%q",
+				c.in, host, url, login, password, c.host, c.login, c.password)
+		}
+		// key is the whole line: xxhash(host:login:password) == xxhash(in)
+		if got, want := lf.HashKey(host, login, password), xxhash.Sum64String(c.in); got != want {
+			t.Fatalf("android key for %q = %#x, want whole-line %#x", c.in, got, want)
+		}
+		// must round-trip through the regen/reparse path, else it'd be dropped
+		out, repr := lf.FormatRecordStable(host, url, login, password, false)
+		if !repr {
+			t.Fatalf("android line %q has no stable representation", c.in)
+		}
+		if string(out) != c.in {
+			t.Fatalf("android output = %q, want verbatim %q", out, c.in)
+		}
+		h2, _, l2, p2, ok2 := parseUnion(string(out))
+		if !ok2 || lf.HashKey(h2, l2, p2) != lf.HashKey(host, login, password) {
+			t.Fatalf("android %q does not round-trip via parseUnion", c.in)
+		}
+	}
+}
+
+func TestParseAndroidRejects(t *testing.T) {
+	for _, in := range []string{
+		"android://",                 // nothing after scheme
+		"android://com.x/",           // no login:password
+		"android://com.x/:user",      // no password
+		"android://:user:pw",         // empty authority
+		"android://com.x/::pw",       // empty login
+		"android://com.x/:user:",     // empty password
+		"notandroid://com.x/:u:p",    // wrong scheme
+	} {
+		if _, _, _, _, ok := parse(in); ok {
+			t.Errorf("parse(%q) ok=true, want false", in)
+		}
+	}
+}
+
 func TestParseAcceptsMaxPassword(t *testing.T) {
 	in := "https://a.example.com:user:" + strings.Repeat("z", 64)
 	if _, _, _, _, ok := parse(in); !ok {
@@ -107,6 +187,41 @@ func TestParseLineTooLong(t *testing.T) {
 	in := "https://a.example.com:user:" + strings.Repeat("z", 4096)
 	if _, _, _, _, ok := parse(in); ok {
 		t.Fatalf("parse should reject lines > 4096 bytes")
+	}
+}
+
+// DedupKeyForLine must yield the exact key Ingest derives for the same line, so
+// an upstream producer can pre-dedup on the library's canonical key.
+func TestDedupKeyForLineMatchesLibraryKey(t *testing.T) {
+	lf := newLineFormatter()
+	line := "www.example.com/login?next=1:user@host.com:secret"
+	host, _, login, password, ok := parse(line)
+	if !ok {
+		t.Fatalf("setup: %q should parse", line)
+	}
+	want := lf.HashKey(host, login, password)
+	got, ok := DedupKeyForLine(line, false)
+	if !ok || got != want {
+		t.Fatalf("DedupKeyForLine(%q) = %#x,%v; want %#x", line, got, ok, want)
+	}
+}
+
+// Same host:login:password, differing only by www/path/query, must share one
+// key — this is exactly the collapse that made sfl's "unique" over-count.
+func TestDedupKeyForLineCollapsesPathVariants(t *testing.T) {
+	a, okA := DedupKeyForLine("www.example.com/a?x=1:u:p", false)
+	b, okB := DedupKeyForLine("example.com/b:u:p", false)
+	if !okA || !okB {
+		t.Fatalf("both should parse: okA=%v okB=%v", okA, okB)
+	}
+	if a != b {
+		t.Fatalf("path-only variants should share a key: %#x vs %#x", a, b)
+	}
+}
+
+func TestDedupKeyForLineRejectsUnparsable(t *testing.T) {
+	if k, ok := DedupKeyForLine("not a ulp line", false); ok {
+		t.Fatalf("garbage line should not yield a key, got %#x", k)
 	}
 }
 

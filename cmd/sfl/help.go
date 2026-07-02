@@ -43,6 +43,7 @@ func renderHelp(bin string) string {
 	}
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
+		{"-err", "", "Write the full, untruncated issue list to a file."},
 		{"-no-update-check", "", "Disable background update availability check."},
 	}
 

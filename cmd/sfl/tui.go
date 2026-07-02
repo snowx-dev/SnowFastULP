@@ -541,7 +541,7 @@ func frameWithFooter(header string, box []string, width int, footer []string) []
 }
 
 const (
-	sflRateEMATau = 10.0  // seconds, ETA throughput smoothing window
+	sflRateEMATau = 10.0   // seconds, ETA throughput smoothing window
 	sflMinETARate = 1024.0 // B/s floor before ETA is shown (micro-stall guard)
 )
 
@@ -973,7 +973,12 @@ func renderSflRemovedRows(bullets []string, maxInnerWidth int) []string {
 	if len(bullets) == 0 {
 		return nil
 	}
-	const label = "Removed  "
+	// Pad to the same gutter recapRow uses so the value column lines up with
+	// Added/Unique/etc. instead of starting one cell short.
+	label := "Removed"
+	if pad := sflRecapLabelW - lipgloss.Width(label); pad > 0 {
+		label += strings.Repeat(" ", pad)
+	}
 	sep := sflMutedStyle.Render(" · ")
 	singleLineRest := strings.Join(bullets, sep)
 	totalWidth := lipgloss.Width(label) + lipgloss.Width(singleLineRest)
@@ -988,14 +993,25 @@ func renderSflRemovedRows(bullets []string, maxInnerWidth int) []string {
 	return rows
 }
 
-func renderIngestLibraryRows(newToLib, alreadyInLib int64, innerWidth int) []string {
-	var rows []string
-	rows = append(rows, recapRow("Unique", sflUniqueStyle.Render(formatInt(int(newToLib)))+
-		sflMutedStyle.Render(" entries")))
+// renderIngestLibraryRows shows what the ingest did with the extracted uniques:
+// how many were added, then a "Removed" row grouping the reasons a unique didn't
+// land -- mirroring sfu's renderDoneLines. The rejected count leads in warn
+// style (the actionable "the library refused these" number), then library hits.
+// Extraction already deduped, so there are no within-run duplicates to show
+// here (sfu's third bullet). Surfacing rejected closes the recap's arithmetic:
+// extraction Unique == Added + rejected + already-in-library.
+func renderIngestLibraryRows(newToLib, alreadyInLib, dropped int64, innerWidth int) []string {
+	rows := []string{recapRow("Added", sflUniqueStyle.Render(formatInt(int(newToLib)))+
+		sflMutedStyle.Render(" entries"))}
+	var bullets []string
+	if dropped > 0 {
+		bullets = append(bullets, sflWarnStyle.Render(formatInt(int(dropped)))+" "+sflMutedStyle.Render("rejected"))
+	}
 	if alreadyInLib > 0 {
-		rows = append(rows, renderSflRemovedRows([]string{
-			sflCountStyle.Render(formatInt(int(alreadyInLib))) + " " + sflMutedStyle.Render("already in library"),
-		}, innerWidth)...)
+		bullets = append(bullets, sflCountStyle.Render(formatInt(int(alreadyInLib)))+" "+sflMutedStyle.Render("already in library"))
+	}
+	if len(bullets) > 0 {
+		rows = append(rows, renderSflRemovedRows(bullets, innerWidth)...)
 	}
 	return rows
 }
@@ -1008,7 +1024,7 @@ func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, noti
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
 	body := append(recapCountRows(stats), "", sflMutedStyle.Render("Output: ")+outPath)
-	box := append(mutedAbove(stats, termWidthFull()), sflGradientBox(body, width, gradStart, gradEnd)...)
+	box := sflGradientBox(body, width, gradStart, gradEnd)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
 
@@ -1027,7 +1043,7 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
-	box := append(mutedAbove(stats, termWidthFull()), sflGradientBox(body, width, gradStart, gradEnd)...)
+	box := sflGradientBox(body, width, gradStart, gradEnd)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
 
@@ -1035,19 +1051,19 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 // what this run contributed (new vs already-present), and the resulting library
 // line count and path, so the single icy frame ends the run instead of handing
 // off to sfu's summary.
-func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, outputPaths []string) []string {
-	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, stats, outputPaths, nil)
+func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string) []string {
+	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, dropped, stats, outputPaths, nil)
 }
 
-func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib int64, stats sflog.ExtractStats, outputPaths []string, notice *selfupdate.Notice) []string {
+func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
-	// Box holds clean stats: extraction recap, Unique/Removed ingest rows, library path.
-	// Failures/skips live in the muted block above; the running library total
-	// gets its own box below (mirrors sfu's renderODSummary).
-	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, boxInner(width))...)
+	// Box holds clean stats only: extraction recap, Added/Removed ingest rows,
+	// library path. Failures/skips are streamed to the -err file (never stdout);
+	// the running library total gets its own box below (mirrors sfu's renderODSummary).
+	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, dropped, boxInner(width))...)
 	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
-	box := append(mutedAbove(stats, termWidthFull()), sflGradientBox(body, width, gradStart, gradEnd)...)
+	box := sflGradientBox(body, width, gradStart, gradEnd)
 	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
 	out := []string{"", title, ""}
@@ -1060,9 +1076,6 @@ func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, al
 // renderIngestOutputFooter lists archive(s) written this run below the ingest
 // summary boxes, mirroring sfu's renderDoneOutputFooter layout.
 func renderIngestOutputFooter(paths []string) []string {
-	if len(paths) == 0 {
-		return nil
-	}
 	const label = "Output   "
 	mid := gradStart.BlendLuv(gradEnd, 0.5)
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
@@ -1070,6 +1083,13 @@ func renderIngestOutputFooter(paths []string) []string {
 	labelW := lipgloss.Width(labelCell)
 	prefix := strings.Repeat(" ", sflLeftPad) + border.Render("┃") + "  "
 	blankLabel := strings.Repeat(" ", labelW)
+
+	// Empty after a completed ingest = nothing new was added (all duplicates); the
+	// engine discarded the empty shard, so state that plainly instead of dropping
+	// the row (which would leave the user wondering where the output went).
+	if len(paths) == 0 {
+		return []string{"", prefix + labelCell + sflMutedStyle.Render("(nothing new)")}
+	}
 
 	out := []string{""}
 	for i, p := range paths {
@@ -1114,32 +1134,6 @@ func renderInterruptSummary(elapsed time.Duration, cleanupLog []string) []string
 	return frame(title, box, width)
 }
 
-// plural picks the singular or plural noun by count (1 → singular).
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
-}
-
-// maxAboveExamples caps how many concrete example paths are listed under each
-// issue header above the box. The exact per-kind counters drive "+N more", so
-// no failure is ever hidden even though only a few paths are shown.
-const maxAboveExamples = 5
-
-// issueProvenance renders an issue path so the analyst sees exactly what failed
-// and where: a nested member ("outer.rar!sub/inner.rar") collapses to
-// "inner.rar  —  in outer.rar"; a top-level source shows just its name.
-func issueProvenance(path string) string {
-	first := strings.IndexByte(path, '!')
-	if first < 0 {
-		return baseName(path)
-	}
-	outer := baseName(path[:first])
-	inner := baseName(path[strings.LastIndexByte(path, '!')+1:])
-	return inner + "  —  in " + outer
-}
-
 // clampHead trims s to at most max runes, keeping the start (the file name) and
 // marking the cut with an ellipsis, so a pathological member name can't
 // soft-wrap the muted block across the terminal.
@@ -1155,55 +1149,6 @@ func clampHead(s string, max int) string {
 		return "…"
 	}
 	return string(r[:max-1]) + "…"
-}
-
-// mutedIssueBlock is the grey warnings/issues block printed ABOVE the summary
-// box. Each non-zero issue kind gets a header line plus a few indented example
-// paths (full provenance) and a short reason when known, with the exact counter
-// driving "+N more". Labels are pluralised so a single fail never reads as
-// "1 issues". Returns nil for a clean run so the frame shows no empty gap.
-func mutedIssueBlock(stats sflog.ExtractStats, width int) []string {
-	var out []string
-	budget := width - sflLeftPad - 2
-	detailBudget := budget - 2
-	add := func(n int, kind sflog.IssueKind, one, many string) {
-		if n <= 0 {
-			return
-		}
-		out = append(out, sflIndent+sflMutedStyle.Render(fmt.Sprintf("! %s %s", formatInt(n), plural(n, one, many))))
-		shown := 0
-		for _, is := range stats.Issues {
-			if is.Kind != kind || shown >= maxAboveExamples {
-				continue
-			}
-			out = append(out, sflIndent+"  "+sflMutedStyle.Render(clampHead(issueProvenance(is.Path), budget)))
-			if detail := sflog.IssueDetail(is); detail != "" {
-				out = append(out, sflIndent+"    "+sflMutedStyle.Render(clampHead(detail, detailBudget)))
-			}
-			shown++
-		}
-		if n > shown {
-			out = append(out, sflIndent+"  "+sflMutedStyle.Render(fmt.Sprintf("+%s more", formatInt(n-shown))))
-		}
-	}
-	add(stats.PasswordNotFound, sflog.IssuePasswordNotFound, "password not found", "passwords not found")
-	add(stats.ParseErrors, sflog.IssueParseError, "parse issue", "parse issues")
-	add(stats.OpenErrors, sflog.IssueOpenError, "open issue", "open issues")
-	add(stats.MissingVolumes, sflog.IssueMissingVolume, "incomplete set", "incomplete sets")
-	add(stats.NoULP, sflog.IssueNoULP, "source with no ULP", "sources with no ULP")
-	return out
-}
-
-// mutedAbove is the muted issue block plus a double trailing blank that sets the
-// bad news apart from the boxes below, so the eye settles on the good-news stats
-// rather than the warnings. Returns nil when there are no issues (so a clean
-// run's layout is unchanged). Prepended to the box lines by the completion frames.
-func mutedAbove(stats sflog.ExtractStats, width int) []string {
-	block := mutedIssueBlock(stats, width)
-	if len(block) == 0 {
-		return nil
-	}
-	return append(block, "", "")
 }
 
 func baseName(p string) string {
