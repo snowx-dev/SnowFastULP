@@ -175,9 +175,11 @@ func setSFSStreamFlag(fl SFSFlags) {
 // SFLFlags holds pointers to sfl flag variables for config merge.
 type SFLFlags struct {
 	O, OD, TempDir, Password *string
+	SecretsPath              *string
 	Workers                  *int
 	NoTUI, Zst, Del, NoURI   *bool
 	Debug, NoUpdateCheck     *bool
+	Secrets                  *bool
 }
 
 // ApplySFL applies unvisited config values to sfl flags.
@@ -232,6 +234,16 @@ func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 	}
 	if !v.set("no-update-check") && f.SFL.NoUpdateCheck && fl.NoUpdateCheck != nil {
 		*fl.NoUpdateCheck = true
+	}
+	if !v.set("secrets") && f.SFL.Secrets && fl.Secrets != nil {
+		*fl.Secrets = true
+	}
+	if !v.set("secrets-path") && f.SFL.SecretsPath != "" && fl.SecretsPath != nil {
+		p, err := ResolvePath(f.baseDir, f.SFL.SecretsPath)
+		if err != nil {
+			return err
+		}
+		*fl.SecretsPath = p
 	}
 	return nil
 }

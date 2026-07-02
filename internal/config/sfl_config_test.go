@@ -90,6 +90,41 @@ func TestApplySFLResolvesRelativePaths(t *testing.T) {
 	}
 }
 
+func TestApplySFLSecrets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[sfl]\nsecrets = true\nsecrets_path = \"vault/secrets.sqlite\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.SFL.Secrets || f.SFL.SecretsPath != "vault/secrets.sqlite" {
+		t.Fatalf("unexpected SFL secrets config: %+v", f.SFL)
+	}
+
+	secretsOn, secretsPath := false, ""
+	if err := f.ApplySFL(config.Visited{}, config.SFLFlags{Secrets: &secretsOn, SecretsPath: &secretsPath}); err != nil {
+		t.Fatal(err)
+	}
+	if !secretsOn {
+		t.Fatalf("secrets flag not enabled from config")
+	}
+	if want := filepath.Join(dir, "vault/secrets.sqlite"); secretsPath != want {
+		t.Fatalf("secrets-path = %q want %q", secretsPath, want)
+	}
+
+	// An explicit CLI -secrets-path wins over the config value.
+	cliPath := "/cli/s.sqlite"
+	if err := f.ApplySFL(config.Visited{"secrets-path": true}, config.SFLFlags{SecretsPath: &cliPath}); err != nil {
+		t.Fatal(err)
+	}
+	if cliPath != "/cli/s.sqlite" {
+		t.Fatalf("secrets-path = %q, want CLI value preserved", cliPath)
+	}
+}
+
 func TestApplySFLCLIOOverridesConfigOD(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

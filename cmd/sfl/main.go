@@ -102,9 +102,11 @@ func main() {
 	visited.ResolveIntAlias(workers, workersAlias, "workers", "j")
 	if err := fileCfg.ApplySFL(visited, config.SFLFlags{
 		O: out, OD: outDedup, TempDir: tempDir, Password: password,
-		Workers: workers,
-		NoTUI:   noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
+		SecretsPath: secretsPath,
+		Workers:     workers,
+		NoTUI:       noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
 		Debug: debug, NoUpdateCheck: noUpdateCheck,
+		Secrets: secretsOn,
 	}); err != nil {
 		fatalf("%v", err)
 	}

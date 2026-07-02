@@ -63,6 +63,8 @@ type SFLSection struct {
 	NoURI         bool   `toml:"no_uri"`
 	Debug         bool   `toml:"debug"`
 	NoUpdateCheck bool   `toml:"no_update_check"`
+	Secrets       bool   `toml:"secrets"`
+	SecretsPath   string `toml:"secrets_path"`
 }
 
 // Path returns the loaded config file path.
