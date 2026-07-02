@@ -53,6 +53,12 @@ type Engine struct {
 	// TempDir is where nested archive members are spilled before being recursed
 	// into. "" falls back to the system temp dir.
 	TempDir string
+	// SecretSink (optional) receives non-credential member bytes for secret
+	// scanning. nil disables secret scanning entirely (the credential path is
+	// then byte-for-byte unchanged). SecretMaxLen caps per-member bytes read
+	// (0 -> defaultSecretMaxLen).
+	SecretSink   SecretSink
+	SecretMaxLen int64
 	// FollowedByIngest tells Run to leave the tracker in the extract phase
 	// instead of flipping to Done, so an -od caller can hand straight off to the
 	// ingest phase without a transient "COMPLETE" frame.
@@ -357,6 +363,16 @@ func (e *Engine) processFile(ctx context.Context, idx int, it workItem, lines ch
 		return
 	}
 	e.emitAll(ctx, lines, creds)
+	// Loose files are the direct input; scan them for secrets too (a .env or
+	// config passed straight to sfl). The credential read above consumed the
+	// stream, so re-open. Best-effort: a re-open failure never fails the file.
+	if e.SecretSink != nil {
+		if sf, oerr := os.Open(it.path); oerr == nil {
+			ec := extractCtx{secrets: e.SecretSink, secretMaxLen: e.SecretMaxLen}
+			ec.scanSecrets(ctx, sf, it.path)
+			sf.Close()
+		}
+	}
 	if len(creds) == 0 {
 		acc.noULP.Add(1)
 		acc.addIssue(it.path, IssueNoULP, nil)
@@ -433,9 +449,11 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		p:         e.Progress,
 		setStage:  func(s WorkerStage) { e.Progress.setStage(idx, s) },
 		setItem:   func(label string) { e.Progress.setWorkerPath(idx, label) },
-		debug:     e.Debug,
-		sem:       e.extractSem,
-		processor: defaultProcessor,
+		debug:        e.Debug,
+		sem:          e.extractSem,
+		processor:    defaultProcessor,
+		secrets:      e.SecretSink,
+		secretMaxLen: e.SecretMaxLen,
 	}
 	// One heartbeat throttle per top-level item, shared across the whole
 	// recursion. Set here (not just in readArchiveCredentials) so the

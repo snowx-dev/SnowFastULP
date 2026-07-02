@@ -1074,6 +1074,10 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
+					// Scan the first member for secrets (no-op without a sink;
+					// caps its read) before draining the rest, which forces the
+					// decoder's CRC so a wrong password fails cheaply here.
+					ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
 					if _, derr := io.Copy(io.Discard, rr); derr != nil {
 						return derr
 					}
@@ -1100,6 +1104,10 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 				for _, c := range creds {
 					ec.emit(c)
 				}
+			default:
+				// Non-credential member: scan for secrets (no-op without a sink).
+				// The read is capped; rr.Next() skips any unread remainder.
+				ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
 			}
 		}
 	}
@@ -1251,6 +1259,8 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
+					// See readRarStream: scan (capped) before draining for CRC.
+					ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
 					if _, derr := io.Copy(io.Discard, rc); derr != nil {
 						return derr
 					}
@@ -1274,6 +1284,9 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 				for _, c := range creds {
 					ec.emit(c)
 				}
+			default:
+				// Non-credential member: scan for secrets (no-op without a sink).
+				ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
 			}
 			cr.add(h.PackedSize)
 		}
@@ -1398,6 +1411,16 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 		}
 		isArch := isArchiveFile(f.Name)
 		if !isArch && !isPasswordFile(f.Name) {
+			// Non-credential member: scan for secrets (capped, best-effort) when
+			// a sink is wired, otherwise skip exactly as before. 7z members are
+			// random-access, so open/scan/close without disturbing the cred flow.
+			if ec.secrets != nil {
+				member := f
+				if rc, oerr := member.Open(); oerr == nil {
+					ec.scanSecrets(ctx, rc, ec.display+"!"+member.Name)
+					rc.Close()
+				}
+			}
 			continue
 		}
 		hadMembers = true

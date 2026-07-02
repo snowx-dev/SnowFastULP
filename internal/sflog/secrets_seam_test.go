@@ -3,13 +3,33 @@ package sflog
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
-type capSink struct{ got []string }
+// capSink is a concurrency-safe SecretSink recorder for tests: extraction may
+// call ScanSecrets from multiple worker goroutines.
+type capSink struct {
+	mu  sync.Mutex
+	got []string
+}
 
 func (c *capSink) ScanSecrets(_ context.Context, content []byte, prov string) {
+	c.mu.Lock()
 	c.got = append(c.got, prov+"|"+string(content))
+	c.mu.Unlock()
+}
+
+// sawSecret reports whether any recorded call contains both fragments.
+func (c *capSink) sawSecret(nameFrag, secretFrag string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, g := range c.got {
+		if strings.Contains(g, nameFrag) && strings.Contains(g, secretFrag) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestScanSecretsNoopWhenNil(t *testing.T) {

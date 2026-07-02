@@ -3,7 +3,6 @@ package sflog
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -33,13 +32,7 @@ func TestZipRoutesNonCredMemberToSecrets(t *testing.T) {
 	if creds == 0 {
 		t.Fatal("credential member was not parsed")
 	}
-	found := false
-	for _, g := range c.got {
-		if strings.Contains(g, "env.txt") && strings.Contains(g, "AKIA") {
-			found = true
-		}
-	}
-	if !found {
+	if !c.sawSecret("env.txt", "AKIA") {
 		t.Fatalf("secret sink never saw env.txt; got %v", c.got)
 	}
 }
