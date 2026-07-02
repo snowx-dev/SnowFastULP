@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
@@ -1103,6 +1104,25 @@ func renderIngestOutputFooter(paths []string) []string {
 		out = append(out, line)
 	}
 	return out
+}
+
+// renderSecretsBlock is the standalone secrets recap appended to the summary
+// when -secrets is on: a blank spacer then a peer gradient box reporting what
+// this run found (new vs. already stored) and where the store lives. Styled like
+// the other recap boxes so it reads as a sibling of the credential summary.
+func renderSecretsBlock(stats secrets.Stats, dbPath string, width int) []string {
+	value := sflUniqueStyle.Render(formatInt(int(stats.New))) + sflMutedStyle.Render(" new") +
+		sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(stats.Existing))) +
+		sflMutedStyle.Render(" already stored")
+	if stats.DupInRun > 0 {
+		value += sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(stats.DupInRun))) +
+			sflMutedStyle.Render(" dupes")
+	}
+	body := []string{
+		recapRow("Secrets", value),
+		recapRow("Store", sflMutedStyle.Render(dbPath)),
+	}
+	return append([]string{""}, sflGradientBox(body, width, gradStart, gradEnd)...)
 }
 
 // libraryTotalBox is the standalone "<N> lines in library" box, the single

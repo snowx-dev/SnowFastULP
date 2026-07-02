@@ -441,14 +441,14 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		}
 	}
 	ec := extractCtx{
-		passwords: e.Passwords,
-		tempDir:   e.TempDir,
-		display:   it.path,
-		emit:      emit,
-		onIssue:   onIssue,
-		p:         e.Progress,
-		setStage:  func(s WorkerStage) { e.Progress.setStage(idx, s) },
-		setItem:   func(label string) { e.Progress.setWorkerPath(idx, label) },
+		passwords:    e.Passwords,
+		tempDir:      e.TempDir,
+		display:      it.path,
+		emit:         emit,
+		onIssue:      onIssue,
+		p:            e.Progress,
+		setStage:     func(s WorkerStage) { e.Progress.setStage(idx, s) },
+		setItem:      func(label string) { e.Progress.setWorkerPath(idx, label) },
 		debug:        e.Debug,
 		sem:          e.extractSem,
 		processor:    defaultProcessor,

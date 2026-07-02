@@ -18,6 +18,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/console"
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
+	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
@@ -38,6 +39,8 @@ type runConfig struct {
 	Debug         bool
 	ErrFile       bool
 	NoUpdateCheck bool
+	Secrets       bool
+	SecretsPath   string
 	UpdateChecker *selfupdate.Checker
 	Started       time.Time
 	// ForcePlainTUI is set when VT processing can't be enabled (legacy Windows
@@ -85,6 +88,8 @@ func main() {
 	noURI := flag.Bool("no-uri", false, "emit host:login:password")
 	debug := flag.Bool("debug", false, "write structured debug log")
 	errFile := flag.Bool("err", false, "write the full, untruncated issue list to a file")
+	secretsOn := flag.Bool("secrets", false, "scan non-credential files for secrets (API keys, tokens) into a sqlite store")
+	secretsPath := flag.String("secrets-path", "", "path to the secrets sqlite DB (default: <output>/sfl-secrets.sqlite)")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update check")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
@@ -127,6 +132,7 @@ func main() {
 		Input: inputArg, OutputDir: *out, LibraryDir: *outDedup, Password: *password,
 		TempDir: *tempDir, Workers: w, Compress: *zst, DeleteSources: *delSrc,
 		NoURI: *noURI, NoTUI: *noTUI, Debug: *debug, ErrFile: *errFile, NoUpdateCheck: *noUpdateCheck,
+		Secrets: *secretsOn, SecretsPath: *secretsPath,
 		Started: started, ForcePlainTUI: !vtOK,
 	}
 	cfg.UpdateChecker = selfupdate.NewChecker(version.String, os.Args[0], cfg.NoUpdateCheck)
@@ -243,7 +249,38 @@ func run(cfg runConfig) error {
 	defer removeSpill()
 
 	eng := buildEngine(cfg, passwords, prog, dbg, iss, spillDir)
+
+	// Optional secrets scanning runs as a side channel during extraction: the
+	// engine tees non-credential member bytes to the Titus-backed sink, which
+	// accumulates + dedupes into the SQLite store. Closed right after extraction
+	// (and via defer on any early return) so its stats reach the summary.
+	var secretsStats secrets.Stats
+	var closeSecrets func()
+	if cfg.Secrets {
+		sink, closeFn, serr := buildSecretSink(
+			resolveSecretsPath(cfg.SecretsPath, cfg.OutputDir, cfg.LibraryDir), cfg.Workers)
+		if serr != nil {
+			return fmt.Errorf("secrets: %w", serr)
+		}
+		eng.SecretSink = sink
+		var once sync.Once
+		closeSecrets = func() {
+			once.Do(func() {
+				st, cerr := closeFn()
+				secretsStats = st
+				dbg.Event("secrets: new=%d existing=%d dup=%d", st.New, st.Existing, st.DupInRun)
+				if cerr != nil {
+					dbg.Event("secrets: close error: %v", cerr)
+				}
+			})
+		}
+		defer closeSecrets()
+	}
+
 	stats, results, extractErr := eng.Run(ctx, cfg.Input, snk.w)
+	if closeSecrets != nil {
+		closeSecrets() // flush + capture stats before the summary (idempotent)
+	}
 	dbg.Completion(stats)
 	dbg.Issues(stats)
 	if extractErr != nil {
@@ -346,10 +383,33 @@ func run(cfg runConfig) error {
 	default:
 		summary = renderFinalSummaryWithNotice(outPath, stats, updateNotice)
 	}
+	if cfg.Secrets {
+		// Slot the secrets recap box just above the frost footer so it reads as
+		// a peer of the credential summary. The footer is the deterministic
+		// trailing block every renderer ends with, so splice ahead of it rather
+		// than depending on any single renderer's internal layout.
+		block := renderSecretsBlock(secretsStats,
+			resolveSecretsPath(cfg.SecretsPath, cfg.OutputDir, cfg.LibraryDir), termWidth())
+		summary = spliceBeforeFooter(summary, block, summaryFooterLines(termWidth(), updateNotice))
+	}
 	for _, ln := range summary {
 		fmt.Fprintln(os.Stderr, ln)
 	}
 	return nil
+}
+
+// spliceBeforeFooter inserts block into summary immediately before its trailing
+// footer lines. footer is the exact block each renderer appends last, so its
+// length locates the seam without coupling to a renderer's internal structure.
+func spliceBeforeFooter(summary, block, footer []string) []string {
+	cut := len(summary) - len(footer)
+	if cut < 0 {
+		return append(summary, block...)
+	}
+	out := make([]string, 0, len(summary)+len(block))
+	out = append(out, summary[:cut]...)
+	out = append(out, block...)
+	return append(out, summary[cut:]...)
 }
 
 // sink abstracts the credential destination so run() handles classic and -od

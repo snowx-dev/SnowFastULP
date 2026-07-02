@@ -33,7 +33,7 @@ func (c *capSink) sawSecret(nameFrag, secretFrag string) bool {
 }
 
 func TestScanSecretsNoopWhenNil(t *testing.T) {
-	ec := extractCtx{} // no sink
+	ec := extractCtx{}                                                   // no sink
 	ec.scanSecrets(context.Background(), strings.NewReader("data"), "p") // must not panic
 }
 
