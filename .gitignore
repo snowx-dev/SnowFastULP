@@ -13,6 +13,10 @@
 /demo/
 .DS_Store
 
+# local working notes — not part of the published tree
+/docs/
+/plans/
+
 # default output and shard temp files when running from repo root
 /deduplicated.txt
 /sfu_*.txt
