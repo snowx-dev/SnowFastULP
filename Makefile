@@ -20,7 +20,7 @@ RELEASE_ZIP     ?= SnowFastULP-$(VERSION)-binaries.zip
 DOCKER_IMAGE  ?= sfu:local
 GO_DOCKER_IMAGE ?= golang:1.25-alpine
 
-.PHONY: build build-sfu build-sfs build-sfl build-all release release-assets release-zip test vet clean checksums demo-record \
+.PHONY: build build-sfu build-sfs build-sfl build-all release release-assets release-zip test vet clean checksums \
 	docker-build docker-build-all sync-release-bins docker-run docker-run-sfs docker-run-sfl help
 
 # Default target: print available targets when invoked as bare `make`.
@@ -136,8 +136,6 @@ release-zip:
 
 test:
 	go test -race ./...
-
-demo-record:
 
 vet:
 	go vet ./...
