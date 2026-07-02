@@ -460,7 +460,7 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 // reads/recurses each. It is fed either a path-opened zip (readZipCredentials)
 // or a split set's concatenated reader (readSplitArchive).
 func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weight int64) (archiveScan, error) {
-	var credFiles, nestedFiles []*zipenc.File
+	var credFiles, nestedFiles, otherFiles []*zipenc.File
 	var probe *zipenc.File
 	var uncompressed int64
 	for _, f := range files {
@@ -472,6 +472,16 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 			nestedFiles = append(nestedFiles, f)
 		case isPasswordFile(f.Name):
 			credFiles = append(credFiles, f)
+		case ec.secrets != nil:
+			// Members the credential path skips are where secrets live. Collect
+			// them for a size-capped side scan; let them drive password
+			// resolution (so a secrets-only archive still decrypts) but keep
+			// them out of the byte scale, since they're read capped, not whole.
+			otherFiles = append(otherFiles, f)
+			if f.IsEncrypted() && (probe == nil || f.UncompressedSize64 < probe.UncompressedSize64) {
+				probe = f
+			}
+			continue
 		default:
 			continue
 		}
@@ -483,7 +493,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 			probe = f
 		}
 	}
-	if len(credFiles) == 0 && len(nestedFiles) == 0 {
+	if len(credFiles) == 0 && len(nestedFiles) == 0 && len(otherFiles) == 0 {
 		return archiveScan{}, nil
 	}
 
@@ -522,6 +532,9 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		<-ec.sem
 		scan, err := readZipMembersParallel(ctx, credFiles, nestedFiles, ec, pw, cr)
 		ec.sem <- struct{}{}
+		if err == nil {
+			scanOtherZipMembers(ctx, otherFiles, ec, pw)
+		}
 		return scan, err
 	}
 
@@ -562,7 +575,30 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		ns.nestedArchives++
 		scan.add(ns)
 	}
+	scanOtherZipMembers(ctx, otherFiles, ec, pw)
 	return scan, nil
+}
+
+// scanOtherZipMembers feeds the archive's non-credential, non-archive members
+// (the ones the credential path skips) to the secret sink. Best-effort: a
+// member that fails to open or decrypt is skipped, never failing the archive.
+// otherFiles is only ever populated when a sink is wired, so this is a no-op
+// otherwise.
+func scanOtherZipMembers(ctx context.Context, otherFiles []*zipenc.File, ec extractCtx, pw string) {
+	for _, f := range otherFiles {
+		if ctx.Err() != nil {
+			return
+		}
+		if f.IsEncrypted() {
+			f.SetPassword(pw)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		ec.scanSecrets(ctx, rc, ec.display+"!"+f.Name)
+		rc.Close()
+	}
 }
 
 // memberFlushChunk caps how many zip members are buffered before they are
