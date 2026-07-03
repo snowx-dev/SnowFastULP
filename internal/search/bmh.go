@@ -3,8 +3,8 @@ package search
 import "bytes"
 
 const (
-	asciiSetSize      = 256
-	suffixProbeBytes  = 16 // below this width compare the whole pattern; above, probe the suffix first
+	asciiSetSize     = 256
+	suffixProbeBytes = 16 // below this width compare the whole pattern; above, probe the suffix first
 )
 
 // patternMatcher implements Boyes-Moore-Horspool search, matching zindex.cpp.

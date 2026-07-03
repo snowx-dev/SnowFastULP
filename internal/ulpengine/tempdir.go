@@ -77,4 +77,3 @@ func SweepStaleWorkDirs(parent, excludeDirName string) int {
 	}
 	return removed
 }
-
