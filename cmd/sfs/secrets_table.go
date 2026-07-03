@@ -54,15 +54,15 @@ func stdoutWidth() int {
 }
 
 var (
-	secTypeStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
-	secSecretStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "234", Dark: "188"})
-	secSourceStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "240"})
-	secTimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "162", Dark: "213"})
-	secHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"})
-	secBorderStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "248", Dark: "238"})
-	secHighStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "203"})
-	secMedStyle     = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "130", Dark: "214"})
-	secLowStyle     = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "240"})
+	secTypeStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
+	secSecretStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "234", Dark: "188"})
+	secSourceStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "240"})
+	secTimeStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "162", Dark: "213"})
+	secHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"})
+	secBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "248", Dark: "238"})
+	secHighStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "203"})
+	secMedStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "130", Dark: "214"})
+	secLowStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "240"})
 )
 
 // Per-column caps keep one pathological cell (a 2 KiB JWT, a deep source path)

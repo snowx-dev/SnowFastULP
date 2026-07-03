@@ -721,11 +721,6 @@ func classifyRunOutcomes(runs []archiveRun, needRegen []archivePart, skippedPart
 	return
 }
 
-// one part to stream + hash + finalise. no cross-task coord
-type partTask struct {
-	part archivePart
-}
-
 // parallel per-part regen. each task streams its archive, hashes every
 // parseable credential into its own .idx, then atomically finalises.
 // no aggregation, sidecars are self-contained. corrupt parts return in
@@ -764,7 +759,7 @@ func regenParts(ctx context.Context, parts []archivePart, cfg odConfig, m *ODMet
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	taskCh := make(chan partTask)
+	taskCh := make(chan archivePart)
 	errCh := make(chan error, workers)
 
 	var skippedMu sync.Mutex
@@ -799,9 +794,9 @@ func regenParts(ctx context.Context, parts []archivePart, cfg odConfig, m *ODMet
 					}
 					if !errors.Is(err, errCorruptArchive) {
 						cfg.Debug.Event("[od] regen FATAL: part=%s, err=%v",
-							filepath.Base(t.part.path), err)
+							filepath.Base(t.path), err)
 						select {
-						case errCh <- fmt.Errorf("regen %s: %w", filepath.Base(t.part.path), err):
+						case errCh <- fmt.Errorf("regen %s: %w", filepath.Base(t.path), err):
 							cancel()
 						default:
 						}
@@ -812,13 +807,13 @@ func regenParts(ctx context.Context, parts []archivePart, cfg odConfig, m *ODMet
 					// frame. The path is collected below and surfaced cleanly after
 					// teardown via renderODSkippedPaths (plus the debug log).
 					skippedMu.Lock()
-					skippedPaths = append(skippedPaths, t.part.path)
+					skippedPaths = append(skippedPaths, t.path)
 					skippedMu.Unlock()
 					cfg.Debug.Event("[od] regen SKIP (corrupt): part=%s, err=%v",
-						filepath.Base(t.part.path), err)
+						filepath.Base(t.path), err)
 				} else {
 					cfg.Debug.Event("[od] regen done: part=%s, keys=%d, elapsed=%s",
-						filepath.Base(t.part.path), keys, time.Since(started))
+						filepath.Base(t.path), keys, time.Since(started))
 				}
 
 				if m != nil {
@@ -835,7 +830,7 @@ func regenParts(ctx context.Context, parts []archivePart, cfg odConfig, m *ODMet
 		defer close(taskCh)
 		for _, p := range parts {
 			select {
-			case taskCh <- partTask{part: p}:
+			case taskCh <- p:
 			case <-ctx.Done():
 				return
 			}
@@ -855,25 +850,25 @@ func regenParts(ctx context.Context, parts []archivePart, cfg odConfig, m *ODMet
 
 // streams one part, hashes lines into its temp .idx, atomic finalise.
 // errCorruptArchive = skip w/ warning, other errs propagate fatal
-func processPartTask(ctx context.Context, t partTask, decoderConcurrency int, ws *WorkerStatus, fmtr *lineFormatter, m *ODMetrics) (uint64, error) {
+func processPartTask(ctx context.Context, t archivePart, decoderConcurrency int, ws *WorkerStatus, fmtr *lineFormatter, m *ODMetrics) (uint64, error) {
 	// publish "working on X" BEFORE open so TUI never sees partial state.
 	// partIdx/partsTotal kept for TUI continuity, both 1 means rows show
 	// just the filename
 	if ws != nil {
-		name := filepath.Base(t.part.path)
+		name := filepath.Base(t.path)
 		ws.ArchivePath.Store(&name)
 		ws.PartIdx.Store(1)
 		ws.PartsTotal.Store(1)
 		ws.BytesDone.Store(0)
-		ws.BytesTotal.Store(t.part.size)
+		ws.BytesTotal.Store(t.size)
 	}
 
-	sw, err := newSidecarWriter(t.part.path)
+	sw, err := newSidecarWriter(t.path)
 	if err != nil {
 		return 0, err
 	}
 
-	streamErr := streamArchiveLines(ctx, t.part.path, decoderConcurrency, ws, func(line string) error {
+	streamErr := streamArchiveLines(ctx, t.path, decoderConcurrency, ws, func(line string) error {
 		// union (strict OR loose) so the index covers every line the archive
 		// stored, regardless of the mode it was written/ingested in. loose
 		// alone dropped strict-only creds (e.g. host:user:{"uid":...}) and

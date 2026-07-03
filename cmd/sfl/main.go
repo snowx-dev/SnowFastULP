@@ -630,7 +630,7 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 	// a sibling of sfl's own debug log when -debug is set. nil DebugLog is a no-op
 	// in the engine, so the unconditional pass-through is safe.
 	elog := newIngestDebugLog(cfg)
-	defer elog.Close()
+	defer func() { _ = elog.Close() }()
 
 	opts := ulpengine.IngestOptions{
 		ULPPath:    ulpPath,

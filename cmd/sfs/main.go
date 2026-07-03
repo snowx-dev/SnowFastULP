@@ -79,7 +79,8 @@ func main() {
 	debugFlag := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
 	// 1 MiB default matches the search engine default; tune only after profiling.
-	decodeStep := flag.Int("decode-step", 0, "")
+	// zst-only: -txt reads use a fixed 1 MiB step and ignore this flag.
+	decodeStep := flag.Int("decode-step", 0, "zst only: bytes per decoder read (0 = 1 MiB default; ignored in -txt mode)")
 	// per-chunk safety valve vs pathological queries (eg `:` over multi-GiB).
 	// 0 = unbounded, hit = skip rest of chunk + stderr note
 	maxHitsPerChunk := flag.Int("max-hits-per-chunk", 0, "")
@@ -295,7 +296,8 @@ func main() {
 		started:         started,
 		debug:           dbg,
 		metrics:         metrics,
-		forcePlainTUI:   !vtOK,
+		indexBytesTotal: debugInfo.indexBytesTotal,
+		uiMode:          uiMode,
 	})
 	wall := time.Since(started)
 
@@ -347,9 +349,11 @@ type runConfig struct {
 	started         time.Time
 	debug           *debugLog
 	metrics         *search.Metrics
-	// forcePlainTUI drops the live screen to silent when VT can't be enabled
-	// (legacy Windows console), so raw ANSI escapes never reach the terminal.
-	forcePlainTUI bool
+	// indexBytesTotal and uiMode are resolved by the caller (main) since it
+	// already computes them for the debug header; run() consumes them instead
+	// of re-statting every archive and re-resolving the UI mode.
+	indexBytesTotal int64
+	uiMode          uiMode
 }
 
 func run(ctx context.Context, cfg runConfig) error {
@@ -379,7 +383,7 @@ func run(ctx context.Context, cfg runConfig) error {
 		out = f
 	}
 
-	uiMode := resolveUIMode(cfg.stream || cfg.forcePlainTUI)
+	uiMode := cfg.uiMode
 
 	// Hit output sink: a file when -o / default-generated, otherwise stdout for
 	// -s streaming. The live status frame (stderr) shows a hit counter and
@@ -396,16 +400,7 @@ func run(ctx context.Context, cfg runConfig) error {
 	}
 	metrics.ArchivesTotal.Store(int64(len(cfg.archives)))
 
-	var indexBytesTotal int64
-	for _, arch := range cfg.archives {
-		if cfg.txtMode {
-			if st, err := os.Stat(arch); err == nil {
-				indexBytesTotal += st.Size()
-			}
-		} else if sz, err := index.ArchiveSize(arch); err == nil {
-			indexBytesTotal += sz
-		}
-	}
+	indexBytesTotal := cfg.indexBytesTotal
 	metrics.IndexBytesTotal.Store(indexBytesTotal)
 
 	if cfg.txtMode {

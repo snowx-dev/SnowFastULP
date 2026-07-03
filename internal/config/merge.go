@@ -146,10 +146,9 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	if !v.set("txt") && f.SFS.Txt {
 		*fl.Txt = true
 	}
-	if !v.set("s") && !v.set("silent") && f.SFS.Stream {
-		setSFSStreamFlag(fl)
-	}
-	if !v.set("s") && !v.set("silent") && f.SFS.Silent {
+	// -s and -silent both route through setSFSStreamFlag; either config key
+	// wins when neither flag was visited on the command line.
+	if !v.set("s") && !v.set("silent") && (f.SFS.Stream || f.SFS.Silent) {
 		setSFSStreamFlag(fl)
 	}
 	if !v.set("clean") && f.SFS.Clean {
@@ -206,7 +205,13 @@ type SFLFlags struct {
 	Secrets                  *bool
 }
 
-// ApplySFL applies unvisited config values to sfl flags.
+// ApplySFL applies unvisited config values to sfl flags. Unlike ApplySFU/
+// ApplySFS, every flag pointer dereference is nil-guarded (e.g. `fl.O != nil`)
+// because sfl callers may pass a partially populated SFLFlags (only the flags
+// relevant to the selected subcommand). SFU/SFS flags are always fully
+// populated by their constructors, so they omit the guards. Visited itself is
+// nil-safe: a nil map makes every v.set(...) return false, so a nil Visited
+// means "nothing was set on the command line" and every config value applies.
 func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 	if !v.set("o") && !v.set("od") && f.SFL.O != "" && fl.O != nil {
 		p, err := f.ResolvedSFLDir("o")

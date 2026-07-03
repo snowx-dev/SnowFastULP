@@ -300,19 +300,33 @@ func renderFastPathProgressBars(pct float64, width int) [2]string {
 // width-aware utilities. visible-width math skips SGR escapes so
 // lipgloss-styled strings measure correctly
 
+// skipCSI reports whether b[i:] begins with a CSI SGR escape ("\033[...m").
+// On a complete escape it returns the index just past the terminating 'm'
+// (ok=true). On a malformed escape (no terminating 'm') it returns len(b)
+// (ok=false) so callers drop the trailing bytes. If b[i:] is not a CSI escape
+// it returns i unchanged (ok=false) so the caller advances normally.
+func skipCSI(b []byte, i int) (newI int, ok bool) {
+	if i+1 >= len(b) || b[i] != '\033' || b[i+1] != '[' {
+		return i, false
+	}
+	j := i + 2
+	for j < len(b) && b[j] != 'm' {
+		j++
+	}
+	if j >= len(b) {
+		return len(b), false
+	}
+	return j + 1, true
+}
+
 func tuiVisibleWidth(s string) int {
 	b := []byte(s)
 	i := 0
 	n := 0
 	for i < len(b) {
-		if b[i] == '\033' && i+1 < len(b) && b[i+1] == '[' {
-			i += 2
-			for i < len(b) && b[i] != 'm' {
-				i++
-			}
-			if i < len(b) {
-				i++
-			}
+		if ni, ok := skipCSI(b, i); ni != i {
+			_ = ok
+			i = ni
 			continue
 		}
 		_, sz := utf8.DecodeRune(b[i:])
@@ -409,17 +423,11 @@ func trimToDisplayWidth(s string, max int) string {
 	i := 0
 	bytes := []byte(s)
 	for i < len(bytes) {
-		if bytes[i] == '\033' && i+1 < len(bytes) && bytes[i+1] == '[' {
-			j := i + 2
-			for j < len(bytes) && bytes[j] != 'm' {
-				j++
+		if ni, ok := skipCSI(bytes, i); ni != i {
+			if ok {
+				b.Write(bytes[i:ni])
 			}
-			if j < len(bytes) {
-				b.Write(bytes[i : j+1])
-				i = j + 1
-			} else {
-				i = j
-			}
+			i = ni
 			continue
 		}
 		if v >= max-1 {

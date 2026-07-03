@@ -57,7 +57,7 @@ func listFiles(root, ext string, modifiedAfter time.Time) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != root && shouldSkipDir(path, d) {
+			if path != root && shouldSkipDir(d) {
 				return filepath.SkipDir
 			}
 			return nil

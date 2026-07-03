@@ -114,7 +114,7 @@ func Ingest(ctx context.Context, opts IngestOptions, m *Metrics) (*Resolved, err
 
 	// best-effort sweep of orphan shard dirs from crashed runs (mirrors sfu)
 	if err := os.MkdirAll(r.TempDir, 0o755); err == nil {
-		SweepStaleTempDirs(r.TempDir, "")
+		SweepStaleWorkDirs(r.TempDir, "")
 	}
 
 	if err := Run(ctx, r, m); err != nil {

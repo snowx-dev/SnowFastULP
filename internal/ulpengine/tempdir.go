@@ -78,7 +78,3 @@ func SweepStaleWorkDirs(parent, excludeDirName string) int {
 	return removed
 }
 
-// SweepStaleTempDirs is a compatibility alias for SweepStaleWorkDirs.
-func SweepStaleTempDirs(parent, exclude string) int {
-	return SweepStaleWorkDirs(parent, exclude)
-}

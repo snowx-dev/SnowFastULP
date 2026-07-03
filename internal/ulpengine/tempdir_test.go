@@ -30,7 +30,7 @@ func TestSweepStaleTempDirsRemovesOldOrphansAndKeepsOthers(t *testing.T) {
 		}
 	}
 
-	if got := SweepStaleTempDirs(parent, ""); got != 2 {
+	if got := SweepStaleWorkDirs(parent, ""); got != 2 {
 		t.Fatalf("swept %d, want 2", got)
 	}
 	if _, err := os.Stat(orphan1); !os.IsNotExist(err) {
@@ -79,7 +79,7 @@ func TestSweepStaleTempDirsExcludesCurrent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := SweepStaleTempDirs(parent, current); got != 1 {
+	if got := SweepStaleWorkDirs(parent, current); got != 1 {
 		t.Fatalf("swept %d, want 1", got)
 	}
 	if _, err := os.Stat(filepath.Join(parent, current)); err != nil {

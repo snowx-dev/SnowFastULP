@@ -42,7 +42,7 @@ func defaultOutputPath(cwd string, started time.Time) (string, error) {
 	} else if available {
 		return base, nil
 	}
-	for i := 2; ; i++ {
+	for i := 2; i < 1000; i++ {
 		candidate := filepath.Join(cwd, fmt.Sprintf("sfs_results_%s_%d.txt", stamp, i))
 		if available, err := pathAvailable(candidate); err != nil {
 			return "", err
@@ -50,6 +50,7 @@ func defaultOutputPath(cwd string, started time.Time) (string, error) {
 			return candidate, nil
 		}
 	}
+	return "", fmt.Errorf("could not allocate unique default output path under %s", cwd)
 }
 
 func pathAvailable(path string) (bool, error) {

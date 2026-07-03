@@ -2,7 +2,10 @@ package search
 
 import "bytes"
 
-const asciiSetSize = 256
+const (
+	asciiSetSize      = 256
+	suffixProbeBytes  = 16 // below this width compare the whole pattern; above, probe the suffix first
+)
 
 // patternMatcher implements Boyes-Moore-Horspool search, matching zindex.cpp.
 type patternMatcher struct {
@@ -29,10 +32,6 @@ func buildBadCharTable(pattern []byte, bad []int) {
 	}
 }
 
-func bytesEqual(a, b []byte) bool {
-	return bytes.Equal(a, b)
-}
-
 // find returns the index of the first match of m.pat in hay, or -1.
 func (m *patternMatcher) find(hay []byte) int {
 	patLen := len(m.pat)
@@ -44,14 +43,14 @@ func (m *patternMatcher) find(hay []byte) int {
 	i := 0
 	for i <= hayLen-patLen {
 		match := false
-		if patLen <= 16 {
-			match = bytesEqual(hay[i:i+patLen], m.pat)
-		} else if bytesEqual(hay[i+patLen-16:i+patLen], m.pat[patLen-16:]) {
+		if patLen <= suffixProbeBytes {
+			match = bytes.Equal(hay[i:i+patLen], m.pat)
+		} else if bytes.Equal(hay[i+patLen-suffixProbeBytes:i+patLen], m.pat[patLen-suffixProbeBytes:]) {
 			j := 0
-			for j+16 < patLen && hay[i+j] == m.pat[j] {
+			for j+suffixProbeBytes < patLen && hay[i+j] == m.pat[j] {
 				j++
 			}
-			match = j+16 >= patLen
+			match = j+suffixProbeBytes >= patLen
 		}
 		if match {
 			return i

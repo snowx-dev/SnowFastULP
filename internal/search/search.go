@@ -198,6 +198,12 @@ func Run(cfg Config) error {
 
 		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxDecoderWindow))
 		if err != nil {
+			// Worker-setup failure (not tied to a chunk): surface it via the
+			// sentinel archive="" / chunkID=-1 so callers can log it instead of
+			// dying silently with zero output.
+			if cfg.OnChunkError != nil {
+				cfg.OnChunkError("", -1, fmt.Errorf("zstd reader init: %w", err))
+			}
 			return
 		}
 		defer dec.Close()

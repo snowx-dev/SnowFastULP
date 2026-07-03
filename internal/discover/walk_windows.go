@@ -10,7 +10,7 @@ import (
 
 // skip dot-prefixed + hidden/system dirs (AppData, $Recycle.Bin, etc).
 // matches default Explorer view skipping
-func shouldSkipDir(path string, d fs.DirEntry) bool {
+func shouldSkipDir(d fs.DirEntry) bool {
 	if strings.HasPrefix(d.Name(), ".") {
 		return true
 	}

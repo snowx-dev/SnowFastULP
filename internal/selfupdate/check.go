@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,26 +178,33 @@ func readFreshCache() (cacheEntry, bool) {
 func writeCheckCache(entry cacheEntry) {
 	path, err := checkCachePath()
 	if err != nil {
+		log.Printf("selfupdate: check cache path: %v", err)
 		return
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
+		log.Printf("selfupdate: encode check cache: %v", err)
 		return
 	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
+		log.Printf("selfupdate: create check cache temp: %v", err)
 		return
 	}
 	tmpPath := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
+		log.Printf("selfupdate: write check cache: %v", err)
 		return
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
+		log.Printf("selfupdate: close check cache: %v", err)
 		return
 	}
-	_ = atomicfs.Rename(tmpPath, path)
+	if err := atomicfs.Rename(tmpPath, path); err != nil {
+		log.Printf("selfupdate: rename check cache: %v", err)
+	}
 }

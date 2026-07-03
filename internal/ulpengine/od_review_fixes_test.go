@@ -22,7 +22,7 @@ func regenSidecarForPart(ctx context.Context, part archivePart, decoderConcurren
 		defer ws.ArchivePath.Store(nil)
 	}
 	fmtr := newLineFormatter()
-	return processPartTask(ctx, partTask{part: part}, decoderConcurrency, ws, fmtr, m)
+	return processPartTask(ctx, part, decoderConcurrency, ws, fmtr, m)
 }
 
 // writes lines into a fresh sfu_<stamp>.txt.zst, mirrors prod output
