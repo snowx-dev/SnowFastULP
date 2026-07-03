@@ -137,7 +137,6 @@ func main() {
 			since:       *since,
 			limit:       *limit,
 			outFile:     *outFile,
-			stream:      streamRequested(*stream, *silent),
 			clean:       *clean,
 		}); err != nil {
 			fatal("%v", err)
@@ -225,7 +224,7 @@ func main() {
 	ctx = fileabort.WithContext(ctx, files)
 	go reg.WatchInterrupt(ctx, files, signaled)
 
-	uiMode := resolveUIMode(streamMode || !vtOK, *outFile)
+	uiMode := resolveUIMode(streamMode || !vtOK)
 
 	var dbg *debugLog
 	var debugLogPath string
@@ -380,7 +379,7 @@ func run(ctx context.Context, cfg runConfig) error {
 		out = f
 	}
 
-	uiMode := resolveUIMode(cfg.stream || cfg.forcePlainTUI, cfg.outFile)
+	uiMode := resolveUIMode(cfg.stream || cfg.forcePlainTUI)
 
 	// Hit output sink: a file when -o / default-generated, otherwise stdout for
 	// -s streaming. The live status frame (stderr) shows a hit counter and

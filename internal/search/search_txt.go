@@ -42,33 +42,12 @@ func RunTxt(cfg TxtConfig) error {
 
 	tasks := make(chan task, cfg.Workers*4)
 	var wg sync.WaitGroup
-	remaining := make(map[int]int64)
+	tracker := newArchiveTracker(cfg.Metrics, cfg.OnFileDone)
 	for _, path := range cfg.Files {
-		ord := cfg.ArchiveOrd[path]
-		remaining[ord] = 1
+		tracker.seed(cfg.ArchiveOrd[path], 1)
 	}
-
-	var doneMu sync.Mutex
-	markFileDone := func(ord int) {
-		doneMu.Lock()
-		remaining[ord]--
-		done := remaining[ord] == 0
-		if done && cfg.Metrics != nil {
-			cfg.Metrics.ArchivesDone.Add(1)
-		}
-		doneMu.Unlock()
-		if done && cfg.OnFileDone != nil {
-			cfg.OnFileDone(ord)
-		}
-	}
-	bumpFile := func(fileBytes int64) {
-		if cfg.Metrics != nil {
-			cfg.Metrics.ChunksDone.Add(1)
-			if fileBytes > 0 {
-				cfg.Metrics.BytesChunkDone.Add(fileBytes)
-			}
-		}
-	}
+	markFileDone := tracker.markDone
+	bumpFile := tracker.bump
 
 	worker := func() {
 		defer wg.Done()

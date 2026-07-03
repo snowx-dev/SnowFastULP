@@ -745,7 +745,7 @@ func TestRenderDedupHeaderClockAlignsWithOtherPhases(t *testing.T) {
 			got, width-leftPad, dedupLines[1])
 	}
 	// Cross-check against a non-dedup phase header rendered at the same width.
-	other := renderHeader("●", "PARSING", time.Minute, width)
+	other := renderPhaseHeader("●", "PARSING", time.Minute, width)
 	if got := tuiVisibleWidth(other); got != width-leftPad {
 		t.Errorf("renderHeader visible width = %d, want %d\n%s", got, width-leftPad, other)
 	}

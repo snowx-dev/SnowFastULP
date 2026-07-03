@@ -3,7 +3,6 @@ package search_test
 import (
 	"bytes"
 	"context"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -11,8 +10,6 @@ import (
 
 	"github.com/snowx-dev/SnowFastULP/internal/index"
 	"github.com/snowx-dev/SnowFastULP/internal/search"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 func TestSearchCancelDuringLargeChunk(t *testing.T) {
@@ -74,7 +71,7 @@ func TestRunCancelDoesNotMarkArchiveDone(t *testing.T) {
 	ord := map[string]int{}
 	for i := range archives {
 		p := filepath.Join(dir, "a"+string(rune('0'+i))+".zst")
-		writeSingleFrameZST(t, p, []byte("alpha\nbeta\n"))
+		writeBytesZST(t, p, []byte("alpha\nbeta\n"))
 		sc, err := index.Build(context.Background(), p, nil, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -105,26 +102,5 @@ func TestRunCancelDoesNotMarkArchiveDone(t *testing.T) {
 	}
 	if got := doneCount.Load(); got != 0 {
 		t.Fatalf("OnArchiveDone fired %d times on cancel; expected 0", got)
-	}
-}
-
-func writeSingleFrameZST(t *testing.T, path string, data []byte) {
-	t.Helper()
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	enc, err := zstd.NewWriter(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := enc.Write(data); err != nil {
-		t.Fatal(err)
-	}
-	if err := enc.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
 	}
 }

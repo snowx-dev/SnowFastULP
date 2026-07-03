@@ -607,14 +607,26 @@ func renderPhaseTagWithTotal(total, step int, label string) string {
 }
 
 // indented spinner + phase tag, elapsed pushed flush right
-func renderHeader(icon, phase string, elapsed time.Duration, width int) string {
-	left := indentSpace + icon + "  " + phaseStyle.Render(phase)
-	right := timeStyle.Render(formatDuration(elapsed))
+// renderHeader lays out a phase header line: left text flush-left (after the
+// shared indent), right text flush-right at width-leftPad, padded between.
+// Generic on purpose so the dedup header — which composes its own left from a
+// spinner + phase tag + badges — reuses the exact same pad math as every other
+// phase, instead of re-deriving it inline.
+func renderHeader(left, right string, width int) string {
 	pad := (width - leftPad) - tuiVisibleWidth(left) - tuiVisibleWidth(right)
 	if pad < 1 {
 		pad = 1
 	}
 	return left + strings.Repeat(" ", pad) + right
+}
+
+// renderPhaseHeader is the common phase-header shape: a spinner/icon, a styled
+// phase tag, and the elapsed clock flush-right. It builds left/right and
+// delegates the pad math to renderHeader.
+func renderPhaseHeader(icon, phase string, elapsed time.Duration, width int) string {
+	left := indentSpace + icon + "  " + phaseStyle.Render(phase)
+	right := timeStyle.Render(formatDuration(elapsed))
+	return renderHeader(left, right, width)
 }
 
 // prepends n spaces to every line. used to inset DONE box
@@ -980,6 +992,16 @@ func shardChunkProgress(m *ulpengine.Metrics, r *ulpengine.Resolved) (float64, i
 	return progress, total
 }
 
+// renderSystemRow renders the "System   RAM …  CPU …" stat row shared by the
+// shard, dedup, and phase0 panels. The shard panel appends a "buckets" suffix
+// (its denominator is the static BucketCount; dedup/phase0 carry buckets on a
+// separate progress line).
+func renderSystemRow(ramMB float64, cpuPct float64) string {
+	return labelStyle.Render("System") + "       " +
+		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
+		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
+}
+
 func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, readBPS, shardBPS, regenBPS float64, width int) []string {
 	pct := 0.0
 	if r.TotalInputs > 0 {
@@ -989,7 +1011,7 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 		}
 	}
 
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderStep1PhaseTag(r, m), elapsed, width)
+	header := renderPhaseHeader(spinnerStyle.Render(spinnerFrame(now)), renderStep1PhaseTag(r, m), elapsed, width)
 
 	chunksDigits := numDigits(m.ChunksTotal.Load())
 	chunkProgress, chunksTotal := shardChunkProgress(m, r)
@@ -1015,9 +1037,7 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 		byteStyle.Render(readBytesStr) + " / " + byteStyle.Render(totalBytesStr) + "    " +
 		"chunks " + countStyle.Render(fmt.Sprintf("%*.1f / %d", chunksDigits+2, chunkProgress, chunksTotal)) + "    " +
 		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, busyWorkers, workerTotal))
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct)) + "    " +
+	systemRow := renderSystemRow(ramMB, cpuPct) + "    " +
 		"buckets " + countStyle.Render(fmt.Sprintf("%d", r.BucketCount))
 
 	// gradientBox reserves 2 borders + 4 padding, remaining = inner
@@ -1060,15 +1080,14 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 		pct2 = 1
 	}
 
-	// inline header: phase tag + optional -od/compress badges, elapsed right
+	// header: phase tag + optional -od/compress badges on the left, elapsed
+	// clock on the right. Routed through renderHeader so the pad math is
+	// shared with every other phase header (the badges just get folded into
+	// headerLeft before the call).
 	headerLeft := indentSpace + spinnerStyle.Render(spinnerFrame(now)) + "  " + phaseStyle.Render(renderPhaseTag(r, 2, "DEDUPING"))
 	headerLeft += renderDedupHeaderBadges(r)
 	headerRight := timeStyle.Render(formatDuration(elapsed))
-	headerPad := (width - leftPad) - tuiVisibleWidth(headerLeft) - tuiVisibleWidth(headerRight)
-	if headerPad < 1 {
-		headerPad = 1
-	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + headerRight
+	header := renderHeader(headerLeft, headerRight, width)
 
 	bucketsDigits := numDigits(bt)
 	workersDigits := numDigits(int64(r.DedupWorkers))
@@ -1085,9 +1104,7 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	progressRow := labelStyle.Render("Progress") + "     " +
 		"buckets " + countStyle.Render(fmt.Sprintf("%*d / %d", bucketsDigits, bd, bt)) + "    " +
 		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.DedupWorkers))
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
+	systemRow := renderSystemRow(ramMB, cpuPct)
 
 	innerW := boxInnerWidth(width)
 	innerLines := []string{throughput}
@@ -1145,7 +1162,7 @@ func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.R
 		dup = 0
 	}
 
-	header := renderHeader(okStyle.Render("✓"), "COMPLETE", elapsed, width)
+	header := renderPhaseHeader(okStyle.Render("✓"), "COMPLETE", elapsed, width)
 
 	// "Output" reports on-disk size. -zst appends "(N.NNx compressed)"
 	// against the byte counter (uncompressed input to encoder). stat
@@ -1314,31 +1331,21 @@ func renderODSkippedPaths(r *ulpengine.Resolved, width int) []string {
 // one row per output file below DONE frame. same label width/colors as
 // inside the box. additional archives align under the first path.
 // paths NOT padOrTrim'd, can span full terminal width
-func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
-	if r == nil {
-		return nil
-	}
-	const doneOutputFooterLabel = "Output   "
+// renderDonePathFooter lays out a labelled, gradient-bordered list of paths
+// under the DONE frame: the first row carries label, subsequent rows align
+// beneath it. pathStyle colours each path cell. The caller owns the empty
+// case (Output's "(nothing new)") since that wording is footer-specific.
+func renderDonePathFooter(label string, paths []string, pathStyle lipgloss.Style) []string {
 	mid := doneStart.BlendLuv(doneEnd, 0.5)
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
-	labelCell := labelStyle.Render(doneOutputFooterLabel)
+	labelCell := labelStyle.Render(label)
 	labelW := lipgloss.Width(labelCell)
 	prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
 	blankLabel := strings.Repeat(" ", labelW)
 
-	// Post-run r.OutputPaths is authoritative (this footer only renders on
-	// success): empty means every line was rejected or already in the library
-	// and the engine discarded the generated shard. Show an explicit note rather
-	// than a path to a removed file -- and don't use outputPathsForUI here, whose
-	// live fallback to Cfg.Output would resurrect that path.
-	if len(r.OutputPaths) == 0 {
-		return []string{"", prefix + labelCell + mutedStyle.Render("(nothing new)")}
-	}
-	paths := r.OutputPaths
-
 	out := []string{""}
 	for i, p := range paths {
-		pathCell := phaseStyle.Render(p)
+		pathCell := pathStyle.Render(p)
 		var line string
 		if i == 0 {
 			line = prefix + labelCell + pathCell
@@ -1350,31 +1357,32 @@ func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
 	return out
 }
 
+func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
+	if r == nil {
+		return nil
+	}
+	const doneOutputFooterLabel = "Output   "
+	// Post-run r.OutputPaths is authoritative (this footer only renders on
+	// success): empty means every line was rejected or already in the library
+	// and the engine discarded the generated shard. Show an explicit note rather
+	// than a path to a removed file -- and don't use outputPathsForUI here, whose
+	// live fallback to Cfg.Output would resurrect that path.
+	if len(r.OutputPaths) == 0 {
+		mid := doneStart.BlendLuv(doneEnd, 0.5)
+		border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
+		labelCell := labelStyle.Render(doneOutputFooterLabel)
+		prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
+		return []string{"", prefix + labelCell + mutedStyle.Render("(nothing new)")}
+	}
+	return renderDonePathFooter(doneOutputFooterLabel, r.OutputPaths, phaseStyle)
+}
+
 // one row per -del'd input. same gutter/label column as output footer
 func renderDoneDeletedFooter(r *ulpengine.Resolved) []string {
 	if r == nil || len(r.DeletedInputPaths) == 0 {
 		return nil
 	}
-	const doneDeletedFooterLabel = "Deleted  "
-	mid := doneStart.BlendLuv(doneEnd, 0.5)
-	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
-	labelCell := labelStyle.Render(doneDeletedFooterLabel)
-	labelW := lipgloss.Width(labelCell)
-	prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
-	blankLabel := strings.Repeat(" ", labelW)
-
-	out := []string{""}
-	for i, p := range r.DeletedInputPaths {
-		pathCell := warnStyle.Render(p)
-		var line string
-		if i == 0 {
-			line = prefix + labelCell + pathCell
-		} else {
-			line = prefix + blankLabel + pathCell
-		}
-		out = append(out, line)
-	}
-	return out
+	return renderDonePathFooter("Deleted  ", r.DeletedInputPaths, warnStyle)
 }
 
 // "[!]" badge on interrupt frame header
@@ -1390,7 +1398,7 @@ var interruptWarnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Adap
 // shown after parsing finishes while library sidecar work continues.
 func renderPhase0Lines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
 	now := time.Now()
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "LIBRARY PREP"), elapsed, width)
+	header := renderPhaseHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "LIBRARY PREP"), elapsed, width)
 
 	odLines := renderODFrame(r.OdMetrics, regenBPS, width)
 	// renderODFrame leads w/ blank for spacing under main frame.
@@ -1403,9 +1411,7 @@ func renderPhase0Lines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine
 	out = append(out, odLines...)
 
 	// system row matches other phase frames so RAM/CPU stay visible
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
+	systemRow := renderSystemRow(ramMB, cpuPct)
 	out = append(out, "", indentSpace+systemRow)
 	out = append(out, renderLiveScreenFooter(width)...)
 	return out
@@ -1777,7 +1783,7 @@ func compactArchiveName(name string) string {
 // cleanupLog lines render full-width above the box (muted grey), matching sfl's
 // issue block above the summary frame.
 func renderInterruptLines(elapsed time.Duration, width int, cleanupLog []string) []string {
-	header := renderHeader(interruptWarnStyle.Render("[!]"), "INTERRUPTED — cleaning up", elapsed, width)
+	header := renderPhaseHeader(interruptWarnStyle.Render("[!]"), "INTERRUPTED — cleaning up", elapsed, width)
 
 	out := []string{"", header}
 	if block := renderCleanupLogAbove(cleanupLog, termWidthFull()); len(block) > 0 {

@@ -3,36 +3,19 @@ package search_test
 import (
 	"bytes"
 	"context"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/snowx-dev/SnowFastULP/internal/index"
 	"github.com/snowx-dev/SnowFastULP/internal/search"
-
-	"github.com/klauspost/compress/zstd"
 )
 
-// one zstd frame with N copies of line, one hit per line
+// writeRepeatedZST writes count copies of line into a single-frame zst at path,
+// delegating the frame plumbing to writeBytesZST.
 func writeRepeatedZST(t *testing.T, path string, line string, count int) {
 	t.Helper()
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	body := bytes.Repeat([]byte(line), count)
-	enc, err := zstd.NewWriter(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := enc.Write(body); err != nil {
-		t.Fatal(err)
-	}
-	if err := enc.Close(); err != nil {
-		t.Fatal(err)
-	}
+	writeBytesZST(t, path, bytes.Repeat([]byte(line), count))
 }
 
 func TestSearchMaxHitsPerChunkTruncates(t *testing.T) {

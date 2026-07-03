@@ -13,41 +13,32 @@ import (
 	"golang.org/x/text/transform"
 )
 
-// Encoding is the detected source encoding of a byte stream.
-type Encoding int
+// encoding is the detected source encoding of a byte stream. Unexported
+// because textenc's only public API is WrapReader; callers that need to
+// classify a stream themselves go through ulpengine's encoding helpers.
+type encoding int
 
 const (
-	UTF8 Encoding = iota
-	UTF16LE
-	UTF16BE
+	utf8 encoding = iota
+	utf16LE
+	utf16BE
 )
 
-func (e Encoding) String() string {
-	switch e {
-	case UTF16LE:
-		return "utf-16-le"
-	case UTF16BE:
-		return "utf-16-be"
-	default:
-		return "utf-8"
-	}
-}
-
-// Sniff classifies a stream from its first few bytes and reports how many BOM
+// sniff classifies a stream from its first few bytes and reports how many BOM
 // bytes to skip. head may be shorter than 3 bytes (short files).
-func Sniff(head []byte) (enc Encoding, bomLen int) {
+func sniff(head []byte) (enc encoding, bomLen int) {
 	if len(head) >= 2 {
 		if head[0] == 0xff && head[1] == 0xfe {
-			return UTF16LE, 2
+			return utf16LE, 2
 		}
 		if head[0] == 0xfe && head[1] == 0xff {
-			return UTF16BE, 2
+			return utf16BE, 2
 		}
 	}
 	if len(head) >= 3 && head[0] == 0xef && head[1] == 0xbb && head[2] == 0xbf {
-		return UTF8, 3
+		return utf8, 3
 	}
-	return UTF8, 0
+	return utf8, 0
 }
 
 // WrapReader returns an io.Reader that yields UTF-8 text from r regardless of
@@ -60,15 +51,15 @@ func WrapReader(r io.Reader) io.Reader {
 	// present) or leave every byte in place (no BOM), so non-BOM content is
 	// never lost.
 	br := bufio.NewReader(r)
-	head, _ := br.Peek(3) // short read is fine; Sniff tolerates < 3 bytes
-	enc, bomLen := Sniff(head)
+	head, _ := br.Peek(3) // short read is fine; sniff tolerates < 3 bytes
+	enc, bomLen := sniff(head)
 	if bomLen > 0 {
 		_, _ = br.Discard(bomLen)
 	}
 	switch enc {
-	case UTF16LE:
+	case utf16LE:
 		return transform.NewReader(br, unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder())
-	case UTF16BE:
+	case utf16BE:
 		return transform.NewReader(br, unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM).NewDecoder())
 	default:
 		return br

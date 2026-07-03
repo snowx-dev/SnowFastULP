@@ -137,8 +137,7 @@ func uiModeString(m uiMode) string {
 	}
 }
 
-func resolveUIMode(silent bool, outputFile string) uiMode {
-	_ = outputFile
+func resolveUIMode(silent bool) uiMode {
 	if silent || !stderrIsTTY() {
 		return uiSilent
 	}

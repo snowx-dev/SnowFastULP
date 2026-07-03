@@ -24,7 +24,7 @@ func TestSearchEvictsFileCacheOnArchiveTransition(t *testing.T) {
 	ord := map[string]int{}
 	for i := 0; i < N; i++ {
 		p := filepath.Join(dir, "a"+itoaPad(i)+".zst")
-		writeSingleFrameZST(t, p, []byte("alpha\nbeta\nneedle\n"))
+		writeBytesZST(t, p, []byte("alpha\nbeta\nneedle\n"))
 		sc, err := index.Build(context.Background(), p, nil, nil)
 		if err != nil {
 			t.Fatal(err)

@@ -21,7 +21,6 @@ type secretsSearchArgs struct {
 	since       string // raw -since window ("" => no lower bound)
 	limit       int    // -l cap (0 => unlimited)
 	outFile     string // -o (explicit); "" when streaming/default
-	stream      bool   // -s / -silent
 	clean       bool   // -clean
 }
 

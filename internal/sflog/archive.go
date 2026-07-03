@@ -1150,6 +1150,18 @@ func extractRarOnce(ctx context.Context, ec extractCtx, diskPath, pw string, cr 
 // goroutine: credential files parse and emit inline (cheap), nested archives
 // spill inline then offload their recursive processing to the pool (or run
 // inline if the pool is saturated), joining before a deterministic merge at EOF.
+// scanMemberIfCandidate scans a non-credential archive member for secrets when
+// a secrets sink is configured and the member is an allowlisted candidate; a
+// no-op otherwise. The guard is inverted to an early return so the hot RAR
+// member loop stays flat. provenance is the member's path under ec.display.
+func scanMemberIfCandidate(ctx context.Context, ec extractCtx, r io.Reader, name string) {
+	if ec.secrets == nil || !isSecretScanCandidate(name) {
+		return
+	}
+	ec.p.addSecretFilesTotal(1)
+	ec.scanSecrets(ctx, r, ec.display+"!"+name)
+}
+
 // The caller (extractRarOnce) wraps ec in a gatedSink, so creds emitted here are
 // withheld only until ec.confirmPassword() fires at the first proven member
 // boundary -- then they stream to the writer, never before the password proves.
@@ -1195,10 +1207,7 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 					// Scan the first member for secrets (allowlisted only, capped)
 					// before draining the rest, which forces the decoder's CRC so
 					// a wrong password fails cheaply here.
-					if ec.secrets != nil && isSecretScanCandidate(h.Name) {
-						ec.p.addSecretFilesTotal(1)
-						ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
-					}
+					scanMemberIfCandidate(ctx, ec, rr, h.Name)
 					if _, derr := io.Copy(io.Discard, rr); derr != nil {
 						return derr
 					}
@@ -1229,10 +1238,7 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 				// Non-credential member: scan allowlisted files for secrets
 				// (no-op without a sink). The read is capped; rr.Next() skips any
 				// unread remainder.
-				if ec.secrets != nil && isSecretScanCandidate(h.Name) {
-					ec.p.addSecretFilesTotal(1)
-					ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
-				}
+				scanMemberIfCandidate(ctx, ec, rr, h.Name)
 			}
 		}
 	}
@@ -1386,10 +1392,7 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
 					// See readRarStream: scan allowlisted files (capped) before
 					// draining for CRC.
-					if ec.secrets != nil && isSecretScanCandidate(h.Name) {
-						ec.p.addSecretFilesTotal(1)
-						ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
-					}
+					scanMemberIfCandidate(ctx, ec, rc, h.Name)
 					if _, derr := io.Copy(io.Discard, rc); derr != nil {
 						return derr
 					}
@@ -1416,10 +1419,7 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 			default:
 				// Non-credential member: scan allowlisted files for secrets
 				// (no-op without a sink).
-				if ec.secrets != nil && isSecretScanCandidate(h.Name) {
-					ec.p.addSecretFilesTotal(1)
-					ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
-				}
+				scanMemberIfCandidate(ctx, ec, rc, h.Name)
 			}
 			cr.add(h.PackedSize)
 		}

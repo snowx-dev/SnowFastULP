@@ -12,7 +12,6 @@ import (
 
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
 	"github.com/snowx-dev/SnowFastULP/internal/index"
-	"github.com/snowx-dev/SnowFastULP/internal/output"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -143,37 +142,16 @@ func Run(cfg Config) error {
 	decodeStep := resolveDecodeStep(cfg.DecodeStep)
 	tasks := make(chan task, cfg.Workers*4)
 	var wg sync.WaitGroup
-	remaining := make(map[int]int64)
+	tracker := newArchiveTracker(cfg.Metrics, cfg.OnArchiveDone)
 	for _, arch := range cfg.Archives {
 		sc := cfg.Sidecars[arch]
 		if sc == nil {
 			continue
 		}
-		ord := cfg.ArchiveOrd[arch]
-		remaining[ord] = int64(len(sc.Chunks))
+		tracker.seed(cfg.ArchiveOrd[arch], int64(len(sc.Chunks)))
 	}
-
-	var archiveDoneMu sync.Mutex
-	markChunkDone := func(ord int) {
-		archiveDoneMu.Lock()
-		remaining[ord]--
-		done := remaining[ord] == 0
-		if done && cfg.Metrics != nil {
-			cfg.Metrics.ArchivesDone.Add(1)
-		}
-		archiveDoneMu.Unlock()
-		if done && cfg.OnArchiveDone != nil {
-			cfg.OnArchiveDone(ord)
-		}
-	}
-	bumpChunk := func(chunkBytes int64) {
-		if cfg.Metrics != nil {
-			cfg.Metrics.ChunksDone.Add(1)
-			if chunkBytes > 0 {
-				cfg.Metrics.BytesChunkDone.Add(chunkBytes)
-			}
-		}
-	}
+	markChunkDone := tracker.markDone
+	bumpChunk := tracker.bump
 
 	// per-worker single-slot fileCache holds <=1 open archive. dispatcher
 	// hands chunks of one archive contiguously, prev fd closes on archive
@@ -528,7 +506,7 @@ func NewWriter(w io.Writer, clean bool) *Writer {
 func (pw *Writer) WriteHit(h Hit) error {
 	line := h.Line
 	if pw.clean {
-		line = output.CleanLine(line)
+		line = cleanLine(line)
 	}
 	_, err := fmt.Fprintln(pw.w, line)
 	return err

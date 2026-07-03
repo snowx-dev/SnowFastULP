@@ -1220,7 +1220,7 @@ func recapRow(label, value string) string {
 // never wrap mid-number). Kept separate from the issue block so the ingest
 // frame can slot library-ingest rows before the issues block.
 func recapCountRows(stats sflog.ExtractStats) []string {
-	return []string{
+	rows := []string{
 		recapRow("Logs", sflOkStyle.Render(formatInt(stats.Logs))+
 			sflMutedStyle.Render("  ·  "+formatInt(stats.Credentials)+" parsed")),
 		recapRow("Unique", sflUniqueStyle.Render(formatInt(stats.Emitted))+
@@ -1228,6 +1228,13 @@ func recapCountRows(stats sflog.ExtractStats) []string {
 		recapRow("Sources", sflMutedStyle.Render(fmt.Sprintf("%s files  ·  %s archives  ·  %s skipped",
 			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)))),
 	}
+	// Secret files scanned only appears on -secrets runs; on plain extracts
+	// SecretFiles is zero and the row is omitted to keep the recap tight.
+	if stats.SecretFiles > 0 {
+		rows = append(rows, recapRow("Secret files", sflCountStyle.Render(formatInt(stats.SecretFiles))+
+			sflMutedStyle.Render("  scanned")))
+	}
+	return rows
 }
 
 // renderSflRemovedRows mirrors sfu's Removed recap: one line when it fits, else
