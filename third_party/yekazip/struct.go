@@ -151,9 +151,9 @@ func FileInfoHeader(fi os.FileInfo) (*FileHeader, error) {
 }
 
 type directoryEnd struct {
-	diskNbr            uint32 // unused
-	dirDiskNbr         uint32 // unused
-	dirRecordsThisDisk uint64 // unused
+	diskNbr            uint32 // parsed, not consulted
+	dirDiskNbr         uint32 // parsed, not consulted
+	dirRecordsThisDisk uint64 // parsed, not consulted
 	directoryRecords   uint64
 	directorySize      uint64
 	directoryOffset    uint64 // relative to file
