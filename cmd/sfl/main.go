@@ -69,7 +69,7 @@ func main() {
 	}
 	if cliargs.IsHelpRequest(os.Args[1:]) {
 		printHelp(filepath.Base(os.Args[0]), os.Stdout)
-		os.Exit(0)
+		reg.ExitWithCode(0)
 	}
 	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
 		if err != nil {
@@ -102,7 +102,7 @@ func main() {
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 	visited := config.NewVisited()
 	// Accept -j as an alias for -workers (sfs uses -j) so the same invocation
@@ -125,7 +125,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "sfl: no input path provided; set [sfl].input in your config or pass INPUT_PATH on the CLI")
 		fmt.Fprintln(os.Stderr)
 		flag.Usage()
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 	if *out != "" && *outDedup != "" {
 		usagef("-od and -o are mutually exclusive; pick one")
@@ -179,7 +179,7 @@ func resolveInputArg(fileCfg config.File, positional []string) string {
 	default:
 		fmt.Fprintf(os.Stderr, "sfl: expected exactly one input path; got %d\n\n", len(positional))
 		flag.Usage()
-		os.Exit(2)
+		reg.ExitWithCode(2)
 		return ""
 	}
 }

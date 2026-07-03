@@ -324,8 +324,7 @@ func tuiVisibleWidth(s string) int {
 	i := 0
 	n := 0
 	for i < len(b) {
-		if ni, ok := skipCSI(b, i); ni != i {
-			_ = ok
+		if ni, _ := skipCSI(b, i); ni != i {
 			i = ni
 			continue
 		}

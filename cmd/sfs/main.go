@@ -47,7 +47,7 @@ func main() {
 	}
 	if cliargs.IsHelpRequest(os.Args[1:]) {
 		printHelp(filepath.Base(os.Args[0]), os.Stdout)
-		os.Exit(0)
+		reg.ExitWithCode(0)
 	}
 
 	// `update` / `upgrade`: replace installed SnowFast binaries with the latest release.
@@ -95,7 +95,7 @@ func main() {
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 	visited := config.NewVisited()
 	// Accept -workers as an alias for -j (sfu/sfl use -workers) so the same
