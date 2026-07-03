@@ -484,10 +484,6 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 	// rate row ticks every redraw regardless of main frame state
 	var prevRegenAt time.Time
 	var prevRegenBytes int64
-	// track which odMetrics the snapshot came from. phase 0 reads
-	// r.odMetrics, phaseIndex reads r.outputIdxMetrics. reset prev*
-	// on switch so rate row starts cleanly at 0 in new phase
-	var prevRegenSrc *ulpengine.ODMetrics
 
 	draw := func() {
 		now := time.Now()
@@ -518,18 +514,9 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 		// OD-frame throughput. computed unconditionally so phase 1/2
 		// see a 0-rate snapshot of the (frozen) phase-0 counter
 		var regenBPS float64
-		// phaseIndex byte counter lives on outputIdxMetrics, phase 0
-		// on odMetrics. pick the right source so the rate row stays
-		// live across both regen phases
-		var regenMetricsForRate *ulpengine.ODMetrics
-		if phase == ulpengine.PhaseIndex && r.OutputIdxMetrics != nil {
-			regenMetricsForRate = r.OutputIdxMetrics
-		} else if r.OdMetrics != nil {
-			regenMetricsForRate = r.OdMetrics
-		}
-		if regenMetricsForRate != nil {
-			cur := regenMetricsForRate.RegenBytesRead.Load()
-			if !prevRegenAt.IsZero() && prevRegenSrc == regenMetricsForRate {
+		if r.OdMetrics != nil {
+			cur := r.OdMetrics.RegenBytesRead.Load()
+			if !prevRegenAt.IsZero() {
 				dt := now.Sub(prevRegenAt).Seconds()
 				if dt >= 0.05 {
 					regenBPS = float64(cur-prevRegenBytes) / dt
@@ -537,7 +524,6 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 			}
 			prevRegenAt = now
 			prevRegenBytes = cur
-			prevRegenSrc = regenMetricsForRate
 		}
 
 		ramMB := float64(currentRSSBytes()) / (1024 * 1024)
@@ -562,10 +548,6 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 			lines = renderShardLines(now, elapsed, m, r, ramMB, cpuPct, readBPS, shardBPS, regenBPS, w)
 		case ulpengine.PhaseDedup:
 			lines = renderDedupLines(now, elapsed, m, r, ramMB, cpuPct, writeBPS, regenBPS, w)
-		case ulpengine.PhaseIndex:
-			// post-dedup own-output indexing. dedicated frame so
-			// dedup bar cant sit at 100% while zstd decode runs
-			lines = renderIndexLines(elapsed, m, r, ramMB, cpuPct, regenBPS, w)
 		case ulpengine.PhaseDone:
 			// DONE is drawn to regular screen in main after alt-screen
 			// leave so it sticks in scrollback. drawing here would

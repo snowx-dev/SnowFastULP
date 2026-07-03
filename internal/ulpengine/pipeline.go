@@ -79,9 +79,6 @@ type Resolved struct {
 	OdMetrics *ODMetrics
 	// immutable phase 0 outcome for end-of-run recap, nil w/o -od
 	OdResult *ODResult
-	// separate odMetrics for phaseIndex (own-output .idx pass),
-	// kept distinct so phase 0 recap reflects library scan numbers
-	OutputIdxMetrics *ODMetrics
 }
 
 // fills defaults, decides fast-path eligibility. no I/O beyond stat+meminfo
@@ -344,7 +341,7 @@ func runBucketed(ctx context.Context, r *Resolved, m *Metrics) error {
 
 	// block on phase 0 before dedup (first step that needs the library sidecars).
 	// parsing done but library prep still running → switch to phasePhase0 so
-	// the TUI shows LIBRARY PREP instead of a frozen [1/3 PARSING] bar.
+	// the TUI shows LIBRARY PREP instead of a frozen [1/2 PARSING] bar.
 	if odRunning {
 		if odPhaseInFlight(r.OdMetrics) {
 			m.Phase.Store(phasePhase0)

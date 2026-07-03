@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
@@ -314,80 +313,6 @@ func visibleColumnOfBar(line string) int {
 		}
 	}
 	return -1
-}
-
-// phaseIndex rebrand: "Output index" not "Destination dedup".
-// worker rows + byte progress still render
-func TestRenderODFrameSwitchesToOutputIndexHeader(t *testing.T) {
-	m := &ulpengine.ODMetrics{}
-	m.Phase.Store(int32(ulpengine.ODPhaseIndexOwn))
-	m.ArchivesTotal.Store(1)
-	m.FilesTotal.Store(4)
-	m.ArchivesNeedRegen.Store(1)
-	m.PartsRegenTotal.Store(4)
-	m.PartsRegenDone.Store(2)
-	m.RegenBytesTotal.Store(1 << 30)
-	m.RegenBytesRead.Store(1 << 28)
-	m.Workers = make([]ulpengine.WorkerStatus, 1)
-	name := "sfu_run_part1.txt.zst"
-	m.Workers[0].ArchivePath.Store(&name)
-	m.Workers[0].PartIdx.Store(1)
-	m.Workers[0].PartsTotal.Store(1)
-	m.Workers[0].BytesDone.Store(1 << 27)
-	m.Workers[0].BytesTotal.Store(1 << 28)
-
-	out := strings.Join(renderODFrame(m, 0, 100), "\n")
-	if !strings.Contains(out, "Output index") {
-		t.Errorf("missing rebranded header for odPhaseIndexOwn\nout:\n%s", out)
-	}
-	if strings.Contains(out, "Destination dedup") {
-		t.Errorf("stale Destination dedup label leaked into output-index frame\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "indexing this run's output") {
-		t.Errorf("missing odPhaseIndexOwn phaseDesc\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "2 / 4 parts indexed") {
-		t.Errorf("parts counter missing during output indexing\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "[1]") {
-		t.Errorf("worker row missing for output indexing\nout:\n%s", out)
-	}
-}
-
-// phaseIndex must pull from outputIdxMetrics, not stale odMetrics
-func TestRenderIndexLinesUsesOutputIdxMetrics(t *testing.T) {
-	// stale phase-0 odMetrics, must not surface
-	odM := &ulpengine.ODMetrics{}
-	odM.Phase.Store(int32(ulpengine.ODPhaseDone))
-	odM.RegenBytesTotal.Store(99 * 1024 * 1024 * 1024)
-	odM.RegenBytesRead.Store(99 * 1024 * 1024 * 1024)
-
-	outM := &ulpengine.ODMetrics{}
-	outM.Phase.Store(int32(ulpengine.ODPhaseIndexOwn))
-	outM.ArchivesTotal.Store(1)
-	outM.FilesTotal.Store(4)
-	outM.PartsRegenTotal.Store(4)
-	outM.PartsRegenDone.Store(1)
-	outM.RegenBytesTotal.Store(1 << 30)
-	outM.RegenBytesRead.Store(1 << 28)
-
-	r := &ulpengine.Resolved{OdMetrics: odM, OutputIdxMetrics: outM}
-	m := &ulpengine.Metrics{}
-	out := strings.Join(renderIndexLines(time.Second, m, r, 100, 50, 0, 120), "\n")
-
-	if !strings.Contains(out, "[3/3 INDEXING OUTPUT]") {
-		t.Errorf("missing phase-tag header\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "Output index") {
-		t.Errorf("missing Output index frame label\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "1 / 4 parts indexed") {
-		t.Errorf("missing live outputIdxMetrics parts counter\nout:\n%s", out)
-	}
-	// stale 99 GB must not appear
-	if strings.Contains(out, "99.0 GB") {
-		t.Errorf("stale phase-0 odMetrics leaked into phaseIndex frame\nout:\n%s", out)
-	}
 }
 
 // regression for "[10]+ shifts the bar one column right". old fixed-4

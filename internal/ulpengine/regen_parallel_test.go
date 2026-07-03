@@ -336,54 +336,6 @@ func regenSidecarForTest(t *testing.T, partPath string) {
 	}
 }
 
-// post-dedup own-output indexing: one .idx per part, drives phaseIndex
-// counters, lands on odPhaseDone. regression for "dedup bar frozen at 100%"
-func TestRegenOwnOutputSidecarsParallel(t *testing.T) {
-	dir := t.TempDir()
-	parts := buildParts(t, dir, "sfu_20260514-000000", 4, 50)
-	outputPaths := make([]string, len(parts))
-	for i, p := range parts {
-		outputPaths[i] = p.path
-	}
-
-	m := &ODMetrics{}
-	if err := regenOwnOutputSidecars(context.Background(), outputPaths, nil, m); err != nil {
-		t.Fatalf("regenOwnOutputSidecars: %v", err)
-	}
-
-	if got := ODPhase(m.Phase.Load()); got != ODPhaseDone {
-		t.Errorf("post-call phase = %v, want odPhaseDone", got)
-	}
-	if got := m.PartsRegenTotal.Load(); got != int32(len(parts)) {
-		t.Errorf("partsRegenTotal = %d, want %d", got, len(parts))
-	}
-	if got := m.PartsRegenDone.Load(); got != int32(len(parts)) {
-		t.Errorf("partsRegenDone = %d, want %d", got, len(parts))
-	}
-	if got := m.RegenBytesRead.Load(); got != m.RegenBytesTotal.Load() {
-		t.Errorf("bytesRead=%d != bytesTotal=%d (bar would never hit 100%%)",
-			got, m.RegenBytesTotal.Load())
-	}
-	for _, p := range parts {
-		if _, err := os.Stat(p.sidecarPath); err != nil {
-			t.Errorf("missing sidecar for %s: %v", filepath.Base(p.path), err)
-		}
-	}
-}
-
-// no-op on empty input. guards vs div-by-zero in worker sizing for
-// 0-part output (fast-path on zero-line input)
-func TestRegenOwnOutputSidecarsEmpty(t *testing.T) {
-	m := &ODMetrics{}
-	if err := regenOwnOutputSidecars(context.Background(), nil, nil, m); err != nil {
-		t.Fatalf("empty call should be a no-op, got err: %v", err)
-	}
-	// phase counters untouched, nothing to surface
-	if got := ODPhase(m.Phase.Load()); got != ODPhaseIdle {
-		t.Errorf("phase = %v, want odPhaseIdle", got)
-	}
-}
-
 // race-detector probe: writers mutate slots while reader iterates
 func TestWorkerStatusConcurrentReadWrite(t *testing.T) {
 	m := &ODMetrics{}

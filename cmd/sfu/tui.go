@@ -546,15 +546,13 @@ func formatRate(bps float64) string {
 // layout helpers
 
 // labeled pipeline step count. -od = 3 (parse, dedup, output index),
-// else 2 (parse, dedup)
+// step total in the phase tag. -od and plain runs both have 2 labeled steps
+// (parse, dedup); library prep is a step-1 sub-label, not a 3rd step.
 func tuiPhaseTotal(r *ulpengine.Resolved) int {
-	if r != nil && r.Cfg.DestDedup {
-		return 3
-	}
 	return 2
 }
 
-// 1-based step label, eg "[2/3 DEDUPING]"
+// 1-based step label, eg "[2/2 DEDUPING]"
 func renderPhaseTag(r *ulpengine.Resolved, step int, label string) string {
 	return renderPhaseTagWithTotal(tuiPhaseTotal(r), step, label)
 }
@@ -1421,32 +1419,6 @@ func renderPhase0Lines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine
 	return out
 }
 
-// primary panel during phaseIndex (post-dedup own-output sidecar pass).
-// mirrors renderPhase0Lines so user sees a coherent regen frame across phases
-func renderIndexLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
-	now := time.Now()
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTagWithTotal(3, 3, "INDEXING OUTPUT"), elapsed, width)
-
-	var odMetricsForFrame *ulpengine.ODMetrics
-	if r != nil {
-		odMetricsForFrame = r.OutputIdxMetrics
-	}
-	odLines := renderODFrame(odMetricsForFrame, regenBPS, width)
-	if len(odLines) > 0 && odLines[0] == "" {
-		odLines = odLines[1:]
-	}
-
-	out := []string{"", header, ""}
-	out = append(out, odLines...)
-
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
-	out = append(out, "", indentSpace+systemRow)
-	out = append(out, renderLiveScreenFooter(width)...)
-	return out
-}
-
 // floor for per-worker rows in OD frame. dropping below 8 erodes the
 // "live activity" signal. ceiling computed adaptively via workerRowCap
 const maxWorkerRowsRendered = 8
@@ -1506,17 +1478,9 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 		phaseDesc = "indexing archives + writing .idx"
 	case ulpengine.ODPhaseUpgrade:
 		phaseDesc = "upgrading index format (v2→v3)"
-	case ulpengine.ODPhaseIndexOwn:
-		phaseDesc = "indexing this run's output"
 	}
 
-	// header label flips for post-dedup output-index pass so frame
-	// doesnt claim to be doing dest-dedup work (library long closed)
-	frameTitle := "Destination dedup"
-	if phase == ulpengine.ODPhaseIndexOwn {
-		frameTitle = "Output index"
-	}
-	headerLine := labelStyle.Render(frameTitle)
+	headerLine := labelStyle.Render("Destination dedup")
 	if phaseDesc != "" {
 		headerLine += " " + mutedStyle.Render("· "+phaseDesc)
 	}
@@ -1558,7 +1522,7 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 			innerLines = append(innerLines, labelStyle.Render("Note        ")+
 				warnStyle.Render("Legacy index format · in-place upgrade runs once, then skipped"))
 		}
-	case ulpengine.ODPhaseRegen, ulpengine.ODPhaseIndexOwn:
+	case ulpengine.ODPhaseRegen:
 		if regenBytesTotal > 0 {
 			innerLines = append(innerLines, labelStyle.Render("Bytes       ")+
 				byteStyle.Render(humanBytes(regenBytesRead))+
@@ -1600,7 +1564,7 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 	// rows would sit frozen — there we fall through to a single aggregate bar
 	// below (parts-indexed), like the old routing bar.
 	var workerBars []string
-	if (phase == ulpengine.ODPhaseRegen || phase == ulpengine.ODPhaseIndexOwn) && regenBytesTotal > 0 {
+	if phase == ulpengine.ODPhaseRegen && regenBytesTotal > 0 {
 		rowWidth := contentWidth(width)
 		cap := workerRowCap(termHeight(), m.WorkerCount())
 		active := m.ActiveWorkers(cap)
@@ -1616,7 +1580,7 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 	// falls back to parts-indexed for the upgrade/migration pass (no bytes).
 	var pct float64
 	switch phase {
-	case ulpengine.ODPhaseRegen, ulpengine.ODPhaseIndexOwn:
+	case ulpengine.ODPhaseRegen:
 		if regenBytesTotal > 0 {
 			pct = float64(regenBytesRead) / float64(regenBytesTotal)
 		} else if partsRegenTotal > 0 {

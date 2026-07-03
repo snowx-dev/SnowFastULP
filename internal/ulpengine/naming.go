@@ -24,17 +24,14 @@ func WithZstExt(p string, compress bool) string {
 	return p + ".zst"
 }
 
-// EnsureDestDedupMetrics lazily allocates the phase-0 / output-index metric
-// blocks on a resolved -od run so the TUI and pipeline share the same counters.
+// EnsureDestDedupMetrics lazily allocates the phase-0 metric block on a
+// resolved -od run so the TUI and pipeline share the same counters.
 func EnsureDestDedupMetrics(r *Resolved) {
 	if r == nil || !r.Cfg.DestDedup {
 		return
 	}
 	if r.OdMetrics == nil {
 		r.OdMetrics = &ODMetrics{}
-	}
-	if r.OutputIdxMetrics == nil {
-		r.OutputIdxMetrics = &ODMetrics{}
 	}
 }
 

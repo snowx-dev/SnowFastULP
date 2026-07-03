@@ -60,13 +60,9 @@ func TestEnsureDestDedupMetricsPrePublishesPointers(t *testing.T) {
 	if r.OdMetrics == nil {
 		t.Fatal("odMetrics was not initialized")
 	}
-	if r.OutputIdxMetrics == nil {
-		t.Fatal("outputIdxMetrics was not initialized")
-	}
 	od := r.OdMetrics
-	out := r.OutputIdxMetrics
 	ulpengine.EnsureDestDedupMetrics(r)
-	if r.OdMetrics != od || r.OutputIdxMetrics != out {
+	if r.OdMetrics != od {
 		t.Fatal("ensureDestDedupMetrics replaced already-published metric pointers")
 	}
 }

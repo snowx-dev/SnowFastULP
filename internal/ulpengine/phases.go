@@ -14,7 +14,6 @@ const (
 	PhasePhase0 = phasePhase0
 	PhaseShard  = phaseShard
 	PhaseDedup  = phaseDedup
-	PhaseIndex  = phaseIndex
 	PhaseDone   = phaseDone
 )
 
@@ -26,7 +25,6 @@ const (
 	ODPhaseDiscover = odPhaseDiscover
 	ODPhaseRegen    = odPhaseRegen
 	ODPhaseDone     = odPhaseDone
-	ODPhaseIndexOwn = odPhaseIndexOwn
 	ODPhaseUpgrade  = odPhaseUpgrade
 )
 

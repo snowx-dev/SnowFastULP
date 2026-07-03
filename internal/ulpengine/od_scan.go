@@ -36,10 +36,7 @@ const (
 	odPhaseDiscover odPhase = 1
 	odPhaseRegen    odPhase = 2 // decompress archives + write fresh .idx
 	odPhaseDone     odPhase = 3
-	// post-dedup index write for THIS run's output, shares odMetrics
-	// shape w/ regen so it reuses the same renderer (just swaps labels)
-	odPhaseIndexOwn odPhase = 4
-	odPhaseUpgrade  odPhase = 5 // in-place v2->v3 sidecar re-sort (no archive read)
+	odPhaseUpgrade  odPhase = 4 // in-place v2->v3 sidecar re-sort (no archive read)
 )
 
 func odPhaseInFlight(m *ODMetrics) bool {
@@ -898,60 +895,6 @@ func processPartTask(ctx context.Context, t partTask, decoderConcurrency int, ws
 		return 0, fmt.Errorf("sidecar write: %w", err)
 	}
 	return keys, nil
-}
-
-// stamps .idx for this run's own output by re-streaming each part.
-// reuses regenParts so theres ONE sidecar-producing code path.
-// 60s serial pass becomes ~4s on 16 cores/parts, and the user sees a real bar
-func regenOwnOutputSidecars(ctx context.Context, outputPaths []string, dbg *DebugLog, m *ODMetrics) error {
-	if len(outputPaths) == 0 {
-		return nil
-	}
-
-	parts := make([]archivePart, 0, len(outputPaths))
-	var totalBytes int64
-	for _, path := range outputPaths {
-		fi, err := os.Stat(path)
-		if err != nil {
-			return fmt.Errorf("stat output %s: %w", path, err)
-		}
-		parts = append(parts, archivePart{
-			path:        path,
-			size:        fi.Size(),
-			modTime:     fi.ModTime(),
-			sidecarPath: sidecarPathForArchive(path),
-		})
-		totalBytes += fi.Size()
-	}
-
-	if m != nil {
-		// 1 logical archive (this run), N parts. matches foreign-scan convention
-		m.ArchivesTotal.Store(1)
-		m.FilesTotal.Store(int32(len(parts)))
-		m.ArchivesNeedRegen.Store(1)
-		m.PartsRegenTotal.Store(int32(len(parts)))
-		m.RegenBytesTotal.Store(totalBytes)
-		m.Phase.Store(int32(odPhaseIndexOwn))
-		m.startedAtUnix.Store(time.Now().Unix())
-	}
-
-	started := time.Now()
-	skipped, err := regenParts(ctx, parts, odConfig{Debug: dbg}, m)
-	if err != nil {
-		return fmt.Errorf("output sidecar regen: %w", err)
-	}
-	if len(skipped) > 0 {
-		// should be impossible, we just wrote these w/ a known-good encoder
-		dbg.Event("[od] own-output regen: %d parts skipped as corrupt (unexpected)",
-			len(skipped))
-	}
-	if m != nil {
-		m.elapsedNanos.Store(time.Since(started).Nanoseconds())
-		m.Phase.Store(int32(odPhaseDone))
-	}
-	dbg.Event("[od] own-output sidecars complete: parts=%d, bytes=%d, elapsed=%s",
-		len(parts), totalBytes, time.Since(started))
-	return nil
 }
 
 // test convenience, single-part w/o the worker pool.

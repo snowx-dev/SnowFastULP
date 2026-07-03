@@ -723,7 +723,7 @@ func ingestShowMerge(m *ulpengine.Metrics) bool {
 		return false
 	}
 	switch m.Phase.Load() {
-	case ulpengine.PhaseDedup, ulpengine.PhaseIndex, ulpengine.PhaseDone:
+	case ulpengine.PhaseDedup, ulpengine.PhaseDone:
 		return true
 	}
 	if m.LinesUnique.Load()+m.LinesSkippedByDest.Load() > 0 {
@@ -737,7 +737,7 @@ func snapshotIngestWorkers(od *ulpengine.ODMetrics) []sflog.IngestWorker {
 		return nil
 	}
 	ph := ulpengine.ODPhase(od.Phase.Load())
-	if ph != ulpengine.ODPhaseRegen && ph != ulpengine.ODPhaseIndexOwn {
+	if ph != ulpengine.ODPhaseRegen {
 		return nil
 	}
 	cap := sflIngestRegenRowCap(termHeight(), od.WorkerCount())
@@ -770,19 +770,17 @@ func snapshotIngestWorkers(od *ulpengine.ODMetrics) []sflog.IngestWorker {
 // m.Phase would shoot the bar to ~70% on the fast shard, then snap it back to ~5%
 // for the slow regen. So the pre-dedup region [0.03, 0.65] is driven by the
 // dominant cold-library cost (regen) when present, else by the ULP read, both of
-// which advance monotonically. Dedup owns [0.65, 0.97], index 0.97, done 1.0.
+// which advance monotonically. Dedup owns [0.65, 1.0], done 1.0.
 // The caller's BeginIngest closure also clamps the result monotonically as a
 // belt-and-suspenders against any residual reorder.
 func ingestProgress(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64) (float64, string) {
 	switch m.Phase.Load() {
 	case ulpengine.PhaseDone:
 		return 1.0, "done"
-	case ulpengine.PhaseIndex:
-		return 0.97, "finalizing library index…"
 	case ulpengine.PhaseDedup:
 		frac := 0.70
 		if tot := m.BucketsBytesTotal.Load(); tot > 0 {
-			frac = 0.65 + 0.32*clampFrac(float64(m.BucketsBytesRead.Load())/float64(tot))
+			frac = 0.65 + 0.35*clampFrac(float64(m.BucketsBytesRead.Load())/float64(tot))
 		}
 		return frac, "merging & deduplicating against library…"
 	default:

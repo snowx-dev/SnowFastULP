@@ -106,27 +106,21 @@ func TestRenderPhaseTagCounts(t *testing.T) {
 	withOD.Cfg.DestDedup = true
 	withOD.OdMetrics = &ulpengine.ODMetrics{}
 	withOD.OdMetrics.Phase.Store(int32(ulpengine.ODPhaseRegen))
-	withOD.OutputIdxMetrics = &ulpengine.ODMetrics{}
-	withOD.OutputIdxMetrics.Phase.Store(int32(ulpengine.ODPhaseRegen))
 
 	p0 := strings.Join(renderPhase0Lines(time.Second, m, &withOD, 0, 0, 0, 86), "\n")
-	if !strings.Contains(p0, "[1/3 LIBRARY PREP]") {
-		t.Errorf("od phase0: want [1/3 LIBRARY PREP]\n%s", p0)
+	if !strings.Contains(p0, "[1/2 LIBRARY PREP]") {
+		t.Errorf("od phase0: want [1/2 LIBRARY PREP]\n%s", p0)
 	}
 	if strings.Contains(p0, "INDEXING LIBRARY") {
 		t.Errorf("od phase0 should not have separate library header\n%s", p0)
 	}
 	p1 := strings.Join(renderShardLines(now, time.Second, m, &withOD, 0, 0, 0, 0, 0, 86), "\n")
-	if !strings.Contains(p1, "[1/3 PARSING]") {
-		t.Errorf("od shard: want [1/3 PARSING]\n%s", p1)
+	if !strings.Contains(p1, "[1/2 PARSING]") {
+		t.Errorf("od shard: want [1/2 PARSING]\n%s", p1)
 	}
 	p2 := strings.Join(renderDedupLines(now, time.Second, m, &withOD, 0, 0, 0, 0, 86), "\n")
-	if !strings.Contains(p2, "[2/3 DEDUPING]") {
-		t.Errorf("od dedup: want [2/3 DEDUPING]\n%s", p2)
-	}
-	p3 := strings.Join(renderIndexLines(time.Second, m, &withOD, 0, 0, 0, 86), "\n")
-	if !strings.Contains(p3, "[3/3 INDEXING OUTPUT]") {
-		t.Errorf("od index: want [3/3 INDEXING OUTPUT]\n%s", p3)
+	if !strings.Contains(p2, "[2/2 DEDUPING]") {
+		t.Errorf("od dedup: want [2/2 DEDUPING]\n%s", p2)
 	}
 }
 
@@ -721,7 +715,7 @@ func TestRenderDedupHeaderShowsLibraryBadge(t *testing.T) {
 
 	lines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, 0, 86)
 	joined := strings.Join(lines, "\n")
-	for _, want := range []string{"[2/3 DEDUPING]", "vs 3.29B library", "compressing"} {
+	for _, want := range []string{"[2/2 DEDUPING]", "vs 3.29B library", "compressing"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in dedup header/body\n%s", want, joined)
 		}

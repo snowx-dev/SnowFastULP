@@ -44,8 +44,5 @@ const (
 	phasePhase0
 	phaseShard
 	phaseDedup
-	// -od only: post-dedup pass writes .idx sidecars for this runs own
-	// archives. used to run invisibly between dedup 100% and recap
-	phaseIndex
 	phaseDone
 )

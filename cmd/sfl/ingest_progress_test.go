@@ -88,9 +88,6 @@ func TestIngestProgressColdLibraryMonotonic(t *testing.T) {
 		{"dedup end", func(m *ulpengine.Metrics, od *ulpengine.ODMetrics) {
 			m.BucketsBytesRead.Store(2000)
 		}},
-		{"index", func(m *ulpengine.Metrics, od *ulpengine.ODMetrics) {
-			m.Phase.Store(ulpengine.PhaseIndex)
-		}},
 		{"done", func(m *ulpengine.Metrics, od *ulpengine.ODMetrics) {
 			m.Phase.Store(ulpengine.PhaseDone)
 		}},
@@ -183,11 +180,6 @@ func TestIngestProgressBounds(t *testing.T) {
 	m.Phase.Store(ulpengine.PhaseDone)
 	if f, _ := ingestProgress(m, od, 0); f != 1.0 {
 		t.Fatalf("done fraction = %.4f, want 1.0", f)
-	}
-
-	m.Phase.Store(ulpengine.PhaseIndex)
-	if f, _ := ingestProgress(m, od, 0); f <= 0.9 || f >= 1.0 {
-		t.Fatalf("index fraction = %.4f, want in (0.9,1.0)", f)
 	}
 }
 

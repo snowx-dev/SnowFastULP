@@ -65,26 +65,24 @@ func TestThroughputRowShowsLiveRate(t *testing.T) {
 // BPS legitimately samples 0 between decoder reads. row must stay,
 // frame height must stay, else the phase panel jumps vertically
 func TestThroughputRowStableWhenRateDropsToZero(t *testing.T) {
-	for _, phase := range []ulpengine.ODPhase{ulpengine.ODPhaseRegen, ulpengine.ODPhaseIndexOwn} {
-		m := &ulpengine.ODMetrics{}
-		m.Phase.Store(int32(phase))
-		m.ArchivesTotal.Store(1)
-		m.ArchivesNeedRegen.Store(1)
-		m.RegenBytesTotal.Store(34 * 1024 * 1024 * 1024)
+	m := &ulpengine.ODMetrics{}
+	m.Phase.Store(int32(ulpengine.ODPhaseRegen))
+	m.ArchivesTotal.Store(1)
+	m.ArchivesNeedRegen.Store(1)
+	m.RegenBytesTotal.Store(34 * 1024 * 1024 * 1024)
 
-		zeroRate := renderODFrame(m, 0, 100)
-		liveRate := renderODFrame(m, 320e6, 100)
-		out := strings.Join(zeroRate, "\n")
-		if !strings.Contains(out, "Throughput") {
-			t.Errorf("%v: Throughput row should stay visible at BPS=0\nout:\n%s", phase, out)
-		}
-		if strings.Contains(out, "ETA") {
-			t.Errorf("%v: ETA should be hidden at BPS=0\nout:\n%s", phase, out)
-		}
-		if len(zeroRate) != len(liveRate) {
-			t.Errorf("%v: frame height changed when rate dropped to zero: zero=%d live=%d\nzero:\n%s\nlive:\n%s",
-				phase, len(zeroRate), len(liveRate), strings.Join(zeroRate, "\n"), strings.Join(liveRate, "\n"))
-		}
+	zeroRate := renderODFrame(m, 0, 100)
+	liveRate := renderODFrame(m, 320e6, 100)
+	out := strings.Join(zeroRate, "\n")
+	if !strings.Contains(out, "Throughput") {
+		t.Errorf("Throughput row should stay visible at BPS=0\nout:\n%s", out)
+	}
+	if strings.Contains(out, "ETA") {
+		t.Errorf("ETA should be hidden at BPS=0\nout:\n%s", out)
+	}
+	if len(zeroRate) != len(liveRate) {
+		t.Errorf("frame height changed when rate dropped to zero: zero=%d live=%d\nzero:\n%s\nlive:\n%s",
+			len(zeroRate), len(liveRate), strings.Join(zeroRate, "\n"), strings.Join(liveRate, "\n"))
 	}
 }
 

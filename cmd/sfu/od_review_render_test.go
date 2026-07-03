@@ -21,8 +21,8 @@ func TestRenderPhase0LinesIsPrimary(t *testing.T) {
 
 	lines := renderPhase0Lines(time.Second, &ulpengine.Metrics{}, r, 100, 100, 0, 86)
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "[1/3 LIBRARY PREP]") {
-		t.Errorf("want [1/3 LIBRARY PREP] header, got:\n%s", joined)
+	if !strings.Contains(joined, "[1/2 LIBRARY PREP]") {
+		t.Errorf("want [1/2 LIBRARY PREP] header, got:\n%s", joined)
 	}
 	// no frozen-0% shard stat block (was the bug)
 	if strings.Contains(joined, "chunks ") || strings.Contains(joined, "shard ") {

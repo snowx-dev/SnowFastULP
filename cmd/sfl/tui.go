@@ -889,9 +889,6 @@ func renderIngestStatsRows(iv sflog.IngestView) []string {
 }
 
 func ingestShowLibraryRow(iv sflog.IngestView) bool {
-	if iv.EnginePhase == ulpengine.PhaseIndex {
-		return true
-	}
 	if iv.PartsRegenTotal > 0 || iv.RegenBytesTotal > 0 {
 		return true
 	}
