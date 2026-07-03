@@ -1064,7 +1064,7 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	headerLeft := indentSpace + spinnerStyle.Render(spinnerFrame(now)) + "  " + phaseStyle.Render(renderPhaseTag(r, 2, "DEDUPING"))
 	headerLeft += renderDedupHeaderBadges(r)
 	headerRight := timeStyle.Render(formatDuration(elapsed))
-	headerPad := width - tuiVisibleWidth(headerLeft) - tuiVisibleWidth(headerRight)
+	headerPad := (width - leftPad) - tuiVisibleWidth(headerLeft) - tuiVisibleWidth(headerRight)
 	if headerPad < 1 {
 		headerPad = 1
 	}

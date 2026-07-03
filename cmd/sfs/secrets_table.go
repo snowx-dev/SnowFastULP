@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/charmbracelet/x/term"
+	"github.com/muesli/termenv"
 )
 
 // runSecretsTable streams every matching row into memory, then renders a
@@ -18,6 +19,14 @@ import (
 // is the human view, the TSV path handles pipes/-o. Count goes to stderr so it
 // never mixes with the table on stdout.
 func runSecretsTable(dbPath string, opts secrets.QueryOpts) error {
+	// The table renders to stdout, so its color profile must follow stdout's
+	// TTY status — not stderr's, which applyStderrColorProfile may have
+	// downgraded to Ascii (a piped stderr with a TTY stdout would otherwise
+	// strip the table's color). Restore the prior profile on the way out.
+	prev := lipgloss.DefaultRenderer().ColorProfile()
+	lipgloss.DefaultRenderer().SetColorProfile(secretsProfile(stdoutIsTTY()))
+	defer lipgloss.DefaultRenderer().SetColorProfile(prev)
+
 	var matches []secrets.Match
 	n, err := secrets.QueryDB(dbPath, opts, func(m secrets.Match) error {
 		matches = append(matches, m)
@@ -134,4 +143,17 @@ func sourceTail(path string) string {
 		return path[idx+1:]
 	}
 	return path
+}
+
+// secretsProfile picks the color profile for the secrets table render. The
+// table goes to stdout, so it follows stdout's TTY status, not stderr's (the
+// rest of the TUI targets stderr and applyStderrColorProfile downgrades that).
+// A non-TTY stdout gets Ascii so ANSI escapes never leak into a pipe; a TTY
+// stdout gets its actually-detected profile, undoing any stderr-driven
+// downgrade for the duration of the render.
+func secretsProfile(stdoutTTY bool) termenv.Profile {
+	if !stdoutTTY {
+		return termenv.Ascii
+	}
+	return termenv.NewOutput(os.Stdout).Profile
 }

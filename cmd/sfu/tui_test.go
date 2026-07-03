@@ -722,6 +722,35 @@ func TestRenderDedupHeaderShowsLibraryBadge(t *testing.T) {
 	}
 }
 
+// TestRenderDedupHeaderClockAlignsWithOtherPhases guards the pad fix: the
+// dedup header line must end at the same column as renderHeader's clock
+// (width-leftPad), not at the terminal edge (width). Entering DEDUPING used
+// to jump the clock 4 columns right because the inline pad ignored leftPad.
+func TestRenderDedupHeaderClockAlignsWithOtherPhases(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{
+		Cfg:          ulpengine.Config{Output: "out.txt.zst", Compress: true, DestDedup: true},
+		Workers:      8,
+		DedupWorkers: 4,
+		BucketCount:  256,
+	}
+	r.OdMetrics = &ulpengine.ODMetrics{}
+	r.OdMetrics.KeysTotalEstimate.Store(3_290_076_168)
+
+	const width = 86
+	dedupLines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, 0, width)
+	// renderDedupLines emits {"", header, ...}; the header is lines[1].
+	if got := tuiVisibleWidth(dedupLines[1]); got != width-leftPad {
+		t.Errorf("dedup header visible width = %d, want %d (clock must align with renderHeader)\n%s",
+			got, width-leftPad, dedupLines[1])
+	}
+	// Cross-check against a non-dedup phase header rendered at the same width.
+	other := renderHeader("●", "PARSING", time.Minute, width)
+	if got := tuiVisibleWidth(other); got != width-leftPad {
+		t.Errorf("renderHeader visible width = %d, want %d\n%s", got, width-leftPad, other)
+	}
+}
+
 // DONE block reports on-disk size + (Nx compressed) when -zst is set
 func TestRenderDoneShowsCompressionRatio(t *testing.T) {
 	d := t.TempDir()

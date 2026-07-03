@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/secrets"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func TestRenderSecretsTable(t *testing.T) {
@@ -57,5 +60,44 @@ func TestSourceTail(t *testing.T) {
 		if got := sourceTail(in); got != want {
 			t.Errorf("sourceTail(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSecretsProfile(t *testing.T) {
+	if got := secretsProfile(false); got != termenv.Ascii {
+		t.Errorf("secretsProfile(false) = %v, want Ascii", got)
+	}
+	// A TTY stdout must not be forced to Ascii — that's the bug this guards
+	// (applyStderrColorProfile downgrades globally on a piped stderr). Skip
+	// when stdout isn't a real TTY so the assertion stays honest in CI.
+	if stdoutIsTTY() {
+		if got := secretsProfile(true); got == termenv.Ascii {
+			t.Errorf("secretsProfile(true) = Ascii on a TTY stdout; want a color profile")
+		}
+	}
+}
+
+// TestRenderSecretsTableRespectsColorProfile is a render-level regression for
+// the profile save/restore: under Ascii the table emits no ANSI escapes, under
+// a color profile it does. Deterministic regardless of the test runner's TTY
+// status because the profile is set explicitly.
+func TestRenderSecretsTableRespectsColorProfile(t *testing.T) {
+	matches := []secrets.Match{
+		{RuleName: "JSON Web Token", Secret: "x.y.z", Severity: "high",
+			SourcePath: "/a/b.zip!inner.txt", LastSeen: time.Date(2026, 7, 3, 4, 29, 0, 0, time.UTC)},
+	}
+
+	r := lipgloss.DefaultRenderer()
+	prev := r.ColorProfile()
+	defer r.SetColorProfile(prev)
+
+	r.SetColorProfile(termenv.Ascii)
+	if got := renderSecretsTable(matches, 120); strings.Contains(got, "\x1b[") {
+		t.Errorf("Ascii profile leaked ANSI escapes:\n%s", got)
+	}
+
+	r.SetColorProfile(termenv.TrueColor)
+	if got := renderSecretsTable(matches, 120); !strings.Contains(got, "\x1b[") {
+		t.Errorf("TrueColor profile produced no ANSI escapes:\n%s", got)
 	}
 }
