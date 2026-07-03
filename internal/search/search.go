@@ -354,12 +354,15 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 	var asm lineAssembler
 
 	// flush this step's accumulated hits, truncating to the per-chunk cap.
+	// capped is set only on real truncation (emitted+len(hits) > maxHits), so a
+	// chunk whose hits exactly fill the cap is not flagged as truncated.
 	flush := func() error {
 		if len(hits) == 0 {
 			return nil
 		}
 		if maxHits > 0 && emitted+len(hits) > maxHits {
 			hits = hits[:maxHits-emitted]
+			capped = true
 		}
 		if len(hits) > 0 {
 			if err := emit(hits); err != nil {
@@ -393,9 +396,9 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 			if ferr := flush(); ferr != nil {
 				return emitted, capped, ferr
 			}
-			// cap reached, stop decoding. one cap notification per chunk
+			// cap reached, stop decoding. capped (if set) was flagged inside
+			// flush on actual truncation, not merely on hitting the boundary.
 			if maxHits > 0 && emitted >= maxHits {
-				capped = true
 				return emitted, capped, nil
 			}
 		}

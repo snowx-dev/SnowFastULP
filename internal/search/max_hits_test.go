@@ -179,9 +179,9 @@ func TestSearchMaxHitsExactBoundary(t *testing.T) {
 	if got != 50 {
 		t.Fatalf("hits = %d, want 50", got)
 	}
-	// current behavior: len(hits) >= cap fires even on empty rest.
-	// acceptable noise, gate on "more data remained" if it becomes annoying
-	if capEvents != 1 {
-		t.Logf("note: OnChunkCapped fired %d time(s) at exact boundary (documented behavior)", capEvents)
+	// Path B: hits == cap with no overflow is not truncation, so OnChunkCapped
+	// must not fire at the exact boundary.
+	if capEvents != 0 {
+		t.Errorf("OnChunkCapped fired %d time(s) at the exact boundary; want 0 (no truncation)", capEvents)
 	}
 }

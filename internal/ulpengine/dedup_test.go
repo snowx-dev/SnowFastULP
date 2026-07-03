@@ -611,16 +611,6 @@ func TestDedupInlineSidecarUnreparseableLines(t *testing.T) {
 		t.Fatalf("dedup unique lines = %d, want 10", n)
 	}
 
-	looseOK := 0
-	for _, line := range readZstdLines(t, out) {
-		if _, _, _, _, ok := parseLoose(line); ok {
-			looseOK++
-		}
-	}
-	if looseOK > 0 {
-		t.Logf("parseLoose accepted %d/%d output lines (regen would under-index)", looseOK, n)
-	}
-
 	hdr, err := readSidecarHeader(sidecarPathForArchive(out))
 	if err != nil {
 		t.Fatalf("sidecar: %v", err)
