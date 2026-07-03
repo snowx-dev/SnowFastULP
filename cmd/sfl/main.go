@@ -21,9 +21,16 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
+
+// reg is the shared terminal restore/exit registry: the live screen registers
+// its teardown via Set, and every exit path routes through it so the
+// alt-screen is always left cleanly. ulpengine.PrintManualCleanupHint prints
+// stranded scratch paths on a force-exit (second Ctrl-C / cleanup timeout).
+var reg = termctl.New(os.Stderr, ulpengine.PrintManualCleanupHint)
 
 type runConfig struct {
 	Input         string
@@ -191,14 +198,14 @@ func run(cfg runConfig) error {
 
 	sweepOrphanWorkDirs(cfg)
 
-	ctx, cancel, signaled := signalContext()
+	ctx, cancel, signaled := reg.SignalContext()
 	defer cancel()
 
 	// Track open file handles so a graceful Ctrl-C can unstick reads blocked on
-	// slow storage; watchInterrupt force-exits if cleanup overruns the grace.
+	// slow storage; WatchInterrupt force-exits if cleanup overruns the grace.
 	files := &fileabort.Registry{}
 	ctx = fileabort.WithContext(ctx, files)
-	go watchInterrupt(ctx, files, signaled)
+	go reg.WatchInterrupt(ctx, files, signaled)
 
 	dbg := newDebugLogger(cfg)
 	defer dbg.Close()
@@ -247,7 +254,7 @@ func run(cfg runConfig) error {
 	}
 	ulpengine.RegisterCleanupPath(spillDir)
 	// removeSpill is idempotent (os.RemoveAll no-ops on a missing path), so the
-	// graceful interrupt paths below can clean up explicitly before exitWithCode
+	// graceful interrupt paths below can clean up explicitly before reg.ExitWithCode
 	// — which os.Exits and therefore skips this defer — without any double-free.
 	removeSpill := func() { ulpengine.RemoveTreeLogged(spillDir) }
 	defer removeSpill()
@@ -308,7 +315,7 @@ func run(cfg runConfig) error {
 		stopMonitor()
 		if signaled() {
 			printInterruptSummary(cfg)
-			exitWithCode(130)
+			reg.ExitWithCode(130)
 		}
 		return extractErr
 	}
@@ -345,7 +352,7 @@ func run(cfg runConfig) error {
 				stopMonitor()
 				if signaled() {
 					printInterruptSummary(cfg)
-					exitWithCode(130)
+					reg.ExitWithCode(130)
 				}
 				return err
 			}
@@ -899,11 +906,11 @@ func makeStagingDir(primary, libDir string) (string, error) {
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfl: "+format+"\n", args...)
-	exitWithCode(1)
+	reg.ExitWithCode(1)
 }
 
 func usagef(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfl: "+format+"\n\n", args...)
 	flag.Usage()
-	exitWithCode(2)
+	reg.ExitWithCode(2)
 }

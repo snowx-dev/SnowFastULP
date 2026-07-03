@@ -137,14 +137,3 @@ func PrintManualCleanupHint(w io.Writer) {
 		fmt.Fprintln(w, "  "+p)
 	}
 }
-
-// ForceExit restores the terminal, flushes registered scratch paths, prints
-// manual hints for survivors, and exits 130. Shared by sfu/sfl force-exit paths.
-func ForceExit(restore func(), w io.Writer, reason string) {
-	if restore != nil {
-		restore()
-	}
-	PrintManualCleanupHint(w)
-	fmt.Fprintln(w, reason)
-	os.Exit(130)
-}

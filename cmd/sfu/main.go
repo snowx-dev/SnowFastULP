@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -9,17 +8,23 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/cliargs"
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/console"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
+
+// reg is the shared terminal restore/exit registry: the live frame registers
+// its teardown via Set, and every exit path (graceful ExitWithCode, force-exit
+// on a second Ctrl-C, cleanup timeout, fatal/usage) routes through it so the
+// alt-screen is always left cleanly. ulpengine.PrintManualCleanupHint prints
+// stranded scratch paths on a force-exit.
+var reg = termctl.New(os.Stderr, ulpengine.PrintManualCleanupHint)
 
 // per-run output basename, "sfu_<YYYYMMDD>_<runID>.txt". day-level
 // default output path, <stamp>.txt in CWD
@@ -61,7 +66,7 @@ func main() {
 	// monitor installs the hook.
 	defer func() {
 		if r := recover(); r != nil {
-			restoreTerminal()
+			reg.Restore()
 			panic(r)
 		}
 	}()
@@ -88,7 +93,7 @@ func main() {
 	}
 	if cliargs.IsHelpRequest(os.Args[1:]) {
 		printHelp(filepath.Base(os.Args[0]), os.Stdout)
-		os.Exit(0)
+		reg.ExitWithCode(0)
 	}
 
 	// `update` / `upgrade`: replace installed SnowFast binaries with the latest release.
@@ -133,7 +138,7 @@ func main() {
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
 		// CommandLine defaults to ExitOnError, this branch only fires
 		// if mode is ever switched. treat as usage failure
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 	visited := config.NewVisited()
 	// Accept -j as an alias for -workers (sfs uses -j) so the same invocation
@@ -165,7 +170,7 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "sfu: no input path provided; %s\n\n", cfgHint)
 			flag.Usage()
-			os.Exit(2)
+			reg.ExitWithCode(2)
 		}
 		inputArg = cfgInput
 	case 1:
@@ -173,7 +178,7 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "sfu: expected exactly one input path; got %d\n\n", len(positional))
 		flag.Usage()
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 
 	cwd, err := os.Getwd()
@@ -321,7 +326,7 @@ func main() {
 
 	// install handlers BEFORE preflight prompt so Ctrl-C at the prompt
 	// exits 130 cleanly instead of swallowing the keystroke
-	ctx, cancel, signaled := signalContext()
+	ctx, cancel, signaled := reg.SignalContext()
 	defer cancel()
 
 	ok, err := preflightCheck(ctx, r, isStdinTTY(os.Stdin), os.Stdin, os.Stderr)
@@ -329,13 +334,13 @@ func main() {
 		// ctx.Err at the prompt = user Ctrl-C'd. exit 130 not "preflight: ..."
 		if ctx.Err() != nil {
 			fmt.Fprintln(os.Stderr, "\ninterrupted")
-			os.Exit(130)
+			reg.ExitWithCode(130)
 		}
 		fatalf("preflight: %v", err)
 	}
 	if !ok {
 		fmt.Fprintln(os.Stderr, "aborted by user")
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 
 	m := &ulpengine.Metrics{TotalInputBytes: r.TotalInputs}
@@ -375,10 +380,10 @@ func main() {
 				fmt.Fprintln(os.Stderr, "\ninterrupted")
 			}
 			ulpengine.PrintManualCleanupHint(os.Stderr)
-			os.Exit(130)
+			reg.ExitWithCode(130)
 		}
 		fmt.Fprintf(os.Stderr, "\nerror: %v\n", runErr)
-		os.Exit(1)
+		reg.ExitWithCode(1)
 	}
 
 	if *delSrc {
@@ -387,7 +392,7 @@ func main() {
 		if err != nil {
 			dbg.Event("del: FAILED after removing %d/%d input(s) err=%v", len(deleted), len(inputs), err)
 			fmt.Fprintf(os.Stderr, "sfu: delete inputs: %v\n", err)
-			os.Exit(1)
+			reg.ExitWithCode(1)
 		}
 		r.DeletedInputPaths = deleted
 		dbg.Event("del: removed %d input file(s)", len(deleted))
@@ -410,47 +415,13 @@ func main() {
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfu: "+format+"\n", args...)
-	os.Exit(1)
+	reg.ExitWithCode(1)
 }
 
 // argv-shape error, exit 2 (distinct from runtime 1)
 func usagef(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfu: "+format+"\n", args...)
-	os.Exit(2)
-}
-
-// returns ctx cancelled on SIGINT/SIGTERM and a "did signal cause this?"
-// closure. two-stage:
-//
-//	1st signal: set flag, cancel ctx (graceful drain + monitor flips
-//	            to INTERRUPTED frame)
-//	2nd signal: force-exit 130, leave alt-screen, print stranded paths
-//
-// 2nd-signal goroutine writes alt-screen-leave directly b/c monitor's
-// frame.close wont run between os.Exit and process death.
-// SIGTERM is Unix-only, Windows no-op (covered by os.Interrupt anyway)
-func signalContext() (context.Context, context.CancelFunc, func() bool) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var sigFlag atomic.Bool
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		defer signal.Stop(ch)
-		// 1st signal OR natural cancel ends graceful phase
-		select {
-		case <-ch:
-			sigFlag.Store(true)
-			cancel()
-		case <-ctx.Done():
-			return
-		}
-		// 2nd-signal wait is unconditional. selecting on (ch | ctx.Done)
-		// races b/c ctx is already cancelled, Go picks randomly and
-		// would silently swallow every other 2nd Ctrl-C
-		<-ch
-		ulpengine.ForceExit(restoreTerminal, os.Stderr, "force-exit (signal received twice).")
-	}()
-	return ctx, cancel, sigFlag.Load
+	reg.ExitWithCode(2)
 }
 
 // live status loop. samples metrics every ~300ms, computes per-tick
@@ -463,8 +434,8 @@ func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *u
 	frame := tuiFrame{tty: stderrIsCharDevice()}
 	// Route teardown through the frame's mutex-guarded close so the force-exit
 	// goroutine never races the monitor's draw on stderr.
-	setTerminalRestore(frame.close)
-	defer clearTerminalRestore()
+	reg.Set(frame.close)
+	defer reg.Clear()
 	defer frame.close()
 
 	winch := make(chan os.Signal, 1)

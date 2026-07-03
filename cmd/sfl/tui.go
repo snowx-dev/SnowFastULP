@@ -16,17 +16,13 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
 
 const (
-	ansiHideCursor = "\033[?25l"
-	ansiShowCursor = "\033[?25h"
-	altScreenEnter = "\033[?1049h"
-	altScreenLeave = "\033[?1049l"
-
 	sflDisplayWidth = 80
 	barSuffixWidth  = 8 // " 100.0%"
 	// sflLeftPad insets the box on both sides so it sits balanced in the
@@ -387,7 +383,7 @@ func (f *stderrFrame) close() {
 	if !f.tty || !f.altOn {
 		return
 	}
-	fmt.Fprint(os.Stderr, ansiResetScroll+ansiShowCursor+altScreenLeave)
+	fmt.Fprint(os.Stderr, termctl.ANSIResetScroll+termctl.ANSIShowCursor+termctl.AltScreenLeave)
 	f.altOn = false
 }
 
@@ -399,7 +395,7 @@ func (f *stderrFrame) draw(lines []string) {
 	defer f.mu.Unlock()
 	var b strings.Builder
 	if !f.altOn {
-		b.WriteString(altScreenEnter + ansiHideCursor)
+		b.WriteString(termctl.AltScreenEnter + termctl.ANSIHideCursor)
 		f.altOn = true
 	}
 	// Clamp every row to the terminal width before composing: a row wider than
@@ -425,8 +421,8 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 		defer wg.Done()
 	}
 	frame := stderrFrame{tty: stderrIsTTY()}
-	setTerminalRestore(frame.close)
-	defer clearTerminalRestore()
+	reg.Set(frame.close)
+	defer reg.Clear()
 	defer frame.close()
 
 	ticker := time.NewTicker(200 * time.Millisecond)

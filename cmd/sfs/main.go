@@ -21,9 +21,17 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/index"
 	"github.com/snowx-dev/SnowFastULP/internal/search"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
+
+// reg is the shared terminal restore/exit registry for the process: the live
+// screen registers its teardown via Set, and every exit path (graceful
+// ExitWithCode, force-exit on a second Ctrl-C, cleanup timeout) routes
+// through it so the alt-screen is always left cleanly. nil cleanupHint: sfs
+// has no manual-cleanup hint (unlike sfu/sfl).
+var reg = termctl.New(os.Stderr, nil)
 
 func main() {
 	// VT on for windows ANSI, no-op on unix. must run pre-output. vtOK is false
@@ -210,12 +218,12 @@ func main() {
 
 	updateChecker := selfupdate.NewChecker(version.String, os.Args[0], *noUpdateCheck)
 	updateChecker.Start()
-	ctx, cancel, signaled := signalContext()
+	ctx, cancel, signaled := reg.SignalContext()
 	defer cancel()
 
 	files := &fileabort.Registry{}
 	ctx = fileabort.WithContext(ctx, files)
-	go watchInterrupt(ctx, files, signaled)
+	go reg.WatchInterrupt(ctx, files, signaled)
 
 	uiMode := resolveUIMode(streamMode || !vtOK, *outFile)
 
@@ -298,7 +306,7 @@ func main() {
 		}
 		if signaled() {
 			fmt.Fprintln(os.Stderr, "\ninterrupted")
-			exitWithCode(130)
+			reg.ExitWithCode(130)
 		}
 		fatal("%v", runErr)
 	}
@@ -758,11 +766,11 @@ func indexArchives(ctx context.Context, archives []string, workers int, metrics 
 
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfs: "+format+"\n", args...)
-	exitWithCode(1)
+	reg.ExitWithCode(1)
 }
 
 // argv-shape error, exits 2 vs runtime errors (1) so scripts can branch
 func usage(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfs: "+format+"\n", args...)
-	exitWithCode(2)
+	reg.ExitWithCode(2)
 }

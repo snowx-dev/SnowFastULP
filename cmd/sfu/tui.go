@@ -13,6 +13,7 @@ import (
 	"github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/termenv"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
@@ -44,10 +45,6 @@ func contentWidth(width int) int  { return width - 2*leftPad }
 func boxInnerWidth(width int) int { return contentWidth(width) - 6 }
 
 const (
-	ansiHideCursor = "\033[?25l"
-	ansiShowCursor = "\033[?25h"
-	altScreenEnter = "\033[?1049h"
-	altScreenLeave = "\033[?1049l"
 	// kept as bare SGR-reset, trimToDisplayWidth needs to emit one
 	// before the ellipsis when truncating mid-styled string. lipgloss
 	// cant help b/c trim runs after lipgloss already rendered the line
@@ -368,7 +365,7 @@ func (f *tuiFrame) close() {
 		return
 	}
 	// reset any scroll region defensively before leaving the alt-screen.
-	fmt.Fprint(os.Stderr, "\033[r"+ansiShowCursor+altScreenLeave)
+	fmt.Fprint(os.Stderr, termctl.ANSIResetScroll+termctl.ANSIShowCursor+termctl.AltScreenLeave)
 	f.altOn = false
 }
 
@@ -394,7 +391,7 @@ func (f *tuiFrame) draw(lines []string) {
 	}
 	var b strings.Builder
 	if !f.altOn {
-		b.WriteString(altScreenEnter + ansiHideCursor)
+		b.WriteString(termctl.AltScreenEnter + termctl.ANSIHideCursor)
 		f.altOn = true
 	}
 	// Clamp to one row shy of the terminal height so the bottom line can't
