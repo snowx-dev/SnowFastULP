@@ -394,7 +394,7 @@ type odConfig struct {
 
 type ODResult struct {
 	// sorted (v3) library sidecar paths. dedup gathers each bucket's dest keys
-	// from these via sidecarBucketKeys (no per-run routing into scratch).
+	// from these via a sidecarReader (no per-run routing into scratch).
 	DestSidecarPaths []string
 	ArchivesTotal    int
 	FilesTotal       int
@@ -557,7 +557,7 @@ func runODScan(ctx context.Context, cfg odConfig, m *ODMetrics) (*ODResult, erro
 	}
 
 	// dest sidecar list = every non-skipped part's (now sorted v3) sidecar.
-	// dedup gathers each bucket's keys from these lazily via sidecarBucketKeys
+	// dedup gathers each bucket's keys from these lazily via a sidecarReader
 	// — no per-run routing into scratch buckets.
 	destSidecars := make([]string, 0, totalParts)
 	var totalKeys int64
@@ -895,18 +895,6 @@ func processPartTask(ctx context.Context, t partTask, decoderConcurrency int, ws
 		return 0, fmt.Errorf("sidecar write: %w", err)
 	}
 	return keys, nil
-}
-
-// test convenience, single-part w/o the worker pool.
-// always parseLoose b/c past archives may include loose-only shapes
-// (eg host:port:user:pw, no TLD). loose tries strict first so the cost
-// is ~zero on strict-parseable lines
-func regenSidecarForPart(ctx context.Context, part archivePart, decoderConcurrency int, ws *WorkerStatus, m *ODMetrics) (uint64, error) {
-	if ws != nil {
-		defer ws.ArchivePath.Store(nil)
-	}
-	fmtr := newLineFormatter()
-	return processPartTask(ctx, partTask{part: part}, decoderConcurrency, ws, fmtr, m)
 }
 
 // archive-side errors (truncated zstd, malformed compressed data, mid-stream

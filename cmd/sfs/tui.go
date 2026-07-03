@@ -448,32 +448,6 @@ func gradientBar(percent float64, width int) string {
 	return b.String()
 }
 
-func miniGradientBar(percent float64, width int, start, end colorful.Color) string {
-	if width < 1 {
-		return ""
-	}
-	if percent < 0 {
-		percent = 0
-	}
-	if percent > 1 {
-		percent = 1
-	}
-	fill := int(math.Round(float64(width) * percent))
-	var b strings.Builder
-	for i := 0; i < fill; i++ {
-		t := 0.0
-		if width > 1 {
-			t = float64(i) / float64(width-1)
-		}
-		c := start.BlendLuv(end, t)
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render("▆"))
-	}
-	if rem := width - fill; rem > 0 {
-		b.WriteString(emptyStyle.Render(strings.Repeat("░", rem)))
-	}
-	return b.String()
-}
-
 func gradientBox(innerLines []string, outerWidth int, start, end colorful.Color) string {
 	if outerWidth < 8 {
 		outerWidth = 8
@@ -817,21 +791,4 @@ func indexPhaseLabel(m *search.Metrics) string {
 		return "INDEXING · decode"
 	}
 	return "INDEXING"
-}
-
-func formatETAForPhase(phase int32, rates uiRates) string {
-	switch phase {
-	case search.PhaseSearch:
-		if rates.SearchETA < 0 {
-			return ""
-		}
-		return formatETA(rates.SearchETA)
-	case search.PhaseIndex:
-		if rates.IndexETA < 0 {
-			return ""
-		}
-		return formatETA(rates.IndexETA)
-	default:
-		return ""
-	}
 }

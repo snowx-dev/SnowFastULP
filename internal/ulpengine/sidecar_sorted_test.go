@@ -10,6 +10,17 @@ import (
 	"testing"
 )
 
+// sidecarBucketKeys opens, range-reads one bucket, and closes — a one-shot
+// convenience for tests. Hot paths reuse a sidecarReader across buckets.
+func sidecarBucketKeys(path string, bucketIdx, numBuckets int) ([]uint64, error) {
+	sr, err := openSidecarReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer sr.close()
+	return sr.bucketKeys(bucketIdx, numBuckets)
+}
+
 // writeV2Sidecar writes a legacy unsorted v2 .idx fixture for migration tests.
 func writeV2Sidecar(t *testing.T, archivePath string, keys []uint64) {
 	t.Helper()

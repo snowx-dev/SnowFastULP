@@ -22,7 +22,7 @@ func TestDiscoverPasswordFilesHandlesSingleAndBatchFolders(t *testing.T) {
 		}
 	}
 
-	files, err := DiscoverPasswordFiles(root)
+	files, err := discoverPasswordFiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestDiscoverPasswordFilesAcceptsLogExtension(t *testing.T) {
 	if err := os.WriteFile(p, []byte("URL: https://example.com\nUSER: u\nPASS: p\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	files, err := DiscoverPasswordFiles(root)
+	files, err := discoverPasswordFiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestDiscoverPasswordFilesAcceptsSinglePasswordFile(t *testing.T) {
 	if err := os.WriteFile(p, []byte("URL: https://example.com\nUSER: u\nPASS: p\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	files, err := DiscoverPasswordFiles(p)
+	files, err := discoverPasswordFiles(p)
 	if err != nil {
 		t.Fatal(err)
 	}

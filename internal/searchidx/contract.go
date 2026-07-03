@@ -46,11 +46,3 @@ func ResolveExistingSidecar(archivePath string) (string, bool) {
 func WriteSidecarPath(archivePath string) string {
 	return LibrarySidecarPath(archivePath)
 }
-
-// SidecarPath returns the preferred read path, falling back to write target.
-func SidecarPath(archivePath string) string {
-	if p, ok := ResolveExistingSidecar(archivePath); ok {
-		return p
-	}
-	return WriteSidecarPath(archivePath)
-}

@@ -67,8 +67,6 @@ type Metrics struct {
 	IndexArchivesActive  atomic.Int64
 	IndexFrameScanActive atomic.Int64
 	IndexDecodeActive    atomic.Int64
-	indexFocusMu         sync.Mutex
-	indexFocusName       string
 }
 
 const (

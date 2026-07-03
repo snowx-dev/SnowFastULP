@@ -228,7 +228,7 @@ func (s *outputSink) close() error {
 type dedupConfig struct {
 	bucketPaths []string
 	// sorted (v3) library sidecars for -od. each bucket's dest keys are read
-	// from these via top-bits range reads (sidecarBucketKeys). nil/empty
+	// from these via top-bits range reads (sidecarReader.bucketKeys). nil/empty
 	// disables dest dedup. numBuckets is derived from len(bucketPaths).
 	destSidecars []string
 	odMetrics    *ODMetrics // optional: ticks keysLoaded as buckets gather

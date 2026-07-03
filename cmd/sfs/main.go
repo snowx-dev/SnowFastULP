@@ -722,7 +722,7 @@ func indexArchives(ctx context.Context, archives []string, workers int, metrics 
 				metrics.IndexArchivesActive.Add(1)
 				archSize, _ := index.ArchiveSize(arch)
 				progress := index.NewArchiveByteProgress(&metrics.IndexBytesDone)
-				act := indexActivity(metrics, filepath.Base(arch))
+				act := indexActivity(metrics)
 				sc, meta, err := index.Ensure(ctx, arch, progress.Callback(), act)
 				if err != nil {
 					metrics.IndexArchivesActive.Add(-1)

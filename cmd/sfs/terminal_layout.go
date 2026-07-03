@@ -7,23 +7,23 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/zstdframe"
 )
 
-func indexActivity(metrics *search.Metrics, archiveName string) *zstdframe.Activity {
+func indexActivity(metrics *search.Metrics) *zstdframe.Activity {
 	if metrics == nil {
 		return nil
 	}
 	return &zstdframe.Activity{
 		FrameScan: func(start bool) {
 			if start {
-				metrics.BeginFrameScan(archiveName)
+				metrics.BeginFrameScan()
 			} else {
-				metrics.EndFrameScan(archiveName)
+				metrics.EndFrameScan()
 			}
 		},
 		Decode: func(start bool) {
 			if start {
-				metrics.BeginDecode(archiveName)
+				metrics.BeginDecode()
 			} else {
-				metrics.EndDecode(archiveName)
+				metrics.EndDecode()
 			}
 		},
 	}

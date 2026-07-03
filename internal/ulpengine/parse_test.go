@@ -7,6 +7,25 @@ import (
 	"github.com/cespare/xxhash/v2"
 )
 
+// formatRecord formats the final output line. noURI drops path/query, keeps
+// host:port. The dedup key is always host:login:password so flipping noURI
+// never adds visual dupes. Test-only convenience mirroring the production
+// lineFormatter.FormatRecord output shape.
+func formatRecord(host, url, login, password string, noURI bool) string {
+	urlPart := stripScheme(url)
+	if noURI {
+		urlPart = host
+	}
+	var b strings.Builder
+	b.Grow(len(urlPart) + len(login) + len(password) + 2)
+	b.WriteString(urlPart)
+	b.WriteByte(':')
+	b.WriteString(login)
+	b.WriteByte(':')
+	b.WriteString(password)
+	return b.String()
+}
+
 func TestParseValid(t *testing.T) {
 	cases := []struct {
 		in          string
@@ -142,13 +161,13 @@ func TestParseAndroidCredentials(t *testing.T) {
 
 func TestParseAndroidRejects(t *testing.T) {
 	for _, in := range []string{
-		"android://",                 // nothing after scheme
-		"android://com.x/",           // no login:password
-		"android://com.x/:user",      // no password
-		"android://:user:pw",         // empty authority
-		"android://com.x/::pw",       // empty login
-		"android://com.x/:user:",     // empty password
-		"notandroid://com.x/:u:p",    // wrong scheme
+		"android://",              // nothing after scheme
+		"android://com.x/",        // no login:password
+		"android://com.x/:user",   // no password
+		"android://:user:pw",      // empty authority
+		"android://com.x/::pw",    // empty login
+		"android://com.x/:user:",  // empty password
+		"notandroid://com.x/:u:p", // wrong scheme
 	} {
 		if _, _, _, _, ok := parse(in); ok {
 			t.Errorf("parse(%q) ok=true, want false", in)

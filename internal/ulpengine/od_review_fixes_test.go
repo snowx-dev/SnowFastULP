@@ -13,6 +13,18 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// regenSidecarForPart is a test convenience: single-part regen without the
+// worker pool. Always parseLoose because past archives may include loose-only
+// shapes (eg host:port:user:pw, no TLD); loose tries strict first so the cost
+// is ~zero on strict-parseable lines.
+func regenSidecarForPart(ctx context.Context, part archivePart, decoderConcurrency int, ws *WorkerStatus, m *ODMetrics) (uint64, error) {
+	if ws != nil {
+		defer ws.ArchivePath.Store(nil)
+	}
+	fmtr := newLineFormatter()
+	return processPartTask(ctx, partTask{part: part}, decoderConcurrency, ws, fmtr, m)
+}
+
 // writes lines into a fresh sfu_<stamp>.txt.zst, mirrors prod output
 func helperWriteArchive(t *testing.T, dir, stamp string, lines []string) string {
 	t.Helper()

@@ -26,12 +26,6 @@ import (
 // stranded scratch paths on a force-exit.
 var reg = termctl.New(os.Stderr, ulpengine.PrintManualCleanupHint)
 
-// per-run output basename, "sfu_<YYYYMMDD>_<runID>.txt". day-level
-// default output path, <stamp>.txt in CWD
-func defaultOutputName(stamp string) string {
-	return ulpengine.DefaultBasename(stamp)
-}
-
 // validates output dir flag, empty = CWD. must look like a dir, plain
 // file paths rejected. flagName used in error msg
 func resolveOutputDir(flagName, userOut string) (dir string, autoMkdir bool, err error) {

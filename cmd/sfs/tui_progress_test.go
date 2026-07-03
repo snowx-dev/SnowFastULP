@@ -45,7 +45,7 @@ func TestRenderFullIndexFrameScanLabel(t *testing.T) {
 	m.Phase.Store(search.PhaseIndex)
 	m.ArchivesTotal.Store(2)
 	m.IndexBytesTotal.Store(1 << 30)
-	m.BeginFrameScan("deduplicated-2026-05-10.txt.zst")
+	m.BeginFrameScan()
 
 	joined := strings.Join(renderFull(time.Now(), time.Now(), m, uiRates{}, ""), "\n")
 	if !strings.Contains(joined, "INDEXING · frame scan") {

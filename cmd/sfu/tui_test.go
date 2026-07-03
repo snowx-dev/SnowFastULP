@@ -545,10 +545,10 @@ func TestRenderFinalStdoutSummaryNoNoticeUsesPlainFooter(t *testing.T) {
 
 func TestDefaultOutputNameFormat(t *testing.T) {
 	stamp := ulpengine.RunStamp(time.Date(2026, 5, 9, 20, 35, 30, 0, time.UTC), "abc123")
-	got := defaultOutputName(stamp)
+	got := ulpengine.DefaultBasename(stamp)
 	want := "sfu_20260509_abc123.txt"
 	if got != want {
-		t.Errorf("defaultOutputName = %q, want %q", got, want)
+		t.Errorf("DefaultBasename = %q, want %q", got, want)
 	}
 }
 

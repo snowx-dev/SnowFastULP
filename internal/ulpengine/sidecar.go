@@ -636,17 +636,6 @@ func (sr *sidecarReader) bucketKeys(bucketIdx, numBuckets int) ([]uint64, error)
 	return out, nil
 }
 
-// sidecarBucketKeys opens, range-reads one bucket, and closes — a one-shot
-// convenience for tests. Hot paths reuse a sidecarReader across buckets.
-func sidecarBucketKeys(path string, bucketIdx, numBuckets int) ([]uint64, error) {
-	sr, err := openSidecarReader(path)
-	if err != nil {
-		return nil, err
-	}
-	defer sr.close()
-	return sr.bucketKeys(bucketIdx, numBuckets)
-}
-
 // lowerBoundKey returns the first index in [0,n) whose key >= target (or n).
 func lowerBoundKey(n int64, target uint64, keyAt func(int64) (uint64, error)) (int64, error) {
 	lo, hi := int64(0), n

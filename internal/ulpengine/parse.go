@@ -166,24 +166,6 @@ func stripScheme(u string) string {
 	return u
 }
 
-// formats final output line. noURI drops path/query, keeps host:port.
-// dedup key is always host:login:password so flipping noURI never adds
-// visual dupes
-func formatRecord(host, url, login, password string, noURI bool) string {
-	urlPart := stripScheme(url)
-	if noURI {
-		urlPart = host
-	}
-	var b strings.Builder
-	b.Grow(len(urlPart) + len(login) + len(password) + 2)
-	b.WriteString(urlPart)
-	b.WriteByte(':')
-	b.WriteString(login)
-	b.WriteByte(':')
-	b.WriteString(password)
-	return b.String()
-}
-
 // DedupKeyForLine returns the library's canonical dedup key (xxhash64 of
 // host:login:password) for an already-formatted ULP line — the same key Ingest
 // derives for that line. ok=false when the line doesn't parse (the library would
@@ -238,13 +220,6 @@ func (lf *lineFormatter) FormatRecord(host, url, login, password string, noURI b
 	lf.out.WriteString(login)
 	lf.out.WriteByte(':')
 	lf.out.WriteString(password)
-	return lf.out.Bytes()
-}
-
-// FormatRecord + '\n' for sinks that want newline-terminated input
-func (lf *lineFormatter) FormatRecordLine(host, url, login, password string, noURI bool) []byte {
-	_ = lf.FormatRecord(host, url, login, password, noURI)
-	lf.out.WriteByte('\n')
 	return lf.out.Bytes()
 }
 
@@ -303,7 +278,7 @@ func (lf *lineFormatter) reparseKey(serialized []byte) (uint64, bool) {
 }
 
 // colonAmbiguous reports whether a formatted record has more than two colons,
-// the only case where parse(formatRecord(x)) can mis-split. A clean
+// the only case where re-parsing a formatted record can mis-split. A clean
 // host:login:password (<=2 colons) always re-parses to the same key.
 func colonAmbiguous(b []byte) bool {
 	n := 0

@@ -115,7 +115,7 @@ func walkSources(root string, scanExtra bool, onFound func(path string, kind sou
 	})
 }
 
-func DiscoverPasswordFiles(root string) ([]SourceFile, error) {
+func discoverPasswordFiles(root string) ([]SourceFile, error) {
 	var files []SourceFile
 	err := walkSources(root, false, func(path string, kind sourceKind) {
 		if kind == sourcePassword {

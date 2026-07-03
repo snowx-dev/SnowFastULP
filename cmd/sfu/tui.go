@@ -617,11 +617,6 @@ func renderHeader(icon, phase string, elapsed time.Duration, width int) string {
 	return left + strings.Repeat(" ", pad) + right
 }
 
-// prepends left pad and clamps to width
-func indentLine(s string, width int) string {
-	return trimToDisplayWidth(indentSpace+s, width)
-}
-
 // prepends n spaces to every line. used to inset DONE box
 func indentBlock(s string, n int) string {
 	if n <= 0 {
@@ -1001,7 +996,7 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	busyWorkers, workerTotal := shardWorkerStatus(m, r)
 	workersDigits := numDigits(workerTotal)
 
-	// stat rows w/o per-row indentLine, gradientBox owns framing+indent
+	// stat rows w/o per-row indent, gradientBox owns framing+indent
 	throughput := labelStyle.Render("Throughput") + "   " +
 		"read " + byteStyle.Render(padRight(formatRate(readBPS), rateColWidth)) + "    " +
 		"shard " + byteStyle.Render(padRight(formatRate(shardBPS), rateColWidth))
