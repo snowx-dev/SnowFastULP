@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -62,8 +63,8 @@ func TestRunTxtPatternStraddlingReadBoundary(t *testing.T) {
 	}
 }
 
-// line spans 2 read iterations, pattern lands in iter 2. on-disk backref
-// must recover the whole line, kept under 64 KiB backref budget
+// line spans 2 read iterations, pattern lands in iter 2. lineAssembler must
+// recover the whole line across the read seam (no truncation at the boundary).
 func TestRunTxtMatchAtChunkSeam(t *testing.T) {
 	const step = 1 << 20 // mirrors search.defaultDecodeStep
 	pattern := []byte("SEAM-NEEDLE")
@@ -91,7 +92,7 @@ func TestRunTxtMatchAtChunkSeam(t *testing.T) {
 			got[:min(40, len(got))], got[max(0, len(got)-40):])
 	}
 	if strings.HasPrefix(got, "SEAM") {
-		t.Fatalf("line starts w/ pattern, backref didnt run")
+		t.Fatalf("line starts w/ pattern, no seam to assemble")
 	}
 }
 
@@ -115,7 +116,7 @@ func TestRunTxtManyFilesWorkerPool(t *testing.T) {
 	files := make([]string, 32)
 	ord := map[string]int{}
 	for i := range files {
-		p := filepath.Join(dir, "f"+itoa(i)+".txt")
+		p := filepath.Join(dir, "f"+strconv.Itoa(i)+".txt")
 		if err := os.WriteFile(p, []byte("alpha needle beta\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +198,7 @@ func TestRunTxtCancelDoesNotFireOnFileDone(t *testing.T) {
 	files := make([]string, 8)
 	ord := map[string]int{}
 	for i := range files {
-		p := filepath.Join(dir, "f"+itoa(i)+".txt")
+		p := filepath.Join(dir, "f"+strconv.Itoa(i)+".txt")
 		if err := os.WriteFile(p, []byte("data\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -247,39 +248,4 @@ func runTxtCollect(t *testing.T, path string, pattern []byte) []search.Hit {
 		hits = append(hits, h)
 	}
 	return hits
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [12]byte
-	pos := len(b)
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	for i > 0 {
-		pos--
-		b[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

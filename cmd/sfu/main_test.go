@@ -10,24 +10,35 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
-func init() {
-	// SplitPositional consults the flag set, prod registers in main()
-	// which tests never run. mirror registrations here
-	if flag.CommandLine.Lookup("o") != nil {
+// registerFlags mirrors onto fs the full set of sfu CLI flags registered in
+// main(). Tests never run main(), but SplitPositional and other helpers
+// consult the flag set, so the flags must exist on flag.CommandLine during
+// tests. Keep this list in sync with main.go's registrations.
+func registerFlags(fs *flag.FlagSet) {
+	if fs.Lookup("o") != nil {
 		return
 	}
-	flag.String("o", "", "")
-	flag.Int("workers", 0, "")
-	flag.Int("dedup", 0, "")
-	flag.Int("buckets", 0, "")
-	flag.String("temp-dir", "", "")
-	flag.Bool("no-tui", false, "")
-	flag.Bool("zst", false, "")
-	flag.Int64("split-zst", 0, "")
-	flag.Bool("del", false, "")
-	flag.Bool("no-uri", false, "")
-	flag.Bool("debug", false, "")
-	flag.Bool("debug-reject", false, "")
+	fs.String("o", "", "")
+	fs.String("od", "", "")
+	fs.Int("workers", 0, "")
+	fs.Int("j", 0, "")
+	fs.Int("dedup", 0, "")
+	fs.Int("buckets", 0, "")
+	fs.String("temp-dir", "", "")
+	fs.Bool("no-tui", false, "")
+	fs.Bool("zst", false, "")
+	fs.Int64("split-zst", 0, "")
+	fs.Bool("del", false, "")
+	fs.Bool("no-uri", false, "")
+	fs.Bool("loose", false, "")
+	fs.Bool("no-encoding-sniff", false, "")
+	fs.Bool("debug", false, "")
+	fs.Bool("debug-reject", false, "")
+	fs.Bool("no-update-check", false, "")
+}
+
+func init() {
+	registerFlags(flag.CommandLine)
 }
 
 // every documented --version invocation wins, plain inputs lose.

@@ -1,8 +1,8 @@
 package ulpengine
 
 import (
-	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,7 +70,7 @@ func TestDiscoverArchiveRuns(t *testing.T) {
 	}
 	sort.Strings(gotIDs)
 	wantIDs := []string{"sfu_a", "sfu_b", "sfu_c"}
-	if !sliceEqual(gotIDs, wantIDs) {
+	if !slices.Equal(gotIDs, wantIDs) {
 		t.Errorf("runIDs = %v, want %v", gotIDs, wantIDs)
 	}
 
@@ -164,7 +164,7 @@ func TestClassifyPartSidecar(t *testing.T) {
 func TestRunODScanEmpty(t *testing.T) {
 	dir := t.TempDir()
 	tempDir := t.TempDir()
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -196,7 +196,7 @@ func TestRunODScanUpgradesLegacySidecarOnly(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -225,7 +225,7 @@ func TestRunODScanUpgradesLegacySidecarOnly(t *testing.T) {
 	want := slices.Clone(keys)
 	slices.Sort(want)
 	want = slices.Compact(want)
-	if !sliceEqualUint64(got, want) {
+	if !slices.Equal(got, want) {
 		t.Errorf("upgraded keys = %v, want %v", got, want)
 	}
 }
@@ -253,7 +253,7 @@ func TestRunODScanUpgradesMultiPartLegacySidecars(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -296,7 +296,7 @@ func TestRunODScanWithFreshSidecar(t *testing.T) {
 	_ = os.Chtimes(archive, past, past)
 
 	tempDir := t.TempDir()
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -338,7 +338,7 @@ func TestRunODScanRegenerates(t *testing.T) {
 	writeZstdArchive(t, archive, credLines)
 
 	tempDir := t.TempDir()
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -387,7 +387,7 @@ func TestRunODScanSkipsCorruptArchive(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -440,33 +440,10 @@ func bucketContainsKey(t *testing.T, path string, want uint64) bool {
 		t.Fatalf("bucket %s size %d not multiple of %d", path, len(data), SidecarKeyBytes)
 	}
 	for i := 0; i < len(data); i += SidecarKeyBytes {
-		k := bytesLEUint64(data[i : i+SidecarKeyBytes])
+		k := binary.LittleEndian.Uint64(data[i : i+SidecarKeyBytes])
 		if k == want {
 			return true
 		}
 	}
 	return false
 }
-
-func bytesLEUint64(b []byte) uint64 {
-	if len(b) < 8 {
-		return 0
-	}
-	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
-		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
-}
-
-func sliceEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// keep bytes import warm
-var _ = bytes.Equal

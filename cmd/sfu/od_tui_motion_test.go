@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -168,11 +169,11 @@ func TestWorkerRowCapAtEight(t *testing.T) {
 
 	out := strings.Join(renderODFrame(m, 0, 200), "\n")
 	for i := 1; i <= maxWorkerRowsRendered; i++ {
-		if !strings.Contains(out, "["+strconvI(i)+"]") {
+		if !strings.Contains(out, "["+strconv.Itoa(i)+"]") {
 			t.Errorf("missing [%d] in capped render\nout:\n%s", i, out)
 		}
 	}
-	if strings.Contains(out, "["+strconvI(maxWorkerRowsRendered+1)+"]") {
+	if strings.Contains(out, "["+strconv.Itoa(maxWorkerRowsRendered+1)+"]") {
 		t.Errorf("worker [%d] should be over the cap\nout:\n%s", maxWorkerRowsRendered+1, out)
 	}
 }
@@ -226,21 +227,6 @@ func TestRecapShowsLibraryLineCount(t *testing.T) {
 	if strings.Contains(out, "across 16 files") {
 		t.Errorf("recap should not repeat live-frame archive metadata\nout:\n%s", out)
 	}
-}
-
-// inline strconv to keep test self-contained
-func strconvI(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [4]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
 
 // migration/upgrade pass has parts progress but NO byte denominator. it must

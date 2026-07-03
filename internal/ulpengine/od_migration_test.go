@@ -126,7 +126,7 @@ func TestODMigratesIdempotentSecondRun(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	res1, err := runODScanSync(context.Background(), odConfig{
+	res1, err := runODScan(context.Background(), odConfig{
 		Dest:            libDir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -143,7 +143,7 @@ func TestODMigratesIdempotentSecondRun(t *testing.T) {
 		t.Fatalf("after first scan sidecar should be v3: err=%v", err)
 	}
 
-	res2, err := runODScanSync(context.Background(), odConfig{
+	res2, err := runODScan(context.Background(), odConfig{
 		Dest:            libDir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -176,7 +176,7 @@ func TestODMigratesArchiveMtimeUnchanged(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	if _, err := runODScanSync(context.Background(), odConfig{
+	if _, err := runODScan(context.Background(), odConfig{
 		Dest:            libDir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,

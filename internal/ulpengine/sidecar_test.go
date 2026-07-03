@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"testing"
 )
@@ -78,7 +79,7 @@ func TestStreamSidecarKeyBytesBatchesReads(t *testing.T) {
 		t.Fatalf("streamSidecarKeyBytes: %v", err)
 	}
 
-	if !sliceEqualUint64(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("got keys %v, want %v", got, want)
 	}
 	wantLens := []int{24, 24, 24, 8}
@@ -331,16 +332,4 @@ func writeSidecarKeysForTest(t *testing.T, archive string, keys []uint64) uint64
 		t.Fatalf("Commit: %v", err)
 	}
 	return count
-}
-
-func sliceEqualUint64(a, b []uint64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

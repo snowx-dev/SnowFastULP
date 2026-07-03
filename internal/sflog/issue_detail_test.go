@@ -15,7 +15,7 @@ func TestIssueDetailHumanizesKnownErrors(t *testing.T) {
 		},
 		{
 			name: "7z header eof",
-			is: Issue{Kind: IssueParseError, Err: errSevenZipEOF},
+			is:   Issue{Kind: IssueParseError, Err: errSevenZipEOF},
 			want: "truncated or corrupt archive (header EOF)",
 		},
 		{

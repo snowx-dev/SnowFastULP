@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -86,9 +87,9 @@ func TestSearchEvictsFileCacheOnArchiveTransition(t *testing.T) {
 
 func itoaPad(i int) string {
 	if i < 10 {
-		return "0" + itoa(i)
+		return "0" + strconv.Itoa(i)
 	}
-	return itoa(i)
+	return strconv.Itoa(i)
 }
 
 func countProcArchiveFDs(dir string) int { return procArchiveFDCount(dir) }

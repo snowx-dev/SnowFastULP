@@ -103,8 +103,8 @@ func TestSearchExtractsCompleteLineAcrossDecodeStepSeam(t *testing.T) {
 
 // Plain-text (-txt) counterpart: a line whose match is before the 1 MiB read
 // boundary but whose newline is after it must be reported in full. Pre-fix the
-// txt path recovered a truncated prefix via on-disk backref but never the
-// suffix, so this case came back chopped.
+// txt path assembled a truncated prefix at the seam and never the suffix, so
+// this case came back chopped.
 func TestRunTxtExtractsCompleteLineSuffixAcrossReadSeam(t *testing.T) {
 	const step = 1 << 20 // mirrors search.defaultDecodeStep
 	dir := t.TempDir()

@@ -2,6 +2,8 @@ package ulpengine
 
 import (
 	"bufio"
+	"errors"
+	"io"
 	"os"
 	"testing"
 
@@ -33,7 +35,7 @@ func TestAuditOutputArchiveParseRate(t *testing.T) {
 	for {
 		line, _, _, rerr := readBoundedLine(br, maxInputLineBytes)
 		if rerr != nil {
-			if rerr.Error() == "EOF" {
+			if errors.Is(rerr, io.EOF) {
 				break
 			}
 			t.Fatal(rerr)

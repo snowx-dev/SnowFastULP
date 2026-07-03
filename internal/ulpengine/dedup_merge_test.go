@@ -1,6 +1,9 @@
 package ulpengine
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestMergeSortedUnique(t *testing.T) {
 	cases := []struct {
@@ -21,7 +24,7 @@ func TestMergeSortedUnique(t *testing.T) {
 			total += len(r)
 		}
 		got := mergeSortedUnique(c.runs, total)
-		if !sliceEqualUint64(got, c.want) {
+		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
 		for i := 1; i < len(got); i++ {

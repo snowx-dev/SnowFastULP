@@ -1,8 +1,8 @@
 package main
 
 import (
+	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 func TestTuiVisibleWidthStyled(t *testing.T) {
@@ -21,43 +21,21 @@ func TestPadOrTrimStyled(t *testing.T) {
 }
 
 func TestTrimToDisplayWidthPreservesStyle(t *testing.T) {
-	long := stringsRepeat("x", 120)
+	long := strings.Repeat("x", 120)
 	styled := hitStyle.Render(long)
 	got := trimToDisplayWidth(styled, 20)
 	if tuiVisibleWidth(got) > 20 {
 		t.Fatalf("visible width = %d, want <= 20", tuiVisibleWidth(got))
 	}
-	if !stringsContains(got, "…") {
+	if !strings.Contains(got, "…") {
 		t.Fatalf("expected ellipsis in %q", got)
 	}
-}
-
-func stringsRepeat(s string, n int) string {
-	out := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
-		out = append(out, s...)
-	}
-	return string(out)
-}
-
-func stringsContains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexString(s, sub) >= 0)
-}
-
-func indexString(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 func TestTuiVisibleWidthUnicode(t *testing.T) {
 	if tuiVisibleWidth("café") != 4 {
 		t.Fatalf("café width = %d", tuiVisibleWidth("café"))
 	}
-	_, _ = utf8.DecodeRuneInString("a")
 }
 
 func TestContentWidthBalanced(t *testing.T) {

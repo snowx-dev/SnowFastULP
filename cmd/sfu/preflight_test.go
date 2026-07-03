@@ -148,7 +148,7 @@ func TestPreflightRejectsGarbageThriceThenAborts(t *testing.T) {
 
 func TestPreflightCancelOnCtxDone(t *testing.T) {
 	// reader blocks forever, prompt stuck on stdin until ctx fires
-	pr, _ := newBlockingPipe(t)
+	pr := newBlockingReader(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
@@ -164,10 +164,9 @@ func TestPreflightCancelOnCtxDone(t *testing.T) {
 	}
 }
 
-func newBlockingPipe(t *testing.T) (*blockingReader, *blockingReader) {
+func newBlockingReader(t *testing.T) *blockingReader {
 	t.Helper()
-	r := &blockingReader{}
-	return r, r
+	return &blockingReader{}
 }
 
 type blockingReader struct{}

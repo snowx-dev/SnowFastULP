@@ -72,7 +72,7 @@ func TestUpgradeV2SidecarToV3(t *testing.T) {
 	want := slices.Clone(keys)
 	slices.Sort(want)
 	want = slices.Compact(want)
-	if !sliceEqualUint64(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("upgraded keys = %v, want %v", got, want)
 	}
 }
@@ -114,7 +114,7 @@ func TestSidecarWriterSortsAndDedups(t *testing.T) {
 	}
 	got := readAllSidecarKeys(t, sidecarPathForArchive(archive))
 	assertSortedUnique(t, got)
-	if !sliceEqualUint64(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("keys = %v, want %v", got, want)
 	}
 	hdr, err := readSidecarHeader(sidecarPathForArchive(archive))
@@ -149,7 +149,7 @@ func TestSidecarWriterExternalMerge(t *testing.T) {
 	}
 	got := readAllSidecarKeys(t, sidecarPathForArchive(archive))
 	assertSortedUnique(t, got)
-	if !sliceEqualUint64(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("merged keys = %v, want %v", got, want)
 	}
 }
@@ -187,7 +187,7 @@ func TestSidecarBucketKeysRangeRead(t *testing.T) {
 	want := slices.Clone(keys)
 	slices.Sort(want)
 	want = slices.Compact(want)
-	if !sliceEqualUint64(union, want) {
+	if !slices.Equal(union, want) {
 		t.Fatalf("union over buckets = %v, want %v", union, want)
 	}
 }
@@ -215,7 +215,7 @@ func TestUpgradeV2SidecarToV3ExternalMerge(t *testing.T) {
 	want := slices.Clone(keys)
 	slices.Sort(want)
 	want = slices.Compact(want)
-	if !sliceEqualUint64(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("upgraded keys mismatch: got %d want %d", len(got), len(want))
 	}
 	hdr, err := readSidecarHeader(path)

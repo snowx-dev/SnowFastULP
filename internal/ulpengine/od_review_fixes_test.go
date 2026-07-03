@@ -177,7 +177,7 @@ func TestRunODScanRefusesMajorityCorrupt(t *testing.T) {
 	helperWriteArchive(t, dir, "20260514_good", []string{"example.com:alice:pw1"})
 
 	odm := &ODMetrics{}
-	_, err := runODScanSync(context.Background(), odConfig{
+	_, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "irrelevant_stamp_99999",
 		Buckets:         64,
@@ -205,7 +205,7 @@ func TestRunODScanFatalsOnSystemError(t *testing.T) {
 	defer os.Chmod(archive, 0o600) // for TempDir cleanup
 
 	odm := &ODMetrics{}
-	_, err := runODScanSync(context.Background(), odConfig{
+	_, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "irrelevant_stamp_99999",
 		Buckets:         64,

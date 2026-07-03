@@ -21,11 +21,11 @@ func TestRenderSecretsTable(t *testing.T) {
 			LastSeen:   time.Date(2026, 7, 3, 4, 29, 0, 0, time.UTC),
 		},
 		{
-			RuleName: "AWS S3 Bucket",
-			Secret:   "/bassbuzz.s3.amazonaws.com",
-			Severity: "",
+			RuleName:   "AWS S3 Bucket",
+			Secret:     "/bassbuzz.s3.amazonaws.com",
+			Severity:   "",
 			SourcePath: "/home/x/STARLINK.zip!STARLINK/v4/[TR]84.17.86.91/Vivaldi/Default/History.txt",
-			LastSeen: time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
+			LastSeen:   time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC),
 		},
 	}
 	got := renderSecretsTable(matches, 120)

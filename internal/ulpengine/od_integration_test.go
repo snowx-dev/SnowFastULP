@@ -1,9 +1,12 @@
 package ulpengine
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -118,7 +121,7 @@ func TestODTwoRunDedup(t *testing.T) {
 		t.Errorf("run2 output has %d lines, want 2; lines=%v", len(out2), out2)
 	}
 	for _, want := range []string{"f.example.com:user6:pw6", "g.example.com:user7:pw7"} {
-		if !containsLine(out2, want) {
+		if !slices.Contains(out2, want) {
 			t.Errorf("run2 output missing %q; got %v", want, out2)
 		}
 	}
@@ -128,7 +131,7 @@ func TestODTwoRunDedup(t *testing.T) {
 		"b.example.com:user2:pw2",
 		"c.example.com:user3:pw3",
 	} {
-		if containsLine(out2, oldCred) {
+		if slices.Contains(out2, oldCred) {
 			t.Errorf("run2 should NOT contain %q (dup with run 1)", oldCred)
 		}
 	}
@@ -245,52 +248,12 @@ func readZstdLines(t *testing.T, path string) []string {
 	return data
 }
 
-func readAllLines(r interface {
-	Read([]byte) (int, error)
-}) ([]string, error) {
+func readAllLines(r io.Reader) ([]string, error) {
 	var out []string
-	var buf [4096]byte
-	var partial []byte
-	for {
-		n, err := r.Read(buf[:])
-		if n > 0 {
-			chunk := append(partial, buf[:n]...)
-			for {
-				idx := bytesIndexByte(chunk, '\n')
-				if idx < 0 {
-					partial = append(partial[:0], chunk...)
-					break
-				}
-				out = append(out, string(chunk[:idx]))
-				chunk = chunk[idx+1:]
-			}
-		}
-		if err != nil {
-			if len(partial) > 0 {
-				out = append(out, string(partial))
-			}
-			if err.Error() == "EOF" {
-				return out, nil
-			}
-			return out, err
-		}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		out = append(out, sc.Text())
 	}
-}
-
-func bytesIndexByte(s []byte, b byte) int {
-	for i, c := range s {
-		if c == b {
-			return i
-		}
-	}
-	return -1
-}
-
-func containsLine(lines []string, want string) bool {
-	for _, l := range lines {
-		if l == want {
-			return true
-		}
-	}
-	return false
+	return out, sc.Err()
 }

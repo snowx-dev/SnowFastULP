@@ -1,6 +1,7 @@
 package zstdframe_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -26,7 +27,7 @@ func TestScanFileCancelDuringFrameScanSynthetic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := bytesRepeat('a', 16<<20)
+	payload := bytes.Repeat([]byte{'a'}, 16<<20)
 	if _, err := enc.Write(payload); err != nil {
 		t.Fatal(err)
 	}

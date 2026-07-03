@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +110,7 @@ func TestDedupParallelOverManyBuckets(t *testing.T) {
 		recs := make([]bucketRecord, 0, perBucket*2)
 		for i := 0; i < perBucket; i++ {
 			h := uint64(b)<<32 | uint64(i)
-			line := "host" + itoa(b) + ".example.com:user:" + itoa(i)
+			line := "host" + strconv.Itoa(b) + ".example.com:user:" + strconv.Itoa(i)
 			recs = append(recs, bucketRecord{hash: h, line: line})
 			recs = append(recs, bucketRecord{hash: h, line: "DUP " + line})
 		}
@@ -627,32 +628,6 @@ func firstDuplicate(sorted []string) string {
 		}
 	}
 	return ""
-}
-
-func itoa(i int) string {
-	return strings.TrimSpace(itoaRaw(i))
-}
-
-func itoaRaw(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var b [20]byte
-	pos := len(b)
-	for i > 0 {
-		pos--
-		b[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
 }
 
 func TestGatherDestBucketKeysUpdatesKeysLoadedPerSidecar(t *testing.T) {

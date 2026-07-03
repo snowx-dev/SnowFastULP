@@ -183,7 +183,7 @@ func TestRunODScanMigratesMultiPartLibraryPreservesAllKeys(t *testing.T) {
 		want[stamp] = expectedSet(keys)
 	}
 
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,

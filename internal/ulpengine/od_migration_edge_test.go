@@ -52,7 +52,7 @@ func TestRunODScanMixedLibrarySidecarStates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := runODScanSync(context.Background(), odConfig{
+	res, err := runODScan(context.Background(), odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
@@ -210,7 +210,7 @@ func TestRunODScanUpgradeCancelMidStream(t *testing.T) {
 	}
 	defer func() { sidecarUpgradeOnCancelCheck = nil }()
 
-	_, err = runODScanSync(ctx, odConfig{
+	_, err = runODScan(ctx, odConfig{
 		Dest:            dir,
 		CurrentRunStamp: "sfu_self",
 		Buckets:         4,
