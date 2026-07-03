@@ -20,7 +20,7 @@ RELEASE_ZIP     ?= SnowFastULP-$(VERSION)-binaries.zip
 DOCKER_IMAGE  ?= sfu:local
 GO_DOCKER_IMAGE ?= golang:1.25-alpine
 
-.PHONY: build build-sfu build-sfs build-sfl build-all release release-assets release-zip test vet clean checksums \
+.PHONY: build build-sfu build-sfs build-sfl build-sfl-secrets build-sfl-secrets-fast build-all release release-assets release-zip test vet clean checksums \
 	docker-build docker-build-all sync-release-bins docker-run docker-run-sfs docker-run-sfl help
 
 # Default target: print available targets when invoked as bare `make`.
@@ -29,7 +29,9 @@ help:
 	@echo "  build           Build sfu, sfs, and sfl for the current platform into ./$(BIN_DIR)/"
 	@echo "  build-sfu       Build sfu only"
 	@echo "  build-sfs       Build sfs only"
-	@echo "  build-sfl       Build sfl only"
+	@echo "  build-sfl       Build sfl only (lean; no secret scanning)"
+	@echo "  build-sfl-secrets  Build sfl with the Titus secret scanner (-tags secrets) → $(BIN_DIR)/sfl"
+	@echo "  build-sfl-secrets-fast  Build sfl with the hs matcher (-tags secrets,vectorscan; CGO; needs Vectorscan/Hyperscan) → $(BIN_DIR)/sfl"
 	@echo "  build-all       Cross-compile both binaries for primary platforms"
 	@echo "  release         Build primary platforms and ./$(BIN_DIR)/$(RELEASE_ZIP)"
 	@echo "  release-assets  Build flat release downloads into ./$(DIST_DIR)/"
@@ -73,6 +75,33 @@ build-sfl:
 	out="$(BIN_DIR)/sfl$$ext"; \
 	echo "→ $$out"; \
 	CGO_ENABLED=0 go build $(BUILD_FLAGS) -o "$$out" $(PKG_SFL); \
+	echo "Binary written to: $$out"
+
+# Same sfl, but with `-tags secrets` so the Titus scanner is linked in (enables
+# `sfl -secrets`; a larger binary). Writes bin/sfl, replacing the lean build.
+build-sfl-secrets:
+	@mkdir -p "$(BIN_DIR)"
+	@os=$$(go env GOOS); \
+	ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
+	out="$(BIN_DIR)/sfl$$ext"; \
+	echo "→ $$out (-tags secrets)"; \
+	CGO_ENABLED=0 go build $(BUILD_FLAGS) -tags secrets -o "$$out" $(PKG_SFL); \
+	echo "Binary written to: $$out"
+
+# Same as build-sfl-secrets, but with the high-performance hs matcher
+# (-tags vectorscan) for faster scanning on very large member-count dumps.
+# Requires the libhs C library (Vectorscan, or Hyperscan on x86_64) installed on
+# the build machine at build AND runtime, so CGO is on: a native build only — no
+# cross-compile, not byte-reproducible, not a static binary. It pays an upfront
+# rule-compile cost, so it is only faster than the portable sfl-secrets on big
+# workloads. See docs/guides/secrets-scanning for per-OS install + when-to-use.
+build-sfl-secrets-fast:
+	@mkdir -p "$(BIN_DIR)"
+	@os=$$(go env GOOS); \
+	ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
+	out="$(BIN_DIR)/sfl$$ext"; \
+	echo "→ $$out (-tags secrets,vectorscan; CGO + libhs, needs Vectorscan/Hyperscan installed)"; \
+	CGO_ENABLED=1 go build $(BUILD_FLAGS) -tags secrets,vectorscan -o "$$out" $(PKG_SFL); \
 	echo "Binary written to: $$out"
 
 build-all: clean
@@ -152,7 +181,7 @@ checksums:
 		cat SHA256SUMS
 
 clean:
-	@rm -rf sfu sfu.exe sfs sfs.exe sfl sfl.exe "$(DIST_DIR)/" "$(BIN_DIR)/"
+	@rm -rf sfu sfu.exe sfs sfs.exe sfl sfl.exe sfl-secrets sfl-secrets.exe sfl-secrets-fast sfl-secrets-fast.exe "$(DIST_DIR)/" "$(BIN_DIR)/"
 
 # ─── Docker ────────────────────────────────────────────────────────────────
 

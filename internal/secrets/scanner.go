@@ -1,7 +1,10 @@
+//go:build secrets
+
 package secrets
 
 import (
 	"context"
+	"sync"
 
 	"github.com/praetorian-inc/titus"
 )
@@ -12,21 +15,43 @@ type Pool struct {
 	scanners chan *titus.Scanner
 }
 
-// NewPool builds size scanners (>=1). Each loads the full rule set once.
+// NewPool builds size scanners (>=1). Each loads the full rule set once
+// (~150-200ms), so they are built concurrently: a per-core pool then costs one
+// scanner's build latency instead of size× it. On any failure every scanner
+// built so far is closed and the first error returned.
 func NewPool(size int) (*Pool, error) {
 	if size < 1 {
 		size = 1
 	}
 	ch := make(chan *titus.Scanner, size)
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
 	for i := 0; i < size; i++ {
-		s, err := titus.NewScanner()
-		if err != nil {
-			for len(ch) > 0 {
-				(<-ch).Close()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := titus.NewScanner()
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
 			}
-			return nil, err
+			ch <- s // ch is buffered to size, so this never blocks
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		close(ch)
+		for s := range ch {
+			s.Close()
 		}
-		ch <- s
+		return nil, firstErr
 	}
 	return &Pool{scanners: ch}, nil
 }
@@ -61,7 +86,7 @@ func matchToFinding(m *titus.Match, provenance string) Finding {
 	f := Finding{
 		RuleID:     m.RuleID,
 		RuleName:   m.RuleName,
-		Secret:     string(m.Snippet.Matching),
+		Secret:     sanitizeSecret(string(m.Snippet.Matching)),
 		Score:      -1, // v1: rule-metadata scoring is a follow-up
 		SourcePath: provenance,
 	}

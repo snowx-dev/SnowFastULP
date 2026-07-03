@@ -78,6 +78,11 @@ func main() {
 	// global hit cap: stop the whole search + exit cleanly after N total hits.
 	// 0 = unlimited. distinct from -max-hits-per-chunk (per-chunk safety valve).
 	limit := flag.Int("l", 0, "stop after N total hits, then exit (0 = unlimited)")
+	// -sec switches to the secrets DB (written by `sfl -secrets`): the PATTERN
+	// filters by secret type (rule id/name, "*" = all) instead of a line match.
+	sec := flag.Bool("sec", false, "search the secrets DB instead of ULP archives")
+	secretsPath := flag.String("secrets-path", "", "path to the secrets DB (default: <root>/sfl-secrets.sqlite)")
+	secretsPathAlias := flag.String("sec-path", "", "alias for -secrets-path")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
@@ -87,9 +92,11 @@ func main() {
 	// Accept -workers as an alias for -j (sfu/sfl use -workers) so the same
 	// invocation works across all three CLIs; explicit -j wins.
 	visited.ResolveIntAlias(workers, workersAlias, "j", "workers")
+	visited.ResolveStringAlias(secretsPath, secretsPathAlias, "secrets-path", "sec-path")
 	if err := cfg.ApplySFS(visited, config.SFSFlags{
 		O: outFile, Txt: txtMode, Stream: stream, Silent: silent, Clean: clean, J: workers, Debug: debugFlag,
 		DecodeStep: decodeStep, MaxHitsPerChunk: maxHitsPerChunk, Limit: limit, Since: since,
+		Sec: sec, SecretsPath: secretsPath,
 	}); err != nil {
 		fatal("%v", err)
 	}
@@ -110,6 +117,24 @@ func main() {
 	matchAll := pattern == "*"
 	if pattern == "" {
 		fatal("empty pattern")
+	}
+	// -sec is a distinct, self-contained mode: it reads the secrets DB (no
+	// archive discovery, indexing, or live search), so branch out here before
+	// any of that machinery spins up.
+	if *sec {
+		if err := runSecretsSearch(secretsSearchArgs{
+			root:        args.Root,
+			pattern:     pattern,
+			secretsPath: *secretsPath,
+			since:       *since,
+			limit:       *limit,
+			outFile:     *outFile,
+			stream:      streamRequested(*stream, *silent),
+			clean:       *clean,
+		}); err != nil {
+			fatal("%v", err)
+		}
+		return
 	}
 	if matchAll && *limit == 0 && *since == "" {
 		fmt.Fprintln(os.Stderr, "note: '*' exports all lines; use -l N or -since DUR to narrow scope")

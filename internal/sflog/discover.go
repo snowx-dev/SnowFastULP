@@ -7,21 +7,97 @@ import (
 	"strings"
 )
 
-// walkSources visits root once, reporting each discovered credential file or
-// archive to onFound. A single pass (vs. one walk per source kind) halves the
-// up-front scan time on large trees and lets callers stream discovery progress.
-// A single-file root is reported directly without walking.
-func walkSources(root string, onFound func(path string, isArchive bool)) error {
+// sourceKind classifies a discovered file so callers can route it: archives go
+// to the extractor, password files to the credential parser, and everything
+// else (only surfaced when scanExtra is set) to the secret scanner.
+type sourceKind int
+
+const (
+	sourceArchive  sourceKind = iota // archive or split/volume part
+	sourcePassword                   // credential dump (see isPasswordFile)
+	sourceOther                      // any other file, reported only when scanExtra
+)
+
+// classifySource maps a path to its sourceKind. It returns ok=false for files
+// that should be skipped entirely (the default when scanExtra is off, or a
+// non-allowlisted file when it is on).
+func classifySource(path string, scanExtra bool) (sourceKind, bool) {
+	switch {
+	case isArchiveFile(path) || isSplitArchivePart(path):
+		return sourceArchive, true
+	case isPasswordFile(path):
+		return sourcePassword, true
+	case scanExtra && isSecretScanCandidate(path):
+		return sourceOther, true
+	default:
+		return 0, false
+	}
+}
+
+// secretScanExts is the -secrets allowlist of file extensions worth handing to
+// the secret scanner: the common carriers of API keys, tokens, private keys and
+// credentials. Matched case-insensitively (callers lower the name). Deliberately
+// excludes encrypted stores (.kdbx/.jks/.p12) the regex scanner can't read and
+// media/binaries where any hit would be noise.
+var secretScanExts = map[string]bool{
+	// text / documents
+	".txt": true, ".text": true, ".md": true, ".rtf": true, ".log": true,
+	".csv": true, ".tsv": true, ".doc": true, ".docx": true, ".pdf": true, ".odt": true,
+	// config / env
+	".env": true, ".ini": true, ".cfg": true, ".conf": true, ".config": true,
+	".toml": true, ".yaml": true, ".yml": true, ".json": true, ".xml": true,
+	".properties": true,
+	// keys / certs (text-encoded)
+	".pem": true, ".key": true, ".crt": true, ".cer": true, ".asc": true,
+	".ppk": true, ".ovpn": true,
+	// scripts / source (frequent hardcoded-secret carriers)
+	".sh": true, ".bash": true, ".zsh": true, ".ps1": true, ".bat": true, ".cmd": true,
+	".py": true, ".rb": true, ".php": true, ".js": true, ".ts": true,
+	".java": true, ".go": true, ".sql": true,
+}
+
+// secretScanNames is the -secrets allowlist of well-known secret-bearing files
+// that carry no ordinary extension (bare names and dotfiles), matched on the
+// full lowercased base name.
+var secretScanNames = map[string]bool{
+	"credentials": true, "config": true,
+	"id_rsa": true, "id_dsa": true, "id_ecdsa": true, "id_ed25519": true,
+	".npmrc": true, ".netrc": true, ".pgpass": true, ".htpasswd": true,
+	".git-credentials": true, ".pypirc": true, ".dockercfg": true,
+}
+
+// isSecretScanCandidate reports whether path is on the -secrets allowlist: a
+// known secret-bearing extension, a well-known credential filename, or a .env
+// variant (.env, .env.local, .env.production, ...). It gates every side scan so
+// a -secrets run reads only files likely to hold secrets instead of every byte
+// on disk / in an archive.
+func isSecretScanCandidate(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	if secretScanNames[name] {
+		return true
+	}
+	// .env plus dotted variants (.env.local, .env.production); a foo.env is
+	// caught by the extension map below.
+	if name == ".env" || strings.HasPrefix(name, ".env.") {
+		return true
+	}
+	return secretScanExts[filepath.Ext(name)]
+}
+
+// walkSources visits root once, reporting each discovered source and its kind to
+// onFound. A single pass (vs. one walk per source kind) halves the up-front scan
+// time on large trees and lets callers stream discovery progress. A single-file
+// root is reported directly without walking. When scanExtra is set, otherwise-
+// skipped files are reported as sourceOther so a -secrets run can scan arbitrary
+// loose files; with it off, discovery is byte-for-byte the credential-only walk.
+func walkSources(root string, scanExtra bool, onFound func(path string, kind sourceKind)) error {
 	info, err := os.Stat(root)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		switch {
-		case isArchiveFile(root) || isSplitArchivePart(root):
-			onFound(root, true)
-		case isPasswordFile(root):
-			onFound(root, false)
+		if kind, ok := classifySource(root, scanExtra); ok {
+			onFound(root, kind)
 		}
 		return nil
 	}
@@ -32,11 +108,8 @@ func walkSources(root string, onFound func(path string, isArchive bool)) error {
 		if d.IsDir() {
 			return nil
 		}
-		switch {
-		case isArchiveFile(path) || isSplitArchivePart(path):
-			onFound(path, true)
-		case isPasswordFile(path):
-			onFound(path, false)
+		if kind, ok := classifySource(path, scanExtra); ok {
+			onFound(path, kind)
 		}
 		return nil
 	})
@@ -44,8 +117,8 @@ func walkSources(root string, onFound func(path string, isArchive bool)) error {
 
 func DiscoverPasswordFiles(root string) ([]SourceFile, error) {
 	var files []SourceFile
-	err := walkSources(root, func(path string, isArchive bool) {
-		if !isArchive {
+	err := walkSources(root, false, func(path string, kind sourceKind) {
+		if kind == sourcePassword {
 			files = append(files, SourceFile{Path: path})
 		}
 	})

@@ -1,3 +1,5 @@
+//go:build secrets
+
 package main
 
 import (
@@ -61,6 +63,46 @@ func TestSecretsEndToEnd(t *testing.T) {
 	_, sst2 := run()
 	if sst2.New != 0 || sst2.Existing < 2 {
 		t.Fatalf("second run should accumulate: new=%d existing=%d", sst2.New, sst2.Existing)
+	}
+}
+
+// TestSecretsDedupSkipsIdenticalMembers proves the content-hash dedup: a zip
+// whose members carry byte-identical secret content is scanned once, the rest
+// skipped, yet the secrets still land in the store (from the one scan) exactly
+// as if every copy had been scanned.
+func TestSecretsDedupSkipsIdenticalMembers(t *testing.T) {
+	in := t.TempDir()
+	const secretBody = "aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n" +
+		"aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n" +
+		"token: ghp_1234567890abcdefghijklmnopqrstuvwx12\n"
+	files := map[string]string{"Passwords.txt": "URL: https://s\nUSER: u\nPASS: p\n"}
+	const copies = 6
+	for i := 0; i < copies; i++ {
+		// Distinct member names, identical content -> same digest -> one scan.
+		files[filepath.Join("victim"+string(rune('A'+i)), "creds.env")] = secretBody
+	}
+	buildZip(t, filepath.Join(in, "dupes.zip"), files)
+
+	sink, closeFn, err := buildSecretSink(filepath.Join(t.TempDir(), "s.sqlite"), 4)
+	if err != nil {
+		t.Fatalf("buildSecretSink: %v", err)
+	}
+	e := &sflog.Engine{Workers: 4, Passwords: []string{""}, SecretSink: sink, SecretMaxLen: 1 << 20}
+	var buf bytes.Buffer
+	if _, _, rerr := e.Run(context.Background(), in, &buf); rerr != nil {
+		t.Fatalf("Run: %v", rerr)
+	}
+	sst, cerr := closeFn()
+	if cerr != nil {
+		t.Fatalf("close: %v", cerr)
+	}
+	// copies-1 of the identical .env members must be skipped as duplicate content.
+	if sst.Deduped < copies-1 {
+		t.Fatalf("expected >=%d deduped, got %d", copies-1, sst.Deduped)
+	}
+	// The secrets still made it in from the single scan of that content.
+	if sst.New < 2 {
+		t.Fatalf("expected >=2 new secrets from the one scanned copy, got %d", sst.New)
 	}
 }
 

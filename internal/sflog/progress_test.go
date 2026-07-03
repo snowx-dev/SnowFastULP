@@ -3,7 +3,63 @@ package sflog
 import (
 	"sync"
 	"testing"
+	"time"
 )
+
+// TestScanFractionAndSecretCounters covers the -secrets progress plumbing: the
+// scan bar tracks a source's whole weight credited once it finishes, against
+// the same fixed total as the byte bar, so it only moves forward; the live
+// found / scanned / total counters accumulate. Nil receivers stay safe.
+func TestScanFractionAndSecretCounters(t *testing.T) {
+	var np *Progress
+	if np.ScanFraction() != 0 || np.SecretsFound() != 0 || np.SecretFilesScanned() != 0 || np.SecretFilesTotal() != 0 {
+		t.Fatal("nil Progress must report zero secret metrics")
+	}
+	np.EnableSecrets() // must not panic
+	if np.SecretsEnabled() {
+		t.Fatal("nil Progress is never secrets-enabled")
+	}
+
+	p := NewProgress()
+	if p.SecretsEnabled() {
+		t.Fatal("secrets not enabled by default")
+	}
+	p.EnableSecrets()
+	if !p.SecretsEnabled() {
+		t.Fatal("EnableSecrets did not stick")
+	}
+	if p.ScanFraction() != 0 {
+		t.Fatalf("ScanFraction with no total = %v, want 0", p.ScanFraction())
+	}
+	// The scan bar is a file count: scanned / total. Y (candidates) is seeded
+	// ahead of X (scanned), so two of four scanned reads 50%.
+	p.addSecretFilesTotal(4)
+	p.addSecretFilesTotal(0) // no-op
+	p.addSecretFileScanned()
+	p.addSecretFileScanned()
+	if p.SecretFilesScanned() != 2 {
+		t.Fatalf("SecretFilesScanned = %d, want 2", p.SecretFilesScanned())
+	}
+	if got := p.ScanFraction(); got != 0.5 {
+		t.Fatalf("ScanFraction = %v, want 0.5", got)
+	}
+	// scanned can never exceed total in practice, but a stray overshoot clamps.
+	for i := 0; i < 5; i++ {
+		p.addSecretFileScanned()
+	}
+	if got := p.ScanFraction(); got != 1.0 {
+		t.Fatalf("ScanFraction (overshoot) = %v, want 1.0", got)
+	}
+
+	p.addSecretsFound(3)
+	p.addSecretsFound(0) // no-op
+	if p.SecretFilesTotal() != 4 {
+		t.Fatalf("SecretFilesTotal = %d, want 4", p.SecretFilesTotal())
+	}
+	if p.SecretsFound() != 3 {
+		t.Fatalf("SecretsFound = %d, want 3", p.SecretsFound())
+	}
+}
 
 // TestCreditorAddConcurrent hammers creditor.add from many goroutines (as the
 // zip member pool does) and asserts the clamp is atomic: exactly weight is
@@ -152,10 +208,91 @@ func TestWorkerStageString(t *testing.T) {
 		StageTestingPassword: "testing password",
 		StageExtracting:      "extracting",
 		StageParsing:         "parsing",
+		StageScanning:        "scanning",
 	}
 	for stage, want := range cases {
 		if got := stage.String(); got != want {
 			t.Fatalf("WorkerStage(%d).String() = %q, want %q", stage, got, want)
 		}
+	}
+}
+
+// TestSecretStreamsOpenCounter covers the "Y+" denominator signal plumbing:
+// begin/end mark non-pre-counted sources open, SecretStreamsOpen reports the
+// in-flight count, nesting balances, and nil receivers stay safe.
+func TestSecretStreamsOpenCounter(t *testing.T) {
+	var np *Progress
+	np.beginSecretStream()
+	np.endSecretStream()
+	if got := np.SecretStreamsOpen(); got != 0 {
+		t.Fatalf("nil SecretStreamsOpen = %d, want 0", got)
+	}
+
+	p := NewProgress()
+	if got := p.SecretStreamsOpen(); got != 0 {
+		t.Fatalf("initial SecretStreamsOpen = %d, want 0", got)
+	}
+	p.beginSecretStream()
+	if got := p.SecretStreamsOpen(); got != 1 {
+		t.Fatalf("after begin = %d, want 1", got)
+	}
+	p.beginSecretStream()
+	if got := p.SecretStreamsOpen(); got != 2 {
+		t.Fatalf("after nested begin = %d, want 2", got)
+	}
+	p.endSecretStream()
+	if got := p.SecretStreamsOpen(); got != 1 {
+		t.Fatalf("after one end = %d, want 1", got)
+	}
+	p.endSecretStream()
+	if got := p.SecretStreamsOpen(); got != 0 {
+		t.Fatalf("after all end = %d, want 0", got)
+	}
+}
+
+// TestSetStageRecordsULPAndSecretActivity covers the "ulp + secrets" combined
+// label signal: setStage timestamps the slot's last ULP (extracting/parsing) and
+// last secret (scanning) activity, setActive starts a fresh window, and
+// clearActive zeroes both so a reused slot can't inherit the prior item's
+// window.
+func TestSetStageRecordsULPAndSecretActivity(t *testing.T) {
+	p := NewProgress()
+	p.SetWorkers(2)
+
+	p.setActive(0, "/data/a.rar", StageExtracting)
+	w := p.ActiveWorkers(8)[0]
+	if w.LastULP.IsZero() {
+		t.Fatalf("setActive(Extracting) did not record LastULP")
+	}
+	if !w.LastSec.IsZero() {
+		t.Fatalf("LastSec should be zero after setActive(Extracting), got %v", w.LastSec)
+	}
+	if time.Since(w.LastULP) > time.Second {
+		t.Fatalf("LastULP not recent: %v", w.LastULP)
+	}
+
+	p.setStage(0, StageScanning)
+	w = p.ActiveWorkers(8)[0]
+	if w.LastSec.IsZero() {
+		t.Fatalf("setStage(Scanning) did not record LastSec")
+	}
+	if time.Since(w.LastSec) > time.Second {
+		t.Fatalf("LastSec not recent: %v", w.LastSec)
+	}
+
+	// StageTestingPassword must not erase the activity window (a brief opening
+	// shouldn't reset recent ULP/secret signals).
+	p.setStage(0, StageTestingPassword)
+	w = p.ActiveWorkers(8)[0]
+	if w.LastULP.IsZero() || w.LastSec.IsZero() {
+		t.Fatalf("TestingPassword erased activity window: ULP=%v Sec=%v", w.LastULP, w.LastSec)
+	}
+
+	// clearActive zeroes both so the next lease starts clean.
+	p.clearActive(0)
+	p.setActive(0, "/data/b.zip", StageExtracting)
+	w = p.ActiveWorkers(8)[0]
+	if !w.LastSec.IsZero() {
+		t.Fatalf("LastSec leaked across clearActive/re-lease: %v", w.LastSec)
 	}
 }

@@ -36,9 +36,11 @@ func (ec extractCtx) parse(r io.Reader, provenance string) ([]Credential, error)
 
 // SecretSink receives raw member bytes for out-of-band secret scanning. It is
 // the secrets analogue of the credential emit path: the readers call it for
-// members they would otherwise skip. Implementations must be concurrency-safe.
+// members they would otherwise skip. It returns the number of secrets found in
+// content so the caller can surface a live count. Implementations must be
+// concurrency-safe.
 type SecretSink interface {
-	ScanSecrets(ctx context.Context, content []byte, provenance string)
+	ScanSecrets(ctx context.Context, content []byte, provenance string) int
 }
 
 // defaultSecretMaxLen caps how much of each scanned member is read into memory.
@@ -52,6 +54,12 @@ func (ec extractCtx) scanSecrets(ctx context.Context, r io.Reader, provenance st
 	if ec.secrets == nil {
 		return
 	}
+	// Credit this candidate as scanned regardless of outcome — empty, unreadable,
+	// or fully scanned. It was added to the "X / Y" total when identified, so
+	// crediting here once, always, keeps scanned marching toward total; otherwise
+	// the common empty/short member would leave the bar stalled just shy of 100%.
+	// nil-safe on direct/test callers (p may be unset).
+	defer ec.p.addSecretFileScanned()
 	max := ec.secretMaxLen
 	if max <= 0 {
 		max = defaultSecretMaxLen
@@ -60,7 +68,17 @@ func (ec extractCtx) scanSecrets(ctx context.Context, r io.Reader, provenance st
 	if err != nil || len(buf) == 0 {
 		return
 	}
-	ec.secrets.ScanSecrets(ctx, buf, provenance)
+	// Flag the slot as scanning for the (blocking, CPU-bound) Titus call so the
+	// panel reads "scanning" during the -secrets tail instead of "extracting".
+	// nil-safe: ec.stage is a no-op on loose/direct callers that carry no slot.
+	ec.stage(StageScanning)
+	n := ec.secrets.ScanSecrets(ctx, buf, provenance)
+	ec.p.addSecretsFound(int64(n))
+	// Restore the extracting stage so a sequential archive reader (RAR/7z/zip
+	// non-parallel) doesn't stay stuck on "scanning secrets" while it goes on to
+	// parse the next credential member. nil-safe as above; on the parallel-zip
+	// path setStage is dropped so this is a no-op there.
+	ec.stage(StageExtracting)
 }
 
 // slotSinks builds the stage/item publishers bound to a leased TUI slot so a

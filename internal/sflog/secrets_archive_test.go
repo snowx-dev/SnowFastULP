@@ -11,9 +11,8 @@ import (
 
 const awsKeyLine = "aws_access_key_id = AKIAIOSFODNN7EXAMPLE"
 
-// A loose (non-archived) input file is scanned for secrets alongside the ULP
-// parse, through a full Engine.Run. Discovery only enqueues credential-looking
-// loose files, so embed a token in a Passwords.txt to exercise the path.
+// A loose credential file (Passwords.txt) is scanned for secrets alongside the
+// ULP parse, through a full Engine.Run (the kindFile path in processFile).
 func TestLooseFileScannedForSecrets(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, dir, "Passwords.txt",
@@ -26,6 +25,97 @@ func TestLooseFileScannedForSecrets(t *testing.T) {
 	}
 	if !c.sawSecret("Passwords.txt", "ghp_") {
 		t.Fatalf("loose file was not scanned for secrets; got %v", c.got)
+	}
+}
+
+// Phase B widening: with a sink wired, discovery enqueues arbitrary loose files
+// (not just credential dumps) as kindSecretScan and scans them — a plain
+// config.env that no ULP walker would ever pick up still yields its secret.
+func TestLooseNonCredFileScannedForSecrets(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "config.env", awsKeyLine+"\n")
+	c := &capSink{}
+	e := &Engine{Workers: 1, SecretSink: c, SecretMaxLen: defaultSecretMaxLen}
+	var out strings.Builder
+	stats, _, err := e.Run(context.Background(), dir, &out)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !c.sawSecret("config.env", "AKIA") {
+		t.Fatalf("non-credential loose file was not scanned; got %v", c.got)
+	}
+	if stats.SecretFiles != 1 {
+		t.Fatalf("SecretFiles = %d, want 1", stats.SecretFiles)
+	}
+	// A secret-scan file must not be miscounted as a credential file or a
+	// no-ULP issue.
+	if stats.FilesScanned != 0 || stats.NoULP != 0 {
+		t.Fatalf("credential accounting leaked: FilesScanned=%d NoULP=%d", stats.FilesScanned, stats.NoULP)
+	}
+}
+
+// A loose file that is not on the secret allowlist (e.g. a .png) is skipped
+// entirely even with a sink wired: not scanned, not enqueued, not counted.
+func TestLooseNonAllowlistedFileSkipped(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "photo.png", awsKeyLine+"\n")
+	c := &capSink{}
+	e := &Engine{Workers: 1, SecretSink: c, SecretMaxLen: defaultSecretMaxLen}
+	var out strings.Builder
+	stats, _, err := e.Run(context.Background(), dir, &out)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(c.got) != 0 {
+		t.Fatalf("non-allowlisted file must not be scanned; got %v", c.got)
+	}
+	if stats.SecretFiles != 0 {
+		t.Fatalf("SecretFiles = %d, want 0", stats.SecretFiles)
+	}
+}
+
+func TestIsSecretScanCandidate(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"a/b/config.env", true},
+		{".env", true},
+		{".env.local", true},
+		{".env.production", true},
+		{"notes.txt", true},
+		{"report.PDF", true}, // case-insensitive
+		{"settings.json", true},
+		{"id_rsa", true},
+		{".npmrc", true},
+		{"CREDENTIALS", true},
+		{"deploy.sh", true},
+		{"photo.png", false},
+		{"clip.mp4", false},
+		{"archive.bin", false},
+		{"noext", false},
+	}
+	for _, tc := range cases {
+		if got := isSecretScanCandidate(tc.path); got != tc.want {
+			t.Errorf("isSecretScanCandidate(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// Without a sink, discovery must stay credential-only: a plain config.env is
+// neither scanned nor enqueued (byte-for-byte the pre-secrets behaviour).
+func TestLooseNonCredFileIgnoredWithoutSink(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, dir, "config.env", awsKeyLine+"\n")
+	e := &Engine{Workers: 1}
+	var out strings.Builder
+	stats, _, err := e.Run(context.Background(), dir, &out)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if stats.SecretFiles != 0 || stats.FilesScanned != 0 {
+		t.Fatalf("non-credential file should be skipped without a sink: SecretFiles=%d FilesScanned=%d",
+			stats.SecretFiles, stats.FilesScanned)
 	}
 }
 

@@ -39,6 +39,8 @@ func renderHelp(bin string) string {
 		{"-clean", "", "Strip URL schemes from output lines."},
 		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
 		{"-since", "DUR", "Only search archives modified within DUR, e.g. 7d, 12h, 90m."},
+		{"-sec", "", "Search the secrets DB (from `sfl -secrets`); PATTERN filters by type ('*' = all)."},
+		{"-secrets-path", "PATH", "Path to the secrets DB (default: <root>/sfl-secrets.sqlite). -sec-path is an alias."},
 	}
 	nerds := []argDef{
 		{"-j", "N", "Set search worker count."},
@@ -93,6 +95,8 @@ func renderHelp(bin string) string {
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library -o hits.txt 'user@example'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -s\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -o out.txt -clean\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " 'aws' -sec -since 1h\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " '*' -sec -l 10\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'pattern' -debug\n\n")
 
 	b.WriteString(labelStyle.Render("Args:") + "\n")

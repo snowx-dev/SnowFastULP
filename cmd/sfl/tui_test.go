@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -163,6 +164,84 @@ func TestRenderProgressScanningStateIsCenteredWithSpinner(t *testing.T) {
 	}
 }
 
+func TestRenderSflBarPairLabelsBothTracks(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii) // strip ANSI so substring checks are stable
+	rows := renderSflBarPair("Extract", 0.5, "Secrets", 0.25, false, 72)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 bar rows, got %d", len(rows))
+	}
+	if !strings.Contains(rows[0], "Extract") || !strings.Contains(rows[0], "50.0%") {
+		t.Fatalf("extract bar row wrong: %q", rows[0])
+	}
+	if !strings.Contains(rows[1], "Secrets") || !strings.Contains(rows[1], "25.0%") {
+		t.Fatalf("secrets bar row wrong: %q", rows[1])
+	}
+}
+
+// TestRenderSflBarPairSecretsPending covers the indeterminate Secrets bar:
+// while a streaming source is open the denominator is not final, so the bar
+// drops the percentage for a muted "----" trough and never claims 100%.
+func TestRenderSflBarPairSecretsPending(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	rows := renderSflBarPair("Extract", 0.029, "Secrets", 1.0, true, 72)
+	if strings.Contains(rows[1], "100.0%") {
+		t.Fatalf("pending secrets bar must not show a percentage: %q", rows[1])
+	}
+	if !strings.Contains(rows[1], "----") {
+		t.Fatalf("pending secrets bar should show the ---- trough: %q", rows[1])
+	}
+	if !strings.Contains(rows[1], "Secrets") {
+		t.Fatalf("pending secrets bar lost its label: %q", rows[1])
+	}
+	// Extract bar is unaffected by the Secrets pending state.
+	if !strings.Contains(rows[0], "2.9%") {
+		t.Fatalf("extract bar should still show its real fraction: %q", rows[0])
+	}
+}
+
+func TestRenderSecretsLiveRow(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	row := renderSecretsLiveRow(12, 340, 512, false)
+	for _, want := range []string{"Secrets", "12", "found", "340", "512", "files scanned"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("secrets row missing %q: %q", want, row)
+		}
+	}
+	if strings.Contains(row, "+") {
+		t.Fatalf("non-streaming row should not carry the + signal: %q", row)
+	}
+}
+
+// TestRenderSecretsLiveRowStreaming covers the "Y+" denominator signal: while a
+// non-pre-counted source (rar/7z-encrypted/nested) is open, the total is not
+// final, so the row appends "+" after Y. With no total yet, no "+" is shown
+// (there is no denominator to mark incomplete).
+func TestRenderSecretsLiveRowStreaming(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	row := renderSecretsLiveRow(3, 9, 9, true)
+	if !strings.Contains(row, "9+") {
+		t.Fatalf("streaming row should show Y+ (9+): %q", row)
+	}
+	// Streaming but no candidates credited yet: no denominator, no "+".
+	zero := renderSecretsLiveRow(0, 0, 0, true)
+	if strings.Contains(zero, "+") {
+		t.Fatalf("streaming row with total=0 should not show +: %q", zero)
+	}
+}
+
+func TestRenderProgressSecretsFinalizePhase(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	prog := sflog.NewProgress()
+	prog.EnableSecrets()
+	prog.BeginSecretsFinalize()
+	joined := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
+	for _, want := range []string{"FINALIZING SECRETS", "Extract", "Secrets", "writing to store"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("finalize frame missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestRenderProgressShowsFooter(t *testing.T) {
 	prog := sflog.NewProgress()
 	joined := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
@@ -183,13 +262,44 @@ func TestRenderSflWorkerPanelShowsConcurrentStages(t *testing.T) {
 	for _, want := range []string{
 		"3 workers active",
 		"testing password",
-		"extracting",
-		"parsing",
+		"extracting ulps",
+		"parsing ulps",
 		"[1]", "[2]", "[4]",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("worker panel missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+// TestSflStageLabelExplicit covers the user-facing panel labels: the
+// credential/secret actions name their target, and every label fits the fixed
+// 16-cell stage column so paths stay aligned without a width change.
+func TestSflStageLabelExplicit(t *testing.T) {
+	cases := []struct {
+		stage sflog.WorkerStage
+		want  string
+	}{
+		{sflog.StageOpening, "opening"},
+		{sflog.StageTestingPassword, "testing password"},
+		{sflog.StageExtracting, "extracting ulps"},
+		{sflog.StageParsing, "parsing ulps"},
+		{sflog.StageScanning, "scanning secrets"},
+		{sflog.WorkerStage(999), "working"}, // unknown stage falls back
+	}
+	for _, c := range cases {
+		if got := sflStageLabel(c.stage); got != c.want {
+			t.Fatalf("sflStageLabel(%v) = %q, want %q", c.stage, got, c.want)
+		}
+		if w := lipgloss.Width(sflStageLabel(c.stage)); w > sflStageColW {
+			t.Fatalf("label %q is %d cells wide, exceeds sflStageColW=%d",
+				c.want, w, sflStageColW)
+		}
+	}
+	// StageScanning renders in a real row end-to-end (the -secrets tail label).
+	row := renderSflWorkerRow(sflog.ActiveWorker{Index: 0, Path: "/data/a.env", Stage: sflog.StageScanning}, 60, 4, 0)
+	if !strings.Contains(row, "scanning secrets") {
+		t.Fatalf("scanning row missing explicit label:\n%s", row)
 	}
 }
 
@@ -212,62 +322,6 @@ func TestRenderSflWorkerPanelHidesHeaderWhenOne(t *testing.T) {
 	}
 }
 
-// TestFormatETA covers the hide/show rules: hidden during discovery (no total ->
-// non-positive remaining), near-complete, a stalled/unmeasured rate, and an
-// absurd horizon; shown with a steady rate.
-func TestFormatETA(t *testing.T) {
-	cases := []struct {
-		name      string
-		remaining int64
-		rate      float64
-		wantETA   bool
-	}{
-		{"near-complete", 0, 10 << 20, false},
-		{"discovery-negative", -5, 10 << 20, false},
-		{"stalled-rate", 5 << 20, 0.5, false},
-		{"absurd-horizon", int64(99*3600) * 4, 2, false},
-		{"steady", 100 << 20, 10 << 20, true}, // ~10s
-	}
-	for _, c := range cases {
-		got := formatETA(c.remaining, c.rate)
-		if c.wantETA && !strings.Contains(got, "ETA ") {
-			t.Errorf("%s: formatETA(%d,%v)=%q, want an ETA", c.name, c.remaining, c.rate, got)
-		}
-		if !c.wantETA && got != "" {
-			t.Errorf("%s: formatETA(%d,%v)=%q, want empty", c.name, c.remaining, c.rate, got)
-		}
-		display := formatETADisplay(c.remaining, c.rate)
-		if c.wantETA && display == "—" {
-			t.Errorf("%s: formatETADisplay(%d,%v)=%q, want a duration", c.name, c.remaining, c.rate, display)
-		}
-		if !c.wantETA && display != "—" {
-			t.Errorf("%s: formatETADisplay(%d,%v)=%q, want em dash", c.name, c.remaining, c.rate, display)
-		}
-	}
-}
-
-func TestSflRateEMAUpdate(t *testing.T) {
-	const dt = 0.2              // monitor tick
-	steady := float64(10 << 20) // 10 MB/s
-	var ema float64
-	for range 50 { // 10s of ticks
-		ema = sflRateEMAUpdate(ema, steady, dt)
-	}
-	if ema < steady*0.9 {
-		t.Fatalf("EMA after 10s steady input=%v, want ~%v", ema, steady)
-	}
-	// One burst tick at 10× should not move ETA rate more than ~25%.
-	spike := sflRateEMAUpdate(ema, steady*10, dt)
-	if spike > ema*1.25 {
-		t.Fatalf("single spike EMA=%v, prev=%v; too reactive", spike, ema)
-	}
-	// Micro-stall (0 B/s) should decay slowly, not zero out.
-	stall := sflRateEMAUpdate(ema, 0, dt)
-	if stall < ema*0.95 {
-		t.Fatalf("single zero tick EMA=%v, prev=%v; dropped too fast", stall, ema)
-	}
-}
-
 func TestRenderExtractStatsRowsLargeNumbers(t *testing.T) {
 	const (
 		files    = 12_345_678
@@ -278,9 +332,9 @@ func TestRenderExtractStatsRowsLargeNumbers(t *testing.T) {
 		dupes    = 3_456_789
 		total    = 45 << 40 // ~45.0TB
 		done     = total - (100 << 20)
-		rate     = 10 << 20 // 10MB/s → ~10s ETA on 100MB remaining
+		rate     = 10 << 20 // 10MB/s shown on the Bytes row
 	)
-	joined := strings.Join(renderExtractStatsRows(files, archives, logs, logsTot, emitted, dupes, done, total, rate, rate), "\n")
+	joined := strings.Join(renderExtractStatsRows(files, archives, logs, logsTot, emitted, dupes, done, total, rate), "\n")
 	for _, want := range []string{
 		"12,345,678", "678,901",
 		"1,234", "5,678",
@@ -294,21 +348,14 @@ func TestRenderExtractStatsRowsLargeNumbers(t *testing.T) {
 	if strings.Contains(joined, "…") {
 		t.Fatalf("stats rows must not truncate with ellipsis:\n%s", joined)
 	}
-	if !strings.Contains(joined, "10s") && !strings.Contains(joined, "9s") {
-		t.Fatalf("expected ETA duration in stats rows:\n%s", joined)
-	}
-}
-
-func TestRenderExtractStatsRowsETAHidden(t *testing.T) {
-	joined := strings.Join(renderExtractStatsRows(1, 1, 1, 1, 1, 0, 100, 100, 0.5, 0), "\n")
-	if !strings.Contains(joined, "—") {
-		t.Fatalf("stalled rate should show em-dash ETA:\n%s", joined)
+	if strings.Contains(joined, "ETA") {
+		t.Fatalf("ETA row must be removed from stats rows:\n%s", joined)
 	}
 }
 
 func TestRenderExtractStatsRowsLabels(t *testing.T) {
-	rows := renderExtractStatsRows(10, 2, 3, 5, 7, 1, 1<<20, 10<<20, 5<<20, 5<<20)
-	for _, label := range []string{"Logs", "Unique", "Sources", "Bytes", "ETA"} {
+	rows := renderExtractStatsRows(10, 2, 3, 5, 7, 1, 1<<20, 10<<20, 5<<20)
+	for _, label := range []string{"Logs", "Unique", "Sources", "Bytes"} {
 		found := false
 		for _, row := range rows {
 			if strings.Contains(row, label) {
@@ -320,8 +367,8 @@ func TestRenderExtractStatsRowsLabels(t *testing.T) {
 			t.Fatalf("missing label %q in rows:\n%v", label, rows)
 		}
 	}
-	if len(rows) != 5 {
-		t.Fatalf("want 5 stats rows, got %d", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("want 4 stats rows (ETA removed), got %d", len(rows))
 	}
 }
 
@@ -476,6 +523,53 @@ func TestSflWorkerRowCap(t *testing.T) {
 	}
 }
 
+// TestSflSecretsWorkerRows locks the fixed-height sizing for the two-bar
+// -secrets frame: as many worker rows as fit beneath the frame overhead, capped
+// at sflMaxWorkerRows and the worker count, dropping to 0 on terminals too short
+// for even one row.
+func TestSflSecretsWorkerRows(t *testing.T) {
+	cases := []struct {
+		name          string
+		height, total int
+		want          int
+	}{
+		{"no workers", 50, 0, 0},
+		{"too short for any row drops panel", 20, 16, 0},
+		{"default 24-row term fits one", 24, 16, 1},
+		{"31-row term hits the cap", 31, 16, sflMaxWorkerRows},
+		{"tall term stays at cap", 60, 16, sflMaxWorkerRows},
+		{"capped by worker count", 40, 3, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sflSecretsWorkerRows(tc.height, tc.total); got != tc.want {
+				t.Fatalf("sflSecretsWorkerRows(%d, %d) = %d, want %d", tc.height, tc.total, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSflSecretsFrameFitsTerminal is the footer-flicker guard: the two-bar
+// -secrets frame height is exactly sflSecretsFrameOverhead + worker rows, and
+// the row count is chosen so that total never exceeds termHeight-1 (the draw()
+// Compose clamp). If it did, the footer would be truncated on short terminals
+// and redrawn as the busy-worker count changed — the flicker the fix removes.
+// Because the row count depends only on terminal height and worker count (not
+// the live active count), the footer keeps a constant screen row.
+func TestSflSecretsFrameFitsTerminal(t *testing.T) {
+	for h := 16; h <= 80; h++ {
+		rows := sflSecretsWorkerRows(h, 16)
+		if rows == 0 {
+			continue // panel dropped; plain frame is well under any usable height
+		}
+		frameHeight := sflSecretsFrameOverhead + rows
+		if frameHeight > h-1 {
+			t.Fatalf("termHeight=%d: frame height %d exceeds clamp %d (footer would truncate)",
+				h, frameHeight, h-1)
+		}
+	}
+}
+
 func TestRenderFinalSummaryReportsSkippedButOmitsIssueDetail(t *testing.T) {
 	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
 		ArchivesScanned:  3,
@@ -585,5 +679,54 @@ func TestRenderInterruptShowsCleanupLog(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("interrupt frame missing cleanup line %q:\n%s", want, joined)
 		}
+	}
+}
+
+// TestSflWorkerStageLabelBothRecent covers the "this archive is doing both right
+// now" collapse: when a slot has pulled ULPs and scanned secrets within the
+// recent window, the panel reads "ulp + secrets" regardless of the momentary
+// stage; otherwise it falls back to the per-stage label.
+func TestSflWorkerStageLabelBothRecent(t *testing.T) {
+	now := time.Now()
+
+	both := sflog.ActiveWorker{Stage: sflog.StageExtracting, LastULP: now, LastSec: now}
+	if got := sflWorkerStageLabel(both); got != "ulp + secrets" {
+		t.Fatalf("both recent: got %q, want \"ulp + secrets\"", got)
+	}
+	// Stage is Scanning but both activities are recent -> still collapses.
+	bothScan := sflog.ActiveWorker{Stage: sflog.StageScanning, LastULP: now, LastSec: now}
+	if got := sflWorkerStageLabel(bothScan); got != "ulp + secrets" {
+		t.Fatalf("both recent (scanning stage): got %q, want \"ulp + secrets\"", got)
+	}
+
+	// Only secrets recent -> per-stage label.
+	secOnly := sflog.ActiveWorker{Stage: sflog.StageScanning, LastSec: now}
+	if got := sflWorkerStageLabel(secOnly); got != "scanning secrets" {
+		t.Fatalf("sec only: got %q, want \"scanning secrets\"", got)
+	}
+	// Only ULP recent -> per-stage label.
+	ulpOnly := sflog.ActiveWorker{Stage: sflog.StageExtracting, LastULP: now}
+	if got := sflWorkerStageLabel(ulpOnly); got != "extracting ulps" {
+		t.Fatalf("ulp only: got %q, want \"extracting ulps\"", got)
+	}
+	// Both stale -> per-stage label.
+	stale := sflog.ActiveWorker{
+		Stage:   sflog.StageExtracting,
+		LastULP: now.Add(-10 * time.Second),
+		LastSec: now.Add(-10 * time.Second),
+	}
+	if got := sflWorkerStageLabel(stale); got != "extracting ulps" {
+		t.Fatalf("stale: got %q, want \"extracting ulps\"", got)
+	}
+
+	// The combined label fits the fixed stage column.
+	if w := lipgloss.Width("ulp + secrets"); w > sflStageColW {
+		t.Fatalf("\"ulp + secrets\" is %d cells, exceeds sflStageColW=%d", w, sflStageColW)
+	}
+
+	// End-to-end: a row built from a both-recent worker contains the combined label.
+	row := renderSflWorkerRow(sflog.ActiveWorker{Index: 0, Path: "/data/a.rar", Stage: sflog.StageExtracting, LastULP: now, LastSec: now}, 60, 4, 0)
+	if !strings.Contains(row, "ulp + secrets") {
+		t.Fatalf("both-recent row missing combined label:\n%s", row)
 	}
 }

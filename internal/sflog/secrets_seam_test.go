@@ -14,10 +14,11 @@ type capSink struct {
 	got []string
 }
 
-func (c *capSink) ScanSecrets(_ context.Context, content []byte, prov string) {
+func (c *capSink) ScanSecrets(_ context.Context, content []byte, prov string) int {
 	c.mu.Lock()
 	c.got = append(c.got, prov+"|"+string(content))
 	c.mu.Unlock()
+	return 0
 }
 
 // sawSecret reports whether any recorded call contains both fragments.
@@ -52,5 +53,31 @@ func TestScanSecretsSkipsEmpty(t *testing.T) {
 	ec.scanSecrets(context.Background(), strings.NewReader(""), "log!f")
 	if len(c.got) != 0 {
 		t.Fatalf("empty reader should not reach the sink, got %v", c.got)
+	}
+}
+
+// TestScanSecretsRestoresExtractingStage guards the sequential-archive stuck
+// label: scanSecrets flags the slot StageScanning for the Titus call, then must
+// flip it back to StageExtracting so a RAR/7z reader parsing the next credential
+// member isn't reported as still scanning secrets.
+func TestScanSecretsRestoresExtractingStage(t *testing.T) {
+	c := &capSink{}
+	var mu sync.Mutex
+	var stages []WorkerStage
+	ec := extractCtx{
+		secrets:      c,
+		secretMaxLen: defaultSecretMaxLen,
+		setStage: func(s WorkerStage) {
+			mu.Lock()
+			stages = append(stages, s)
+			mu.Unlock()
+		},
+	}
+	ec.scanSecrets(context.Background(), strings.NewReader("AKIAEXAMPLE"), "log!f")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stages) != 2 || stages[0] != StageScanning || stages[1] != StageExtracting {
+		t.Fatalf("stage sequence = %v, want [StageScanning, StageExtracting]", stages)
 	}
 }

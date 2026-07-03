@@ -90,6 +90,7 @@ func main() {
 	errFile := flag.Bool("err", false, "write the full, untruncated issue list to a file")
 	secretsOn := flag.Bool("secrets", false, "scan non-credential files for secrets (API keys, tokens) into a sqlite store")
 	secretsPath := flag.String("secrets-path", "", "path to the secrets sqlite DB (default: <output>/sfl-secrets.sqlite)")
+	secretsPathAlias := flag.String("sec-path", "", "alias for -secrets-path")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update check")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
@@ -100,6 +101,7 @@ func main() {
 	// Accept -j as an alias for -workers (sfs uses -j) so the same invocation
 	// works across all three CLIs; explicit -workers wins.
 	visited.ResolveIntAlias(workers, workersAlias, "workers", "j")
+	visited.ResolveStringAlias(secretsPath, secretsPathAlias, "secrets-path", "sec-path")
 	if err := fileCfg.ApplySFL(visited, config.SFLFlags{
 		O: out, OD: outDedup, TempDir: tempDir, Password: password,
 		SecretsPath: secretsPath,
@@ -270,7 +272,7 @@ func run(cfg runConfig) error {
 			once.Do(func() {
 				st, cerr := closeFn()
 				secretsStats = st
-				dbg.Event("secrets: new=%d existing=%d dup=%d", st.New, st.Existing, st.DupInRun)
+				dbg.Event("secrets: new=%d existing=%d dup=%d deduped=%d", st.New, st.Existing, st.DupInRun, st.Deduped)
 				if cerr != nil {
 					dbg.Event("secrets: close error: %v", cerr)
 				}
@@ -281,6 +283,13 @@ func run(cfg runConfig) error {
 
 	stats, results, extractErr := eng.Run(ctx, cfg.Input, snk.w)
 	if closeSecrets != nil {
+		// Flip the live frame to a dedicated "finalizing secrets" phase while the
+		// store drains its last batch and checkpoints the WAL, so the hand-off
+		// from 100% extraction to the summary never reads as a stall. Skipped on
+		// error, where the frame is torn down below instead.
+		if extractErr == nil {
+			prog.BeginSecretsFinalize()
+		}
 		closeSecrets() // flush + capture stats before the summary (idempotent)
 	}
 	dbg.Completion(stats)

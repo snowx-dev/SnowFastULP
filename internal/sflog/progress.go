@@ -4,6 +4,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Progress is a concurrency-safe view of an in-flight extraction, consumed by
@@ -23,6 +24,28 @@ type Progress struct {
 	current    atomic.Value // string: path of the item being processed
 	phase      atomic.Int32
 	ingestView atomic.Value // func() IngestView, installed by BeginIngest
+
+	// Secret scanning (-secrets). secretsOn gates the second progress bar and
+	// the live "Secrets" row so they surface only when a sink is wired.
+	// secretsFound drives the found count; secretFilesScanned/secretFilesTotal
+	// drive both the live "X / Y files" row and the secondary bar (scanned /
+	// total). scan cost is per-file (a Titus pass runs regardless of size), so a
+	// file count tracks real progress where bytes cannot: compressed archive
+	// members weigh almost nothing on disk yet dominate scan time. The total is
+	// seeded up front — loose files plus a discovery-time member pre-count for
+	// zip/7z — so the ratio climbs monotonically instead of lurching when a late
+	// archive inflates the denominator. Streaming/encrypted members that cannot
+	// be pre-counted are credited at open and smoothed by the TUI's monotonic
+	// display clamp.
+	secretsOn          atomic.Bool
+	secretsFound       atomic.Int64
+	secretFilesScanned atomic.Int64
+	secretFilesTotal   atomic.Int64
+	// secretStreamsOpen is the count of in-flight sources whose scan-candidate
+	// members are discovered incrementally (rar, encrypted-header 7z, nested
+	// archives) rather than pre-counted. While > 0 the "X / Y" denominator is
+	// not final, so the TUI renders "Y+" to signal "still growing".
+	secretStreamsOpen atomic.Int64
 
 	// workers is the live status registry the TUI reads to render concurrent
 	// activity. Sized once by SetWorkers; guarded by workersMu for the slice
@@ -49,6 +72,12 @@ const (
 	StageTestingPassword
 	StageExtracting
 	StageParsing
+	// StageScanning marks a worker running a secret scan (the CPU-bound Titus
+	// pass over a member's bytes). It is distinct from StageExtracting so the
+	// panel reads "scanning" during the -secrets tail — when the byte bar is
+	// already at 100% but the scanners are still working — instead of looking
+	// stuck on "extracting".
+	StageScanning
 )
 
 func (s WorkerStage) String() string {
@@ -61,16 +90,24 @@ func (s WorkerStage) String() string {
 		return "extracting"
 	case StageParsing:
 		return "parsing"
+	case StageScanning:
+		return "scanning"
 	default:
 		return ""
 	}
 }
 
 // ActiveWorker is a snapshot of one busy worker slot for the TUI panel.
+// LastULP/LastSec are the wall-clock times the slot most recently entered an
+// extracting/parsing or scanning stage; the renderer uses them to surface
+// "ulp + secrets" when one archive is doing both within a short window.
 type ActiveWorker struct {
 	Index int
 	Path  string
 	Stage WorkerStage
+
+	LastULP time.Time
+	LastSec time.Time
 }
 
 // workerSlot is one engine worker's live status. A nil path pointer means the
@@ -79,12 +116,17 @@ type ActiveWorker struct {
 type workerSlot struct {
 	path  atomic.Pointer[string]
 	stage atomic.Int32
+	// lastULP/lastSec (unix nano) record when the slot last did credential
+	// extraction/parsing vs. secret scanning, so the TUI can render a combined
+	// "ulp + secrets" label for an archive doing both concurrently.
+	lastULP atomic.Int64
+	lastSec atomic.Int64
 }
 
 // IngestWorker is one regen/index worker row for the ingest TUI panel.
 type IngestWorker struct {
-	Archive              string
-	PartIdx, PartsTotal  int32
+	Archive               string
+	PartIdx, PartsTotal   int32
 	BytesDone, BytesTotal int64
 }
 
@@ -98,13 +140,13 @@ type IngestView struct {
 	EnginePhase int32 // ulpengine.Phase*
 
 	// Library / regen (-od phase 0)
-	ODPhase          int32
-	ArchivesTotal    int32
-	PartsRegenDone   int32
-	PartsRegenTotal  int32
-	RegenBytesRead   int64
-	RegenBytesTotal  int64
-	RegenBPS         float64
+	ODPhase         int32
+	ArchivesTotal   int32
+	PartsRegenDone  int32
+	PartsRegenTotal int32
+	RegenBytesRead  int64
+	RegenBytesTotal int64
+	RegenBPS        float64
 
 	// ULP read (shard)
 	ULPBytes  int64
@@ -112,13 +154,13 @@ type IngestView struct {
 	LinesRead int64
 
 	// Dedup merge
-	ShowMerge          bool
-	Unique             int64
-	Skipped            int64
-	BucketsDone        int64
-	BucketsTotal       int64
-	BucketsBytesRead   int64
-	BucketsBytesTotal  int64
+	ShowMerge         bool
+	Unique            int64
+	Skipped           int64
+	BucketsDone       int64
+	BucketsTotal      int64
+	BucketsBytesRead  int64
+	BucketsBytesTotal int64
 
 	Workers []IngestWorker
 }
@@ -128,6 +170,11 @@ const (
 	phaseExtract
 	phaseIngest
 	phaseDone
+	// phaseSecretsFinalize is the brief dedicated phase between extraction and
+	// the summary while the secrets store drains its last batch and checkpoints
+	// its WAL. Appended (not inserted) so the earlier values the TUI mirrors
+	// stay put. Only entered on a -secrets run via BeginSecretsFinalize.
+	phaseSecretsFinalize
 )
 
 // NewProgress returns a tracker in the discovery phase. The engine fills in the
@@ -203,6 +250,71 @@ func (p *Progress) Logs() int64 {
 	return p.logsDone.Load()
 }
 func (p *Progress) Phase() int32 { return p.phase.Load() }
+
+// EnableSecrets marks the run as scanning for secrets so the TUI shows the
+// second bar and the live Secrets row. Called once by the engine when a sink is
+// wired.
+func (p *Progress) EnableSecrets() {
+	if p != nil {
+		p.secretsOn.Store(true)
+	}
+}
+func (p *Progress) SecretsEnabled() bool { return p != nil && p.secretsOn.Load() }
+func (p *Progress) SecretsFound() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.secretsFound.Load()
+}
+func (p *Progress) SecretFilesScanned() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.secretFilesScanned.Load()
+}
+
+// SecretFilesTotal is the number of secret-scan candidates identified so far
+// (loose files up front, archive members as each archive opens). It is the
+// denominator of the live "X / Y files" row; it grows during the run, always
+// ahead of SecretFilesScanned, so the user can see what is left to scan.
+func (p *Progress) SecretFilesTotal() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.secretFilesTotal.Load()
+}
+
+// ScanFraction is the secret-scan progress by file count (secretFilesScanned /
+// secretFilesTotal): the secondary bar's raw value. Scan cost is per-file, so
+// this tracks the CPU-bound scan tail that the byte bar (Fraction) cannot —
+// Fraction hits 100% as soon as reads finish, long before the scanners do. With
+// the total seeded up front it climbs monotonically; the small residual from
+// members counted only at open (streaming/encrypted) is smoothed by the TUI's
+// monotonic clamp. Returns the raw ratio (clamped to [0,1]); the clamp lives at
+// the display layer so this stays a pure, honest reading.
+func (p *Progress) ScanFraction() float64 {
+	if p == nil {
+		return 0
+	}
+	total := p.secretFilesTotal.Load()
+	if total <= 0 {
+		return 0
+	}
+	f := float64(p.secretFilesScanned.Load()) / float64(total)
+	if f > 1 {
+		return 1
+	}
+	return f
+}
+
+// BeginSecretsFinalize flips the tracker into the dedicated secrets-flush phase
+// so the live frame stops showing 100% extraction and reads as active work
+// while the store drains.
+func (p *Progress) BeginSecretsFinalize() {
+	if p != nil {
+		p.phase.Store(phaseSecretsFinalize)
+	}
+}
 
 // BeginIngest flips the tracker into the ingest phase and installs the view
 // provider the live frame polls each tick. Called once, after extraction
@@ -319,14 +431,42 @@ func (p *Progress) slot(idx int) *workerSlot {
 func (p *Progress) setActive(idx int, path string, stage WorkerStage) {
 	if s := p.slot(idx); s != nil {
 		s.path.Store(&path)
-		s.stage.Store(int32(stage))
+		s.lastULP.Store(0)
+		s.lastSec.Store(0)
+		p.recordStage(s, stage)
 	}
 }
 
-// setStage updates only the stage of an already-active worker slot.
+// unixNanoTime converts a stored unix-nano activity stamp to a time.Time,
+// mapping a never-set stamp (0) to the Go zero time so callers can use IsZero.
+func unixNanoTime(n int64) time.Time {
+	if n <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
+
+// recordStage stores stage and timestamps the ULP vs. secret activity times used
+// by the "ulp + secrets" combined panel label. StageScanning marks secret work;
+// StageExtracting/StageParsing mark credential work; other stages leave the
+// activity clocks untouched so a brief "opening" doesn't erase a fresh window.
+func (p *Progress) recordStage(s *workerSlot, stage WorkerStage) {
+	s.stage.Store(int32(stage))
+	now := time.Now().UnixNano()
+	switch stage {
+	case StageScanning:
+		s.lastSec.Store(now)
+	case StageExtracting, StageParsing:
+		s.lastULP.Store(now)
+	}
+}
+
+// setStage updates only the stage of an already-active worker slot, and records
+// the time of ULP vs. secret activity so the panel can show "ulp + secrets" when
+// one worker is interleaving both on a sequential archive stream.
 func (p *Progress) setStage(idx int, stage WorkerStage) {
 	if s := p.slot(idx); s != nil {
-		s.stage.Store(int32(stage))
+		p.recordStage(s, stage)
 	}
 }
 
@@ -340,11 +480,15 @@ func (p *Progress) setWorkerPath(idx int, path string) {
 	}
 }
 
-// clearActive marks worker idx idle once it finishes its current item.
+// clearActive marks worker idx idle once it finishes its current item. Activity
+// timestamps are reset so a reused slot can't inherit the prior item's "ulp +
+// secrets" window.
 func (p *Progress) clearActive(idx int) {
 	if s := p.slot(idx); s != nil {
 		s.path.Store(nil)
 		s.stage.Store(int32(StageIdle))
+		s.lastULP.Store(0)
+		s.lastSec.Store(0)
 	}
 }
 
@@ -362,10 +506,14 @@ func (p *Progress) ActiveWorkers(max int) []ActiveWorker {
 		if ptr == nil {
 			continue
 		}
+		lastULPnano := p.workers[i].lastULP.Load()
+		lastSecNano := p.workers[i].lastSec.Load()
 		out = append(out, ActiveWorker{
-			Index: i,
-			Path:  *ptr,
-			Stage: WorkerStage(p.workers[i].stage.Load()),
+			Index:   i,
+			Path:    *ptr,
+			Stage:   WorkerStage(p.workers[i].stage.Load()),
+			LastULP: unixNanoTime(lastULPnano),
+			LastSec: unixNanoTime(lastSecNano),
 		})
 		if len(out) >= max {
 			break
@@ -419,6 +567,53 @@ func (p *Progress) addDiscovered() {
 func (p *Progress) setLogsTotal(n int64) {
 	if p != nil {
 		p.logsTotal.Store(n)
+	}
+}
+
+// addSecretFilesTotal credits scan candidates identified as a group: loose
+// files and pre-counted zip/7z members up front, streaming/encrypted members at
+// open. The total leads the scanned count so "X / Y" shows what is left.
+func (p *Progress) addSecretFilesTotal(n int64) {
+	if p != nil && n > 0 {
+		p.secretFilesTotal.Add(n)
+	}
+}
+
+// beginSecretStream marks a non-pre-counted source (rar, encrypted-header 7z,
+// nested archive) as opened: its member count is discovered as it streams, so
+// the "X / Y" denominator is incomplete while it runs. Pairs with
+// endSecretStream; nil-safe.
+func (p *Progress) beginSecretStream() {
+	if p != nil {
+		p.secretStreamsOpen.Add(1)
+	}
+}
+
+// endSecretStream marks a streaming source closed, clearing the "Y+" signal once
+// the last one finishes. nil-safe.
+func (p *Progress) endSecretStream() {
+	if p != nil {
+		p.secretStreamsOpen.Add(-1)
+	}
+}
+
+// SecretStreamsOpen reports the number of in-flight sources whose candidate
+// count is still being discovered. > 0 means the "X / Y" denominator can still
+// grow. nil-safe.
+func (p *Progress) SecretStreamsOpen() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.secretStreamsOpen.Load()
+}
+func (p *Progress) addSecretsFound(n int64) {
+	if p != nil && n > 0 {
+		p.secretsFound.Add(n)
+	}
+}
+func (p *Progress) addSecretFileScanned() {
+	if p != nil {
+		p.secretFilesScanned.Add(1)
 	}
 }
 func (p *Progress) addLogDone() {

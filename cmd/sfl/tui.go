@@ -46,7 +46,6 @@ var (
 	sflAcceptStyle       = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
 	sflCountStyle        = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "51"})
 	sflByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "178", Dark: "222"})
-	sflTimeStyle         = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "162", Dark: "213"})
 	sflMutedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6818F"))
 	sflWarnStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
 	sflLabelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#E8B6C6")).Bold(true)
@@ -56,6 +55,11 @@ var (
 				BorderForeground(lipgloss.Color("#E0B040")).
 				Padding(0, 2)
 	sflEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A242E"))
+
+	// sflDoneFill is the calm sage-green for a completed track's solid bar
+	// (mirrors sfu's solidGreenFill): "done, move on" without dominating the
+	// frame the way the live red gradient would.
+	sflDoneFill = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "65", Dark: "71"})
 
 	// elegant red gradient: muted plum-raspberry -> heart-emoji red (Twemoji ❤️
 	// #DD2E44). Heart red is the main color; the start is a light, close plum so
@@ -351,6 +355,21 @@ func gradientBar(percent float64, width int) string {
 	return b.String()
 }
 
+// sflPendingBar is the indeterminate Secrets bar shown while a streaming source
+// (rar, encrypted-header 7z, nested) is open: the candidate denominator is not
+// final, so any percentage would lie (scanned/total ≈ 1 because total chases
+// scanned member-by-member). It renders an all-empty trough with a muted "----"
+// suffix in place of a number, matching gradientBar's cell width so the two
+// bars stay aligned. The row's "Y+" signal still conveys that the denominator
+// is growing.
+func sflPendingBar(width int) string {
+	if width < barSuffixWidth+2 {
+		width = barSuffixWidth + 2
+	}
+	body := width - barSuffixWidth
+	return sflEmptyStyle.Render(strings.Repeat("░", body)) + sflMutedStyle.Render("   ----")
+}
+
 // stderrFrame is a fixed alt-screen block redrawn in place each tick. Falls
 // back to nothing on a non-TTY so piped runs stay clean. Draw and close are
 // serialized so a force-exit (second Ctrl+C / cleanup timeout) can never
@@ -415,8 +434,8 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 
 	var prevAt time.Time
 	var prevBytes int64
-	var byteRate float64 // instant throughput for the Bytes row
-	var etaRate float64  // slow EMA for ETA (archive bursts skew short windows)
+	var byteRate float64    // instant throughput for the Bytes row
+	var scanFracMax float64 // monotonic clamp for the secret-scan bar (never regress)
 
 	draw := func() {
 		now := time.Now()
@@ -427,16 +446,20 @@ func monitor(done <-chan struct{}, started time.Time, prog *sflog.Progress, sign
 		cur := prog.DoneBytes()
 		if !prevAt.IsZero() {
 			if dt := now.Sub(prevAt).Seconds(); dt >= 0.05 {
-				inst := float64(cur-prevBytes) / dt
-				byteRate = inst
-				// Time-based EMA (see sfs rateEMATau): a fixed alpha per 200ms
-				// tick still swings 5–50m when one archive member finishes between
-				// samples; ~10s tau ignores micro-stalls and single-tick spikes.
-				etaRate = sflRateEMAUpdate(etaRate, inst, dt)
+				byteRate = float64(cur-prevBytes) / dt
 			}
 		}
 		prevAt, prevBytes = now, cur
-		frame.draw(renderProgress(now.Sub(started), prog, byteRate, etaRate, spinnerTick(now), termWidth()))
+		// Freeze the monotonic clamp while a streaming source is open: its
+		// scanned/total ≈ 1 (total chases scanned) would pin scanFracMax at 100%,
+		// hiding the real scan tail that follows once extraction finishes. Resume
+		// tracking only when the denominator is final.
+		if prog.SecretStreamsOpen() == 0 {
+			if sf := prog.ScanFraction(); sf > scanFracMax {
+				scanFracMax = sf
+			}
+		}
+		frame.draw(renderProgress(now.Sub(started), prog, byteRate, scanFracMax, spinnerTick(now), termWidth()))
 	}
 
 	for {
@@ -541,24 +564,12 @@ func frameWithFooter(header string, box []string, width int, footer []string) []
 	return append(out, footer...)
 }
 
-const (
-	sflRateEMATau = 10.0   // seconds, ETA throughput smoothing window
-	sflMinETARate = 1024.0 // B/s floor before ETA is shown (micro-stall guard)
-)
-
-// sflRateEMAUpdate is a time-constant EMA matching cmd/sfs/tui_rates.go.
-func sflRateEMAUpdate(prev, instant, dtSec float64) float64 {
-	if instant <= 0 && prev <= 0 {
-		return 0
-	}
-	if prev <= 0 {
-		return instant
-	}
-	alpha := 1 - math.Exp(-dtSec/sflRateEMATau)
-	return alpha*instant + (1-alpha)*prev
-}
-
-func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, etaRate float64, tick int, width int) []string {
+// renderProgress draws one live frame. scanFrac is the secondary secret-scan
+// bar's value, passed in (not read from prog) so the monitor can clamp it
+// monotonically: the raw scanned/total ratio can dip when a streaming/encrypted
+// archive that could not be pre-counted inflates the total at open, and the
+// user must never see the bar move backwards.
+func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanFrac float64, tick int, width int) []string {
 	inner := boxInner(width)
 	spinner := lineSpinnerFrames[mod(tick, len(lineSpinnerFrames))]
 
@@ -578,12 +589,36 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, etaRa
 		return frame(header, sflGradientBox(body, width, gradStart, gradEnd), width)
 	}
 
+	// Dedicated secrets-flush phase: extraction is done, the store is draining.
+	// A moving spinner + the running found count so the hand-off to the summary
+	// never reads as a frozen 100%.
+	if prog.Phase() == phaseSecretsFinalizeVal {
+		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] FINALIZING SECRETS"), elapsed, width)
+		box := sflGradientBox([]string{
+			recapRow("Secrets", sflUniqueStyle.Render(formatInt(int(prog.SecretsFound())))+sflMutedStyle.Render(" found")),
+			sflMutedStyle.Render("writing to store…"),
+		}, width, gradStart, gradEnd)
+		// Extraction and scanning are both done here (solid green); the moving
+		// spinner in the header carries the "still working" signal while the
+		// store drains, mirroring sfu's completed-phase bars.
+		bw := sflBarBody(width)
+		bars := []string{
+			sflIndent + sflBarLabel("Extract") + sflSolidBar(1.0, bw, sflDoneFill),
+			sflIndent + sflBarLabel("Secrets") + sflSolidBar(1.0, bw, sflDoneFill),
+		}
+		return sflFrameWithBars(header, box, bars, nil, width)
+	}
+
 	scanning := prog.Phase() == phaseDiscoverVal || prog.Total() == 0
 	phase := "EXTRACTING"
 	if prog.Phase() == phaseDoneVal {
 		phase = "COMPLETE"
 	} else if scanning {
 		phase = "SCANNING"
+	} else if prog.SecretsEnabled() && prog.Fraction() >= 1 && scanFrac < 1 {
+		// Bytes are fully read but the CPU-bound secret scan is still draining;
+		// label the tail honestly instead of a misleading "EXTRACTING" at 100%.
+		phase = "SCANNING SECRETS"
 	}
 
 	header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] "+phase), elapsed, width)
@@ -598,29 +633,218 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, etaRa
 				sflMutedStyle.Render(" found"),
 		}
 	} else {
-		bar := gradientBar(prog.Fraction(), inner)
-		body = append([]string{bar}, renderExtractStatsRows(
+		statRows := renderExtractStatsRows(
 			prog.Files(), prog.Archives(),
 			prog.Logs(), prog.LogsTotal(), prog.Emitted(), prog.Duplicates(),
-			prog.DoneBytes(), prog.Total(), byteRate, etaRate,
-		)...)
-		// Surface the concurrent workers: a per-slot panel makes the
-		// parallelism visible even when the byte bar crawls. Falls back to the
-		// single current path when no registry is wired (back-compat).
-		if panel := sflWorkerPanel(prog, inner, tick); len(panel) > 0 {
-			body = append(body, panel...)
-		} else if cur := prog.Current(); cur != "" {
-			body = append(body, sflMutedStyle.Render(truncatePath(cur, inner)))
+			prog.DoneBytes(), prog.Total(), byteRate,
+		)
+		if prog.SecretsEnabled() {
+			// -secrets frame, sfu-style: a stats box (with the live found/scanned
+			// row), the two labeled bars below it, then the worker panel in its
+			// own box under the bars. Both tracks are active gradients since
+			// extraction and secret scanning run in the same pass.
+			boxBody := append(statRows, renderSecretsLiveRow(prog.SecretsFound(), prog.SecretFilesScanned(), prog.SecretFilesTotal(), prog.SecretStreamsOpen() > 0))
+			box := sflGradientBox(boxBody, width, gradStart, gradEnd)
+			// The Secrets bar is indeterminate while any streaming source is
+			// open: its denominator is still growing, so a percentage would lie.
+			bars := renderSflBarPair("Extract", prog.Fraction(), "Secrets", scanFrac, prog.SecretStreamsOpen() > 0, width)
+			return sflFrameWithBars(header, box, bars, sflWorkerPanelBox(prog, width, inner, tick), width)
 		}
+		body = append([]string{gradientBar(prog.Fraction(), inner)}, statRows...)
+		body = appendSflWorkerBlock(body, prog, inner, tick)
 	}
 
 	return frame(header, sflGradientBox(body, width, gradStart, gradEnd), width)
 }
 
+// appendSflWorkerBlock appends the concurrent-worker panel (or the single
+// current-path fallback when no registry is wired) to a frame's box body.
+func appendSflWorkerBlock(body []string, prog *sflog.Progress, inner, tick int) []string {
+	if panel := sflWorkerPanel(prog, inner, tick); len(panel) > 0 {
+		return append(body, panel...)
+	}
+	if cur := prog.Current(); cur != "" {
+		return append(body, sflMutedStyle.Render(truncatePath(cur, inner)))
+	}
+	return body
+}
+
+// sflBarLabelW is the fixed label column for the paired -secrets bars so the
+// two percent suffixes line up under each other (mirrors sfu's progressBarLabel).
+const sflBarLabelW = 9 // "Extract  " / "Secrets  "
+
+func sflBarLabel(name string) string {
+	s := sflLabelStyle.Render(name)
+	if w := lipgloss.Width(s); w < sflBarLabelW {
+		return s + strings.Repeat(" ", sflBarLabelW-w)
+	}
+	return s
+}
+
+// sflBarSpan is the full column width one bar row occupies so it lines up
+// border-to-border with the gradient box drawn above it (box outer = inner+6),
+// exactly as sfu spans its bars across contentWidth.
+func sflBarSpan(width int) int { return boxInner(width) + 6 }
+
+// sflBarBody is the width handed to gradientBar/sflSolidBar once the label
+// column is subtracted from the box span.
+func sflBarBody(width int) int {
+	body := sflBarSpan(width) - sflBarLabelW
+	if body < barSuffixWidth+2 {
+		body = barSuffixWidth + 2
+	}
+	return body
+}
+
+// sflSolidBar is a single-colour completed bar (mirrors sfu's solidBar): the
+// finished track's bar, filled flat rather than with the live gradient.
+func sflSolidBar(percent float64, width int, fillStyle lipgloss.Style) string {
+	if width < barSuffixWidth+2 {
+		width = barSuffixWidth + 2
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 1 {
+		percent = 1
+	}
+	body := width - barSuffixWidth
+	fill := int(math.Round(float64(body) * percent))
+	if fill > body {
+		fill = body
+	}
+	if fill < 0 {
+		fill = 0
+	}
+	full := fillStyle.Render(strings.Repeat("█", fill))
+	empty := sflEmptyStyle.Render(strings.Repeat("░", body-fill))
+	return full + empty + sflMutedStyle.Render(fmt.Sprintf(" %5.1f%%", percent*100))
+}
+
+// renderSflBarPair builds the two labeled bar rows placed below the stats box on
+// a -secrets run, mirroring sfu's parsing/dedup pair: an indented label column
+// then the bar spanning the box width. Both tracks are active gradients here
+// (extraction bytes + secret-scan coverage run concurrently, like sfu's fast
+// path); the finalize frame swaps the extract bar for a solid completed one.
+func renderSflBarPair(l1 string, p1 float64, l2 string, p2 float64, p2pending bool, width int) []string {
+	body := sflBarBody(width)
+	second := gradientBar(p2, body)
+	if p2pending {
+		// Secrets denominator is not final (a streaming source is open): show
+		// an indeterminate trough instead of a misleading percentage.
+		second = sflPendingBar(body)
+	}
+	return []string{
+		sflIndent + sflBarLabel(l1) + gradientBar(p1, body),
+		sflIndent + sflBarLabel(l2) + second,
+	}
+}
+
+// sflFrameWithBars lays out a -secrets frame the way sfu stacks its progress
+// bars: the stats box, then each labeled bar on its own line separated by a
+// blank row, then (when non-empty) the worker panel in its own box, then the
+// footer. panel is nil for the finalize frame, which has no live workers.
+func sflFrameWithBars(header string, box, bars, panel []string, width int) []string {
+	out := []string{"", header, ""}
+	out = append(out, box...)
+	for _, b := range bars {
+		out = append(out, "", b)
+	}
+	if len(panel) > 0 {
+		out = append(out, "")
+		out = append(out, panel...)
+	}
+	return append(out, footerLines(width)...)
+}
+
+// sflSecretsFrameOverhead is every non-worker-row line in the two-bar -secrets
+// frame: top margin + header + blank (3), the stats box (2 borders + 5 stat
+// rows + the Secrets row = 8), the two bar rows each with a blank separator (4),
+// the worker box's blank separator + 2 borders + "N workers" header (4), and the
+// footer (3). The worker panel is padded to a fixed height that fits under this
+// so the footer keeps a constant screen row instead of being pushed off (and
+// redrawn) as the busy-worker count changes — the -secrets footer-flicker fix.
+const sflSecretsFrameOverhead = 22
+
+// sflSecretsWorkerRows is the fixed worker-row count for the -secrets frame: as
+// many as fit beneath the frame overhead, capped at sflMaxWorkerRows and the
+// worker count, so the total frame height stays constant tick-to-tick. Returns 0
+// when the terminal is too short for even one row, so the panel is dropped and
+// the footer still shows.
+func sflSecretsWorkerRows(termH, totalWorkers int) int {
+	if totalWorkers <= 0 {
+		return 0
+	}
+	rows := termH - 1 - sflSecretsFrameOverhead
+	if rows > sflMaxWorkerRows {
+		rows = sflMaxWorkerRows
+	}
+	if rows > totalWorkers {
+		rows = totalWorkers
+	}
+	if rows < 0 {
+		rows = 0
+	}
+	return rows
+}
+
+// sflWorkerPanelBox renders the concurrent-worker panel as its own gradient box
+// below the -secrets bars (mirroring how sfu stacks its worker frame under the
+// progress bars). It is drawn at a FIXED height — a reserved header row plus a
+// constant number of worker rows padded with blanks — so the box, and the footer
+// beneath it, never move as workers start and finish. Returns nil only when the
+// terminal is too short to fit any worker row.
+func sflWorkerPanelBox(prog *sflog.Progress, width, inner, tick int) []string {
+	rows := sflSecretsWorkerRows(termHeight(), prog.WorkerCount())
+	if rows <= 0 {
+		return nil
+	}
+	active := prog.ActiveWorkers(rows)
+	idxMarkerW := lipgloss.Width(fmt.Sprintf("[%d]", prog.WorkerCount()))
+	// Reserve the header row always (blank when <2 busy) so the box top never
+	// toggles height; then the active rows, then blank padding to a constant
+	// total of rows+1 body lines.
+	body := make([]string, 0, rows+1)
+	if len(active) >= 2 {
+		body = append(body, sflLabelStyle.Render(fmt.Sprintf("%d workers active", len(active))))
+	} else {
+		body = append(body, "")
+	}
+	for _, w := range active {
+		body = append(body, renderSflWorkerRow(w, inner, idxMarkerW, tick))
+	}
+	for len(body) < rows+1 {
+		body = append(body, "")
+	}
+	return sflGradientBox(body, width, gradStart, gradEnd)
+}
+
+// renderSecretsLiveRow is the live "Secrets" counter row: how many secrets have
+// been found, and how many files have been scanned out of the candidates known
+// so far (X / Y, Y growing as archives open) so the user sees what is left.
+// streaming is true while any non-pre-counted source (rar, encrypted-header 7z,
+// nested) is still open; in that state Y is not final, so a "+" is appended
+// ("Y+") to signal the denominator is still growing instead of presenting a
+// misleadingly complete total.
+func renderSecretsLiveRow(found, scanned, total int64, streaming bool) string {
+	scannedTxt := sflCountStyle.Render(formatInt(int(scanned)))
+	if total > 0 {
+		scannedTxt += sflMutedStyle.Render(" / " + formatInt(int(total)))
+		if streaming {
+			scannedTxt += sflMutedStyle.Render("+")
+		}
+	}
+	return recapRow("Secrets", sflUniqueStyle.Render(formatInt(int(found)))+
+		sflMutedStyle.Render(" found  ·  ")+scannedTxt+
+		sflMutedStyle.Render(" files scanned"))
+}
+
 // renderExtractStatsRows is the labeled live-stats block during extraction.
-// One metric group per row mirrors recapCountRows so large counts and ETA never
-// compete for width inside the box.
-func renderExtractStatsRows(files, archives, logs, logsTotal, emitted, dupes, doneBytes, totalBytes int64, byteRate, etaRate float64) []string {
+// One metric group per row mirrors recapCountRows so large counts never compete
+// for width inside the box. ETA was removed: archive bursts and the secret-scan
+// tail made remaining/rate too inconsistent to be honest, so the row is gone
+// along with its per-tick EMA computation.
+func renderExtractStatsRows(files, archives, logs, logsTotal, emitted, dupes, doneBytes, totalBytes int64, byteRate float64) []string {
 	return []string{
 		recapRow("Logs", sflCountStyle.Render(formatInt(int(logs)))+
 			sflMutedStyle.Render(" / "+formatInt(int(logsTotal)))),
@@ -633,7 +857,6 @@ func renderExtractStatsRows(files, archives, logs, logsTotal, emitted, dupes, do
 		recapRow("Bytes", sflByteStyle.Render(formatBytes(doneBytes))+
 			sflMutedStyle.Render(" / "+formatBytes(totalBytes)+"  ·  ")+
 			sflByteStyle.Render(formatBytes(int64(byteRate))+"/s")),
-		recapRow("ETA", formatETADisplayStyled(totalBytes-doneBytes, etaRate)),
 	}
 }
 
@@ -863,19 +1086,64 @@ func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner, tick int) [
 	return out
 }
 
+// sflBothRecentWindow is how recently a slot must have done both ULP and secret
+// work to be labeled "ulp + secrets" — wide enough to survive the ~200ms redraw
+// cadence and the per-member alternation of a sequential archive reader, narrow
+// enough that a worker that has moved on to only one activity reverts to its
+// single-activity label within a couple seconds.
+const sflBothRecentWindow = 2 * time.Second
+
+// sflWorkerStageLabel renders the panel label for one worker, collapsing to
+// "ulp + secrets" when the slot has both pulled ULPs and scanned secrets within
+// sflBothRecentWindow — the "this archive is doing both right now" case on
+// sequential RAR/7z streams where credential and secret members interleave.
+// Otherwise it falls back to the per-stage label. Width fits sflStageColW
+// ("ulp + secrets" is 13 cells, under the 16-cell column).
+func sflWorkerStageLabel(w sflog.ActiveWorker) string {
+	now := time.Now()
+	if !w.LastULP.IsZero() && !w.LastSec.IsZero() &&
+		now.Sub(w.LastULP) <= sflBothRecentWindow && now.Sub(w.LastSec) <= sflBothRecentWindow {
+		return "ulp + secrets"
+	}
+	return sflStageLabel(w.Stage)
+}
+
+// sflStageLabel maps a worker stage to its user-facing panel label. It widens
+// the short canonical names from WorkerStage.String() so the panel reads as
+// intent rather than a bare verb: the credential/secret actions name what they
+// operate on ("extracting ulps", "parsing ulps", "scanning secrets"), while the
+// archive-prep actions stay short ("opening", "testing password"). Every label
+// fits the fixed sflStageColW (16) column — "scanning secrets" and "testing
+// password" are the widest at exactly 16 — so paths still align without a width
+// change. The canonical String() in sflog is left intact for debug logs/tests.
+func sflStageLabel(s sflog.WorkerStage) string {
+	switch s {
+	case sflog.StageOpening:
+		return "opening"
+	case sflog.StageTestingPassword:
+		return "testing password"
+	case sflog.StageExtracting:
+		return "extracting ulps"
+	case sflog.StageParsing:
+		return "parsing ulps"
+	case sflog.StageScanning:
+		return "scanning secrets"
+	default:
+		return "working"
+	}
+}
+
 // renderSflWorkerRow is one panel line: "[i] ⠹ <stage>  <path>". A braille
 // spinner (phase-shifted by worker index for a gentle cascade) sits between the
 // marker and the fixed-width stage column so paths still align; the path is
-// truncated to fit.
+// truncated to fit. The stage label is the explicit TUI form, collapsed to
+// "ulp + secrets" via sflWorkerStageLabel when the slot is doing both.
 func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW, tick int) string {
 	marker := fmt.Sprintf("[%d]", w.Index+1)
 	if pad := idxMarkerW - lipgloss.Width(marker); pad > 0 {
 		marker += strings.Repeat(" ", pad)
 	}
-	stage := w.Stage.String()
-	if stage == "" {
-		stage = "working"
-	}
+	stage := sflWorkerStageLabel(w)
 	if pad := sflStageColW - lipgloss.Width(stage); pad > 0 {
 		stage += strings.Repeat(" ", pad)
 	}
@@ -936,9 +1204,10 @@ func renderCleanupLogAbove(lines []string, width int) []string {
 }
 
 const (
-	phaseDiscoverVal = 0 // mirrors sflog phaseDiscover
-	phaseIngestVal   = 2 // mirrors sflog phaseIngest
-	phaseDoneVal     = 3 // mirrors sflog phaseDone
+	phaseDiscoverVal        = 0 // mirrors sflog phaseDiscover
+	phaseIngestVal          = 2 // mirrors sflog phaseIngest
+	phaseDoneVal            = 3 // mirrors sflog phaseDone
+	phaseSecretsFinalizeVal = 4 // mirrors sflog phaseSecretsFinalize
 )
 
 // sflRecapLabelW is the label column width so recap values line up in a clean
@@ -1120,8 +1389,12 @@ func renderSecretsBlock(stats secrets.Stats, dbPath string, width int) []string 
 	}
 	body := []string{
 		recapRow("Secrets", value),
-		recapRow("Store", sflMutedStyle.Render(dbPath)),
 	}
+	if stats.Deduped > 0 {
+		body = append(body, recapRow("Skipped", sflCountStyle.Render(formatInt(int(stats.Deduped)))+
+			sflMutedStyle.Render(" duplicate files (already scanned)")))
+	}
+	body = append(body, recapRow("Store", sflMutedStyle.Render(dbPath)))
 	return append([]string{""}, sflGradientBox(body, width, gradStart, gradEnd)...)
 }
 
@@ -1216,47 +1489,6 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 	}
 	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
-}
-
-// etaDuration returns a remaining-time estimate when it would be meaningful:
-// not near-complete (rem<=0), not stalled (rate<=1 B/s), not sub-second, and
-// not an absurd horizon (>=99h) from an early near-zero rate.
-func etaDuration(remaining int64, rate float64) (time.Duration, bool) {
-	if remaining <= 0 || rate < sflMinETARate {
-		return 0, false
-	}
-	secs := float64(remaining) / rate
-	if secs < 1 || secs >= 99*3600 {
-		return 0, false
-	}
-	return time.Duration(secs * float64(time.Second)), true
-}
-
-// formatETADisplayStyled renders ETA for the labeled stats row with timeStyle
-// when known, em dash when hidden.
-func formatETADisplayStyled(remaining int64, rate float64) string {
-	if d, ok := etaDuration(remaining, rate); ok {
-		return sflTimeStyle.Render(formatDuration(d))
-	}
-	return sflMutedStyle.Render("—")
-}
-
-// formatETADisplay renders an ETA duration for the labeled stats row, or "—"
-// when an estimate would mislead (mirrors sfs's always-present ETA row).
-func formatETADisplay(remaining int64, rate float64) string {
-	if d, ok := etaDuration(remaining, rate); ok {
-		return formatDuration(d)
-	}
-	return "—"
-}
-
-// formatETA renders a muted "  ·  ETA <d>" suffix for legacy single-line layouts,
-// or "" when an estimate would mislead.
-func formatETA(remaining int64, rate float64) string {
-	if d, ok := etaDuration(remaining, rate); ok {
-		return "  ·  ETA " + formatDuration(d)
-	}
-	return ""
 }
 
 func formatBytes(n int64) string {

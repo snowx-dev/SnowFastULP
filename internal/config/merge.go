@@ -33,6 +33,18 @@ func (v Visited) ResolveIntAlias(canonical, alias *int, canonicalName, aliasName
 	v[canonicalName] = true
 }
 
+// ResolveStringAlias is the string counterpart of ResolveIntAlias, used for the
+// -secrets-path / -sec-path pair. Same precedence: an explicit canonical wins;
+// when only the alias was set its value is copied into the canonical pointer
+// and the canonical is marked visited so it beats a config-file value.
+func (v Visited) ResolveStringAlias(canonical, alias *string, canonicalName, aliasName string) {
+	if v.set(canonicalName) || !v.set(aliasName) {
+		return
+	}
+	*canonical = *alias
+	v[canonicalName] = true
+}
+
 // SFUFlags holds pointers to sfu flag variables for config merge.
 type SFUFlags struct {
 	O, OD, TempDir          *string
@@ -118,6 +130,8 @@ type SFSFlags struct {
 	MaxHitsPerChunk *int
 	Limit           *int
 	Since           *string
+	Sec             *bool
+	SecretsPath     *string
 }
 
 // ApplySFS applies unvisited config values to sfs flags.
@@ -158,6 +172,16 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	}
 	if !v.set("since") && f.SFS.Since != "" {
 		*fl.Since = f.SFS.Since
+	}
+	if !v.set("sec") && f.SFS.Sec && fl.Sec != nil {
+		*fl.Sec = true
+	}
+	if !v.set("secrets-path") && f.SFS.SecretsPath != "" && fl.SecretsPath != nil {
+		p, err := ResolvePath(f.baseDir, f.SFS.SecretsPath)
+		if err != nil {
+			return err
+		}
+		*fl.SecretsPath = p
 	}
 	return nil
 }

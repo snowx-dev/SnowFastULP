@@ -78,6 +78,9 @@ type workKind int
 const (
 	kindFile workKind = iota
 	kindArchive
+	// kindSecretScan is a loose non-credential file discovered under -secrets:
+	// it is read (capped) into the secret scanner only, never ULP-parsed.
+	kindSecretScan
 )
 
 // assemblyKind tells processArchive how a multi-part archive item's volumes
@@ -104,6 +107,12 @@ type workItem struct {
 	// .part2.rar with no .part1.rar, or an incomplete .zip.NNN set); it is
 	// reported as a skip rather than opened.
 	missingFirstVolume bool
+	// secretsPrecounted marks a single-file zip/7z whose scan-candidate members
+	// were counted at discovery (their total already seeded into the "X / Y"
+	// row). The reader then skips crediting them again at open. Streaming /
+	// encrypted archives that could not be pre-counted leave this false and are
+	// credited at open instead.
+	secretsPrecounted bool
 }
 
 // accum holds the concurrent-safe counters and result/issue lists shared by the
@@ -118,6 +127,10 @@ type accum struct {
 	openErrors       atomic.Int64
 	noULP            atomic.Int64
 	missingVolumes   atomic.Int64
+	// secretFiles counts loose non-credential files scanned for secrets under
+	// -secrets. Kept separate from filesScanned/noULP so those stay
+	// credential-accurate (a scanned .env with no ULP isn't a "no ULP" issue).
+	secretFiles atomic.Int64
 
 	mu      sync.Mutex
 	issues  []Issue
@@ -179,29 +192,48 @@ func (a *accum) snapshotResults() []SourceResult {
 // writes deduplicated ULP lines to w. It returns aggregate stats and per-source
 // results (used by callers to decide -del eligibility).
 func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractStats, []SourceResult, error) {
-	items, err := buildWorklist(input, e.Progress)
+	// scanExtra widens discovery to arbitrary loose files (routed to the secret
+	// scanner) only when a sink is wired; secretCap bounds the progress weight
+	// we assign each such file, since only a capped prefix is ever read.
+	scanExtra := e.SecretSink != nil
+	secretCap := e.SecretMaxLen
+	if secretCap <= 0 {
+		secretCap = defaultSecretMaxLen
+	}
+	items, err := buildWorklist(input, scanExtra, secretCap, e.Progress)
 	if err != nil {
 		return ExtractStats{}, nil, err
 	}
 	var total int64
-	var nFiles, nArchives int
+	var nFiles, nArchives, nSecrets int
 	logRemaining := make(map[string]int, len(items))
 	for _, it := range items {
 		total += it.weight
 		logRemaining[it.logKey]++
-		if it.kind == kindArchive {
+		switch it.kind {
+		case kindArchive:
 			nArchives++
-		} else {
+		case kindSecretScan:
+			nSecrets++
+		default:
 			nFiles++
 		}
 	}
 	if e.Debug != nil {
-		e.Debug("discovered %d source(s): %d file(s), %d archive(s), %d log unit(s), %d byte(s)",
-			len(items), nFiles, nArchives, len(logRemaining), total)
+		e.Debug("discovered %d source(s): %d file(s), %d archive(s), %d secret-scan file(s), %d log unit(s), %d byte(s)",
+			len(items), nFiles, nArchives, nSecrets, len(logRemaining), total)
 	}
 	if e.Progress != nil {
 		e.Progress.setTotal(total)
 		e.Progress.setLogsTotal(int64(len(logRemaining)))
+		if e.SecretSink != nil {
+			e.Progress.EnableSecrets()
+			// Seed the "X / Y files" total with the loose candidates known now:
+			// every loose file is scanned (kindFile re-opened after its ULP pass,
+			// kindSecretScan read straight into the sink). Archive members are
+			// added to the total later, as each archive opens.
+			e.Progress.addSecretFilesTotal(int64(nFiles + nSecrets))
+		}
 		e.Progress.setPhase(phaseExtract)
 	}
 
@@ -218,6 +250,42 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	// occupancy; production always allocates it here.
 	if e.extractSem == nil {
 		e.extractSem = make(chan struct{}, workers)
+	}
+
+	// Pre-count single-file zip/7z scan candidates from their central directories
+	// (no content decompression) so the -secrets "X / Y" total is known before
+	// scanning starts and the scan bar climbs from a fixed denominator instead of
+	// lurching each time a late archive inflates it. Fanned across the extraction
+	// budget so a set with many archives doesn't serialize startup. Each
+	// pre-counted item is marked so its reader won't credit the same members
+	// again at open; rar / encrypted-header 7z / decode failures return ok=false
+	// and fall back to open-time crediting, smoothed by the TUI's display clamp.
+	if e.Progress != nil && e.SecretSink != nil {
+		var idx []int
+		for i := range items {
+			if items[i].kind == kindArchive && items[i].assembly == assemblySingle && !items[i].missingFirstVolume {
+				idx = append(idx, i)
+			}
+		}
+		if len(idx) > 0 {
+			counts := make([]int64, len(idx))
+			oks := make([]bool, len(idx))
+			boundedForEach(ctx, e.extractSem, len(idx), func(k int) {
+				if ctx.Err() != nil {
+					return
+				}
+				n, ok := precountScanCandidates(items[idx[k]].path, e.Passwords)
+				counts[k], oks[k] = int64(n), ok
+			})
+			var extra int64
+			for k := range idx {
+				if oks[k] {
+					items[idx[k]].secretsPrecounted = true
+					extra += counts[k]
+				}
+			}
+			e.Progress.addSecretFilesTotal(extra)
+		}
 	}
 
 	// runCtx lets the writer abort the workers: if the output write fails, the
@@ -260,7 +328,19 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 				// and password probes get their own rows in the panel.
 				e.extractSem <- struct{}{}
 				slot := e.Progress.acquireSlot()
+				// Non-pre-counted sources (rar, encrypted-header 7z, nested) discover
+				// their scan-candidate members as they stream, so their "X / Y"
+				// denominator is incomplete while they run. Mark the stream open for
+				// the TUI's "Y+" signal. Pre-counted zip/7z and loose files already
+				// seeded Y, so they don't need it.
+				streaming := e.SecretSink != nil && !it.secretsPrecounted
+				if streaming {
+					e.Progress.beginSecretStream()
+				}
 				e.process(runCtx, slot, it, lines, &acc)
+				if streaming {
+					e.Progress.endSecretStream()
+				}
 				e.Progress.releaseSlot(slot)
 				<-e.extractSem
 			}
@@ -298,6 +378,7 @@ feed:
 		OpenErrors:       int(acc.openErrors.Load()),
 		NoULP:            int(acc.noULP.Load()),
 		MissingVolumes:   int(acc.missingVolumes.Load()),
+		SecretFiles:      int(acc.secretFiles.Load()),
 		Issues:           acc.issues,
 	}
 	results := acc.snapshotResults()
@@ -320,6 +401,8 @@ func (e *Engine) process(ctx context.Context, idx int, it workItem, lines chan<-
 	switch it.kind {
 	case kindArchive:
 		e.processArchive(ctx, idx, it, lines, acc)
+	case kindSecretScan:
+		e.processSecretFile(ctx, idx, it, acc)
 	default:
 		e.processFile(ctx, idx, it, lines, acc)
 	}
@@ -368,7 +451,10 @@ func (e *Engine) processFile(ctx context.Context, idx int, it workItem, lines ch
 	// stream, so re-open. Best-effort: a re-open failure never fails the file.
 	if e.SecretSink != nil {
 		if sf, oerr := os.Open(it.path); oerr == nil {
-			ec := extractCtx{secrets: e.SecretSink, secretMaxLen: e.SecretMaxLen}
+			if e.Progress != nil {
+				e.Progress.setStage(idx, StageScanning)
+			}
+			ec := extractCtx{secrets: e.SecretSink, secretMaxLen: e.SecretMaxLen, p: e.Progress}
 			ec.scanSecrets(ctx, sf, it.path)
 			sf.Close()
 		}
@@ -383,6 +469,43 @@ func (e *Engine) processFile(ctx context.Context, idx int, it workItem, lines ch
 	acc.addResult(it.path, false, true, false)
 	if e.Debug != nil && len(creds) > 0 {
 		e.Debug("file %s: %d credentials", it.path, len(creds))
+	}
+}
+
+// processSecretFile handles a loose non-credential file discovered under
+// -secrets (kindSecretScan). It reads only a capped prefix straight into the
+// secret sink and never ULP-parses: these aren't stealer dumps, and fully
+// reading a large binary just to hash-scan it would waste I/O. It emits no
+// credentials and counts toward its own stat so filesScanned/noULP stay
+// credential-accurate. Best-effort throughout: an open failure is recorded as a
+// skip but never fails the run.
+func (e *Engine) processSecretFile(ctx context.Context, idx int, it workItem, acc *accum) {
+	acc.secretFiles.Add(1)
+	if e.Progress != nil {
+		e.Progress.setStage(idx, StageScanning)
+	}
+	cr := newCreditor(e.Progress, it.weight, 1)
+	defer cr.finish()
+
+	f, err := os.Open(it.path)
+	if err != nil {
+		acc.skippedFiles.Add(1)
+		acc.openErrors.Add(1)
+		acc.addIssue(it.path, IssueOpenError, err)
+		acc.addResult(it.path, false, false, false)
+		if e.Debug != nil {
+			e.Debug("secret file %s: open error: %v", it.path, err)
+		}
+		return
+	}
+	unreg := registerAbort(ctx, f)
+	ec := extractCtx{secrets: e.SecretSink, secretMaxLen: e.SecretMaxLen, p: e.Progress}
+	ec.scanSecrets(ctx, countingReader{r: f, c: cr}, it.path)
+	f.Close()
+	unreg()
+	acc.addResult(it.path, false, true, false)
+	if e.Debug != nil {
+		e.Debug("secret file %s: scanned", it.path)
 	}
 }
 
@@ -441,19 +564,20 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		}
 	}
 	ec := extractCtx{
-		passwords:    e.Passwords,
-		tempDir:      e.TempDir,
-		display:      it.path,
-		emit:         emit,
-		onIssue:      onIssue,
-		p:            e.Progress,
-		setStage:     func(s WorkerStage) { e.Progress.setStage(idx, s) },
-		setItem:      func(label string) { e.Progress.setWorkerPath(idx, label) },
-		debug:        e.Debug,
-		sem:          e.extractSem,
-		processor:    defaultProcessor,
-		secrets:      e.SecretSink,
-		secretMaxLen: e.SecretMaxLen,
+		passwords:         e.Passwords,
+		tempDir:           e.TempDir,
+		display:           it.path,
+		emit:              emit,
+		onIssue:           onIssue,
+		p:                 e.Progress,
+		setStage:          func(s WorkerStage) { e.Progress.setStage(idx, s) },
+		setItem:           func(label string) { e.Progress.setWorkerPath(idx, label) },
+		debug:             e.Debug,
+		sem:               e.extractSem,
+		processor:         defaultProcessor,
+		secrets:           e.SecretSink,
+		secretMaxLen:      e.SecretMaxLen,
+		secretsPrecounted: it.secretsPrecounted,
 	}
 	// One heartbeat throttle per top-level item, shared across the whole
 	// recursion. Set here (not just in readArchiveCredentials) so the
@@ -562,17 +686,23 @@ func runWriter(lines <-chan string, w io.Writer, p *Progress, keyOf func(string)
 // buildWorklist scans input once, assigning each source its on-disk weight and
 // log-group key. Progress is credited per discovered source so the SCANNING
 // phase shows live motion instead of a frozen 0%.
-func buildWorklist(input string, prog *Progress) ([]workItem, error) {
+// scanExtra widens discovery to arbitrary loose files (enqueued as
+// kindSecretScan); secretCap bounds the weight assigned to each such file since
+// only a capped prefix is ever read. Both are inert when scanExtra is false.
+func buildWorklist(input string, scanExtra bool, secretCap int64, prog *Progress) ([]workItem, error) {
 	absRoot, rootIsDir, err := rootMeta(input)
 	if err != nil {
 		return nil, err
 	}
-	var filesP, archivesP []string
-	err = walkSources(input, func(path string, isArchive bool) {
-		if isArchive {
+	var filesP, archivesP, secretP []string
+	err = walkSources(input, scanExtra, func(path string, kind sourceKind) {
+		switch kind {
+		case sourceArchive:
 			archivesP = append(archivesP, path)
-		} else {
+		case sourcePassword:
 			filesP = append(filesP, path)
+		default: // sourceOther
+			secretP = append(secretP, path)
 		}
 		prog.addDiscovered()
 	})
@@ -590,14 +720,29 @@ func buildWorklist(input string, prog *Progress) ([]workItem, error) {
 	}
 	sort.Strings(filesP)
 	sort.Strings(archivesP)
+	sort.Strings(secretP)
 
-	items := make([]workItem, 0, len(filesP)+len(archivesP))
+	items := make([]workItem, 0, len(filesP)+len(archivesP)+len(secretP))
 	for _, f := range filesP {
 		items = append(items, workItem{path: f, kind: kindFile, weight: fileWeight(f), logKey: logGroupKey(absRoot, rootIsDir, f)})
+	}
+	for _, f := range secretP {
+		items = append(items, workItem{path: f, kind: kindSecretScan, weight: cappedWeight(f, secretCap), logKey: logGroupKey(absRoot, rootIsDir, f)})
 	}
 	keyOf := func(a string) string { return logGroupKey(absRoot, rootIsDir, a) }
 	items = append(items, groupArchiveVolumes(archivesP, fileWeight, keyOf)...)
 	return items, nil
+}
+
+// cappedWeight is fileWeight bounded by cap (bar pacing only): a kindSecretScan
+// file is read only up to the secret cap, so a multi-GB binary shouldn't inflate
+// the progress total by its full on-disk size.
+func cappedWeight(path string, cap int64) int64 {
+	w := fileWeight(path)
+	if cap > 0 && w > cap {
+		return cap
+	}
+	return w
 }
 
 func rootMeta(input string) (absRoot string, isDir bool, err error) {

@@ -39,8 +39,8 @@ func renderHelp(bin string) string {
 	nerds := []argDef{
 		{"-workers", "N", "Set parser/archive worker count."},
 		{"-temp-dir", "PATH", "Store temp files in this folder."},
-		{"-secrets", "", "Scan non-credential files for secrets (API keys, tokens) into a sqlite store."},
-		{"-secrets-path", "PATH", "Where to store the secrets DB (default: <output>/sfl-secrets.sqlite)."},
+		{"-secrets", "", "Scan common secret-bearing files (env, config, keys, docs, source) for secrets (API keys, tokens) into a sqlite store. Requires a `-tags secrets` build."},
+		{"-secrets-path", "PATH", "Where to store the secrets DB (default: <output>/sfl-secrets.sqlite). -sec-path is an alias."},
 		{"-del", "", "Delete source archives/files after a successful run."},
 	}
 	devs := []argDef{

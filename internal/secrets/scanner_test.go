@@ -1,3 +1,5 @@
+//go:build secrets
+
 package secrets
 
 import (

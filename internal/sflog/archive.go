@@ -191,6 +191,12 @@ type extractCtx struct {
 	// Copied across recursion so nested members are scanned too.
 	secrets      SecretSink
 	secretMaxLen int64
+	// secretsPrecounted is true when this archive's scan candidates were counted
+	// at discovery and already added to the "X / Y" total, so the reader must not
+	// credit them again at open. Reset to false on recursion: nested members are
+	// never pre-counted (that would mean decompressing at discovery), so they are
+	// credited at open like any streaming source.
+	secretsPrecounted bool
 }
 
 // stage publishes s to the worker slot if a stage sink is wired (no-op for
@@ -362,6 +368,61 @@ func readArchiveCredentials(ctx context.Context, diskPath string, ec extractCtx,
 	}
 }
 
+// precountScanCandidates counts a single-file zip/7z's secret-scan candidate
+// members from its central directory (no content decompression), so the
+// -secrets "X / Y" total can be seeded before scanning starts and the scan bar
+// climbs from a known denominator instead of lurching when a late archive
+// inflates it. ok is false when the count can't be known cheaply — rar (and any
+// other streaming format), an encrypted-header 7z, or an open error — in which
+// case those members are credited at open and smoothed by the display clamp. A
+// decoy whose bytes don't match a real archive counts as zero (ok true):
+// extraction skips it too. The empty password is tried first so unencrypted 7z
+// headers (the common case) cost a single open.
+func precountScanCandidates(diskPath string, passwords []string) (int, bool) {
+	ext := strings.ToLower(filepath.Ext(diskPath))
+	if ok, err := archiveSignatureOK(diskPath, ext); err != nil {
+		return 0, false
+	} else if !ok {
+		return 0, true // decoy: not a real archive, extraction scans nothing
+	}
+	isCandidate := func(name string, isDir bool) bool {
+		return !isDir && !isArchiveFile(name) && !isPasswordFile(name) && isSecretScanCandidate(name)
+	}
+	switch ext {
+	case ".zip":
+		zr, err := zipenc.OpenReader(diskPath)
+		if err != nil {
+			return 0, false
+		}
+		defer zr.Close()
+		n := 0
+		for _, f := range zr.File {
+			if isCandidate(f.Name, f.FileInfo().IsDir()) {
+				n++
+			}
+		}
+		return n, true
+	case ".7z":
+		for _, pw := range append([]string{""}, passwords...) {
+			zr, err := sevenzip.OpenReaderWithPassword(diskPath, pw)
+			if err != nil {
+				continue
+			}
+			n := 0
+			for _, f := range zr.File {
+				if isCandidate(f.Name, f.FileInfo().IsDir()) {
+					n++
+				}
+			}
+			zr.Close()
+			return n, true
+		}
+		return 0, false
+	default:
+		return 0, false // rar / other: streaming; credited at open instead
+	}
+}
+
 // scaleFor maps the uncompressed bytes we will read onto the archive's on-disk
 // weight so within-archive progress sums to exactly weight.
 func scaleFor(weight, uncompressed int64) float64 {
@@ -420,6 +481,9 @@ func recurseNested(ctx context.Context, ec extractCtx, open func() (io.ReadClose
 	child := ec
 	child.depth++
 	child.display = display
+	// Nested members were not pre-counted (that would mean decompressing at
+	// discovery), so let this level credit its scan candidates at open.
+	child.secretsPrecounted = false
 	// Re-point the live worker line at the nested archive while it is worked,
 	// then restore this level's label (and its extracting stage) once it
 	// returns so the line never reads as the parent "testing password".
@@ -472,11 +536,11 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 			nestedFiles = append(nestedFiles, f)
 		case isPasswordFile(f.Name):
 			credFiles = append(credFiles, f)
-		case ec.secrets != nil:
-			// Members the credential path skips are where secrets live. Collect
-			// them for a size-capped side scan; let them drive password
-			// resolution (so a secrets-only archive still decrypts) but keep
-			// them out of the byte scale, since they're read capped, not whole.
+		case ec.secrets != nil && isSecretScanCandidate(f.Name):
+			// Allowlisted members the credential path skips are where secrets
+			// live. Collect them for a size-capped side scan; let them drive
+			// password resolution (so a secrets-only archive still decrypts) but
+			// keep them out of the byte scale, since they're read capped, not whole.
 			otherFiles = append(otherFiles, f)
 			if f.IsEncrypted() && (probe == nil || f.UncompressedSize64 < probe.UncompressedSize64) {
 				probe = f
@@ -523,8 +587,10 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		// Surface the fan-out on the worker line: the byte bar carries the
 		// motion, but the single panel row would otherwise read as one static
 		// archive while every core is busy on its members. The member tasks
-		// drop their item sink, so this label stands for the whole parallel run.
-		ec.item(fmt.Sprintf("%s  ·  %d members in parallel", filepath.Base(ec.display), n))
+		// drop their item sink, so this label stands for the whole parallel run
+		// and is decremented per chunk from readZipMembersParallel as members
+		// complete.
+		ec.item(fmt.Sprintf("%s  ·  %d members left", filepath.Base(ec.display), n))
 		// Lend the owning worker's extraction slot to the member pool while it
 		// is parked here, then reclaim it before returning to the worker loop
 		// (which releases it). This keeps total in-flight extraction bounded by
@@ -579,26 +645,70 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 	return scan, nil
 }
 
+// scanMembersParallel scans n archive members for secrets. open(i) yields the
+// member's reader and provenance, or ok=false to skip (open/decrypt failure).
+// At the top level it fans the (CPU-bound) Titus scans out across the extraction
+// budget so one archive's members aren't scanned one-at-a-time on a single core
+// — the fix for the minutes-long serial scan tail. It lends the owning worker's
+// slot to the pool while parked (exactly as readZipFiles does for its member
+// pool), so total in-flight work stays bounded by the worker count and it can
+// never oversubscribe or deadlock at workers=1. Nested members (depth>0), a lone
+// member, or a run with no budget stay sequential. No-op without a sink.
+func scanMembersParallel(ctx context.Context, ec extractCtx, n int, open func(i int) (io.ReadCloser, string, bool)) {
+	if n <= 0 || ec.secrets == nil {
+		return
+	}
+	scanOne := func(i int) {
+		if ctx.Err() != nil {
+			return
+		}
+		rc, prov, ok := open(i)
+		if !ok {
+			// Counted in the "X / Y" total at discovery/open but can't be read;
+			// credit it as scanned so a member that fails to decrypt doesn't
+			// leave the bar permanently short of 100%.
+			ec.p.addSecretFileScanned()
+			return
+		}
+		ec.scanSecrets(ctx, rc, prov)
+		rc.Close()
+	}
+	if ec.depth != 0 || ec.sem == nil || n == 1 {
+		for i := 0; i < n; i++ {
+			if ctx.Err() != nil {
+				return
+			}
+			scanOne(i)
+		}
+		return
+	}
+	<-ec.sem
+	boundedForEach(ctx, ec.sem, n, scanOne)
+	ec.sem <- struct{}{}
+}
+
 // scanOtherZipMembers feeds the archive's non-credential, non-archive members
 // (the ones the credential path skips) to the secret sink. Best-effort: a
 // member that fails to open or decrypt is skipped, never failing the archive.
 // otherFiles is only ever populated when a sink is wired, so this is a no-op
 // otherwise.
 func scanOtherZipMembers(ctx context.Context, otherFiles []*zipenc.File, ec extractCtx, pw string) {
-	for _, f := range otherFiles {
-		if ctx.Err() != nil {
-			return
-		}
+	// Add this archive's scan candidates to the "X / Y files" total as it opens,
+	// unless discovery already pre-counted them (top-level single-file zips).
+	if !ec.secretsPrecounted {
+		ec.p.addSecretFilesTotal(int64(len(otherFiles)))
+	}
+	scanMembersParallel(ctx, ec, len(otherFiles), func(i int) (io.ReadCloser, string, bool) {
+		f := otherFiles[i]
 		if f.IsEncrypted() {
 			f.SetPassword(pw)
 		}
 		rc, err := f.Open()
 		if err != nil {
-			continue
+			return nil, "", false
 		}
-		ec.scanSecrets(ctx, rc, ec.display+"!"+f.Name)
-		rc.Close()
-	}
+		return rc, ec.display + "!" + f.Name, true
+	})
 }
 
 // memberFlushChunk caps how many zip members are buffered before they are
@@ -653,6 +763,12 @@ func readZipMembersParallel(ctx context.Context, credFiles, nestedFiles []*zipen
 			for _, c := range out[j].creds {
 				ec.emit(c)
 			}
+		}
+		// Decrement the worker-row label per merged chunk. The merge runs on the
+		// coordinator goroutine (single writer), so this can't thrash the slot the
+		// way a per-task publish would. memberFlushChunk bounds update frequency.
+		if left := n - int(members.Load()); left > 0 {
+			ec.item(fmt.Sprintf("%s  ·  %d members left", filepath.Base(ec.display), left))
 		}
 	}
 	return scan, nil
@@ -801,6 +917,8 @@ func processSpilled(ctx context.Context, ec extractCtx, slot int, tmp, name stri
 	child := ec
 	child.depth++
 	child.display = display
+	// Nested members are credited at open, never pre-counted (see recurseNested).
+	child.secretsPrecounted = false
 	child.emit = func(c Credential) { o.creds = append(o.creds, c) }
 	child.onIssue = func(p string, k IssueKind, e error) { o.issues = append(o.issues, pendingIssue{p, k, e}) }
 	if slot >= 0 {
@@ -1074,10 +1192,13 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
-					// Scan the first member for secrets (no-op without a sink;
-					// caps its read) before draining the rest, which forces the
-					// decoder's CRC so a wrong password fails cheaply here.
-					ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
+					// Scan the first member for secrets (allowlisted only, capped)
+					// before draining the rest, which forces the decoder's CRC so
+					// a wrong password fails cheaply here.
+					if ec.secrets != nil && isSecretScanCandidate(h.Name) {
+						ec.p.addSecretFilesTotal(1)
+						ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
+					}
 					if _, derr := io.Copy(io.Discard, rr); derr != nil {
 						return derr
 					}
@@ -1105,9 +1226,13 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 					ec.emit(c)
 				}
 			default:
-				// Non-credential member: scan for secrets (no-op without a sink).
-				// The read is capped; rr.Next() skips any unread remainder.
-				ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
+				// Non-credential member: scan allowlisted files for secrets
+				// (no-op without a sink). The read is capped; rr.Next() skips any
+				// unread remainder.
+				if ec.secrets != nil && isSecretScanCandidate(h.Name) {
+					ec.p.addSecretFilesTotal(1)
+					ec.scanSecrets(ctx, rr, ec.display+"!"+h.Name)
+				}
 			}
 		}
 	}
@@ -1259,8 +1384,12 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
-					// See readRarStream: scan (capped) before draining for CRC.
-					ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
+					// See readRarStream: scan allowlisted files (capped) before
+					// draining for CRC.
+					if ec.secrets != nil && isSecretScanCandidate(h.Name) {
+						ec.p.addSecretFilesTotal(1)
+						ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
+					}
 					if _, derr := io.Copy(io.Discard, rc); derr != nil {
 						return derr
 					}
@@ -1285,8 +1414,12 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 					ec.emit(c)
 				}
 			default:
-				// Non-credential member: scan for secrets (no-op without a sink).
-				ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
+				// Non-credential member: scan allowlisted files for secrets
+				// (no-op without a sink).
+				if ec.secrets != nil && isSecretScanCandidate(h.Name) {
+					ec.p.addSecretFilesTotal(1)
+					ec.scanSecrets(ctx, rc, ec.display+"!"+h.Name)
+				}
 			}
 			cr.add(h.PackedSize)
 		}
@@ -1396,25 +1529,37 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 	// each member's decoded reads moves the bar smoothly instead of leaving it at
 	// 0 until finish() jumps it to 100%.
 	var uncompressed int64
+	var scanCandidates int64
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
 		}
 		if isArchiveFile(f.Name) || isPasswordFile(f.Name) {
 			uncompressed += f.FileInfo().Size()
+		} else if ec.secrets != nil && isSecretScanCandidate(f.Name) {
+			scanCandidates++
 		}
 	}
 	cr.useScale(uncompressed)
+	// Add this archive's scan candidates to the "X / Y files" total up front (the
+	// 7z directory lists them without reading content), so Y leads the scan —
+	// unless discovery already pre-counted them. Members are scanned inline
+	// below: 7z is often solid (members share a decode stream), so concurrent
+	// random-access opens aren't obviously safe, and 7z is the rarer format.
+	if !ec.secretsPrecounted {
+		ec.p.addSecretFilesTotal(scanCandidates)
+	}
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
 		}
 		isArch := isArchiveFile(f.Name)
 		if !isArch && !isPasswordFile(f.Name) {
-			// Non-credential member: scan for secrets (capped, best-effort) when
-			// a sink is wired, otherwise skip exactly as before. 7z members are
-			// random-access, so open/scan/close without disturbing the cred flow.
-			if ec.secrets != nil {
+			// Non-credential member: scan allowlisted files for secrets (capped,
+			// best-effort) when a sink is wired, otherwise skip exactly as before.
+			// 7z members are random-access, so open/scan/close without disturbing
+			// the cred flow.
+			if ec.secrets != nil && isSecretScanCandidate(f.Name) {
 				member := f
 				if rc, oerr := member.Open(); oerr == nil {
 					ec.scanSecrets(ctx, rc, ec.display+"!"+member.Name)

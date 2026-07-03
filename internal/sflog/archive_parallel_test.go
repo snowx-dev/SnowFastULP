@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -95,10 +96,10 @@ func TestReadZipFilesParallelParity(t *testing.T) {
 	}
 }
 
-// TestReadZipFilesParallelPublishesFanoutLabel proves a parallel run surfaces a
-// "N members in parallel" worker label so the single panel row reads as
+// TestReadZipFilesParallelPublishesMembersLeftLabel proves a parallel run
+// surfaces a "N members left" worker label so the single panel row reads as
 // concurrent work rather than one static archive.
-func TestReadZipFilesParallelPublishesFanoutLabel(t *testing.T) {
+func TestReadZipFilesParallelPublishesMembersLeftLabel(t *testing.T) {
 	path := buildBigZip(t, 24, nil)
 	zr, err := zipenc.OpenReader(path)
 	if err != nil {
@@ -125,12 +126,69 @@ func TestReadZipFilesParallelPublishesFanoutLabel(t *testing.T) {
 
 	found := false
 	for _, it := range items {
-		if strings.Contains(it, "members in parallel") && strings.Contains(it, "24") {
+		if strings.Contains(it, "members left") && strings.Contains(it, "24") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("no fan-out label published; items=%v", items)
+		t.Fatalf("no members-left label published; items=%v", items)
+	}
+}
+
+// TestReadZipFilesParallelMembersLeftDecrements proves the per-chunk decrement
+// fires: with 300 members (> memberFlushChunk 256) the run crosses a chunk
+// boundary, so at least one published label must show a count strictly below
+// the full 300 — not just the initial full-count publish. Guards the new
+// publish under -race.
+func TestReadZipFilesParallelMembersLeftDecrements(t *testing.T) {
+	path := buildBigZip(t, 300, nil)
+	zr, err := zipenc.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+
+	var items []string
+	sem := make(chan struct{}, 4)
+	ec := extractCtx{
+		passwords: []string{""},
+		tempDir:   t.TempDir(),
+		display:   path,
+		emit:      func(Credential) {},
+		onIssue:   func(string, IssueKind, error) {},
+		setItem:   func(s string) { items = append(items, s) },
+		sem:       sem,
+	}
+	sem <- struct{}{} // simulate the worker loop holding a slot
+	if _, err := readZipFiles(context.Background(), zr.File, ec, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	<-sem
+
+	sawDecrement := false
+	for _, it := range items {
+		if !strings.Contains(it, "members left") {
+			continue
+		}
+		parts := strings.SplitN(it, "·", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		tail := strings.TrimSuffix(parts[1], "members left")
+		fields := strings.Fields(tail)
+		if len(fields) == 0 {
+			continue
+		}
+		n, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		if n > 0 && n < 300 {
+			sawDecrement = true
+		}
+	}
+	if !sawDecrement {
+		t.Fatalf("no decremented members-left label < 300; items=%v", items)
 	}
 }
 

@@ -86,6 +86,11 @@ type ExtractStats struct {
 	NoULP            int
 	MissingVolumes   int
 
+	// SecretFiles is the count of loose non-credential files scanned for
+	// secrets under -secrets (0 when -secrets is off). Kept distinct from
+	// FilesScanned so credential accounting is unchanged.
+	SecretFiles int
+
 	// capped, ordered list of concrete problems (see issueCap)
 	Issues []Issue
 }

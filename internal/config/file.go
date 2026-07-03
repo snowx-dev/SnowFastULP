@@ -47,6 +47,8 @@ type SFSSection struct {
 	MaxHitsPerChunk *int   `toml:"max_hits_per_chunk"`
 	Limit           *int   `toml:"l"`
 	Since           string `toml:"since"`
+	Sec             bool   `toml:"sec"`
+	SecretsPath     string `toml:"secrets_path"`
 }
 
 // SFLSection maps to sfl CLI flags. Input fills positional INPUT_PATH, CLI wins.
