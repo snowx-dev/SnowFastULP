@@ -240,8 +240,8 @@ func TestRenderShardProgressColumnsAreStable(t *testing.T) {
 	mLate.ChunksTotal.Store(205)
 	mLate.BusyWorkers.Store(8)
 
-	early := renderShardLines(time.Now(), time.Second, mEarly, r, 100, 100, 1e6, 1e6, 0, 80)
-	late := renderShardLines(time.Now(), time.Second, mLate, r, 100, 100, 1e6, 1e6, 0, 80)
+	early := renderShardLines(time.Now(), time.Second, mEarly, r, 100, 100, 1e6, 1e6, 0, 100)
+	late := renderShardLines(time.Now(), time.Second, mLate, r, 100, 100, 1e6, 1e6, 0, 100)
 
 	earlyRow := findRow(early, "Progress", "chunks")
 	lateRow := findRow(late, "Progress", "chunks")
@@ -263,7 +263,7 @@ func TestRenderShardLinesShowsByteWeightedChunkProgress(t *testing.T) {
 	m.ChunksTotal.Store(16)
 	r := &ulpengine.Resolved{TotalInputs: 100, InputFileCount: 1, Workers: 8, DedupWorkers: 4, BucketCount: 64}
 
-	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
+	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 100)
 	row := findRow(lines, "Progress", "chunks")
 	if row == "" {
 		t.Fatalf("progress row not found in:\n%s", strings.Join(lines, "\n"))
@@ -287,7 +287,7 @@ func TestRenderShardLinesShowsFastPathWorkerBusy(t *testing.T) {
 		BucketCount:    64,
 	}
 
-	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
+	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 100)
 	row := findRow(lines, "Progress", "workers")
 	if row == "" {
 		t.Fatalf("progress row not found in:\n%s", strings.Join(lines, "\n"))
@@ -297,6 +297,40 @@ func TestRenderShardLinesShowsFastPathWorkerBusy(t *testing.T) {
 	}
 	if strings.Contains(row, "0 / 8 busy") {
 		t.Fatalf("fast-path progress row exposed bucket worker pool: %q", row)
+	}
+}
+
+// on narrow terminals the Progress inline would be trimmed by gradientBox,
+// cutting off the workers segment. renderStatRow must stack the stats so
+// workers lands on its own line, fully visible, with no line overflowing.
+func TestRenderShardProgressStacksWorkersOnNarrowTerm(t *testing.T) {
+	r := &ulpengine.Resolved{TotalInputs: 18 << 30, InputFileCount: 1, Workers: 8, DedupWorkers: 4, BucketCount: 256}
+	m := &ulpengine.Metrics{}
+	m.BytesRead.Store(4 << 30)
+	m.ChunksDone.Store(46)
+	m.ChunksTotal.Store(205)
+	m.BusyWorkers.Store(2)
+
+	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1e6, 1e6, 0, 60)
+
+	workersRow := findRow(lines, "workers")
+	if workersRow == "" {
+		t.Fatalf("workers row not found in:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(workersRow, "2 / 8 busy") {
+		t.Fatalf("workers row = %q, want '2 / 8 busy' not trimmed", workersRow)
+	}
+	progressRow := findRow(lines, "Progress")
+	if progressRow == "" {
+		t.Fatalf("progress label row not found in:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(progressRow, "workers") {
+		t.Fatalf("progress row = %q still inline with workers; expected stacked layout", progressRow)
+	}
+	for i, ln := range lines {
+		if w := tuiVisibleWidth(ln); w > 60 {
+			t.Errorf("line %d visible width %d > 60: %q", i, w, ln)
+		}
 	}
 }
 

@@ -64,6 +64,30 @@ func pathAvailable(path string) (bool, error) {
 	return false, fmt.Errorf("check output path %q: %w", path, err)
 }
 
+// defaultSecretsExportPath allocates a non-colliding sfs_secrets_<stamp>.txt in
+// cwd for the post-search "export secrets only" offer, mirroring
+// defaultOutputPath's collision-avoidance so repeated runs never overwrite.
+func defaultSecretsExportPath(cwd string, now time.Time) (string, error) {
+	if cwd == "" {
+		return "", fmt.Errorf("resolve secrets export: empty cwd")
+	}
+	stamp := now.Format("20060102-1504")
+	base := filepath.Join(cwd, "sfs_secrets_"+stamp+".txt")
+	if available, err := pathAvailable(base); err != nil {
+		return "", err
+	} else if available {
+		return base, nil
+	}
+	for i := 2; ; i++ {
+		candidate := filepath.Join(cwd, fmt.Sprintf("sfs_secrets_%s_%d.txt", stamp, i))
+		if available, err := pathAvailable(candidate); err != nil {
+			return "", err
+		} else if available {
+			return candidate, nil
+		}
+	}
+}
+
 // finalizeEmptyOutput discards a generated-default output file that received
 // zero hits so a fruitless search never litters CWD with a 0-byte
 // sfs_results_*.txt, and returns what to display as the summary's output:

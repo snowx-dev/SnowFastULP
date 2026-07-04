@@ -4,6 +4,7 @@ package secrets
 
 import (
 	"context"
+	"os"
 	"sync"
 
 	"github.com/praetorian-inc/titus"
@@ -24,6 +25,19 @@ func NewPool(size int) (*Pool, error) {
 		size = 1
 	}
 	ch := make(chan *titus.Scanner, size)
+	// Titus's vectorscan matcher prints a startup diagnostic to os.Stderr
+	// during scanner init ("[vectorscan] N/N rules compiled for Hyperscan, …"
+	// plus an incompatible-patterns list). Silence it for the build window so
+	// it doesn't scroll above / interleave with sfl's live TUI. sfl's TUI
+	// renders to a captured stderr (cmd/sfl.stderrFile), not the os.Stderr
+	// package var, so redirecting the var here spares the live draws while the
+	// diagnostic goes to /dev/null. Best-effort: if /dev/null can't be opened,
+	// the diagnostic is left as-is rather than failing the pool.
+	if devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
+		prev := os.Stderr
+		os.Stderr = devnull
+		defer func() { os.Stderr = prev; devnull.Close() }()
+	}
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex

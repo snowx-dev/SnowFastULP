@@ -362,3 +362,70 @@ func writeEncryptedTestZipMethod(t *testing.T, path, password, name, body string
 		t.Fatal(err)
 	}
 }
+
+// TestMaybeEncryptedProbeSkipsZeroByte guards the false-positive at the heart of
+// the original bug report: a 0-byte encrypted member must NOT become the password
+// probe. resolveZipPassword validates a candidate by reading the probe to EOF
+// and checking flate/CRC; a 0-byte member reads nothing, so the check can't
+// reject a wrong (e.g. empty) password — which then cascades into every real
+// member failing as a parse error instead of the archive being flagged
+// password-not-found. yeka's Deflate writer reports UncompressedSize64=0 for an
+// empty encrypted member, so we use it to exercise the guard directly.
+func TestMaybeEncryptedProbeSkipsZeroByte(t *testing.T) {
+	root := t.TempDir()
+	archivePath := filepath.Join(root, "locked.zip")
+	// Deflate (yeka's Encrypt default) so the empty member reports
+	// UncompressedSize64=0 and IsEncrypted=true — the probe-ineligible shape.
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zipenc.NewWriter(f)
+	for name, body := range map[string]string{
+		"victim/passwords_unique.txt": "", // 0-byte: probe-ineligible
+		"victim/Passwords.txt":        "URL: https://x.com\nUSER: u\nPASS: p\n",
+	} {
+		w, err := zw.Encrypt(name, "ice", zipenc.StandardEncryption)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	zr, err := zipenc.OpenReader(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+
+	var probe *zipenc.File
+	var zeroByte, nonZero *zipenc.File
+	for _, f := range zr.File {
+		maybeEncryptedProbe(f, &probe)
+		if f.UncompressedSize64 == 0 {
+			zeroByte = f
+		} else {
+			nonZero = f
+		}
+	}
+	if zeroByte == nil || nonZero == nil {
+		t.Fatalf("test fixture needs one 0-byte and one non-zero encrypted member")
+	}
+	if probe == nil {
+		t.Fatalf("probe must be set from the non-zero encrypted member")
+	}
+	if probe == zeroByte {
+		t.Fatalf("probe must not be the 0-byte encrypted member (UncompressedSize64=0): false-positive password resolution")
+	}
+	if probe != nonZero {
+		t.Fatalf("probe must be the non-zero encrypted member")
+	}
+}

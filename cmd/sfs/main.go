@@ -89,9 +89,11 @@ func main() {
 	limit := flag.Int("l", 0, "stop after N total hits, then exit (0 = unlimited)")
 	// -sec switches to the secrets DB (written by `sfl -secrets`): the PATTERN
 	// filters by secret type (rule id/name, "*" = all) instead of a line match.
+	// -secrets-path / -sec-path imply -sec: pointing at a secrets DB only makes
+	// sense in secrets mode, so the user shouldn't have to repeat -sec.
 	sec := flag.Bool("sec", false, "search the secrets DB instead of ULP archives")
 	secretsPath := flag.String("secrets-path", "", "path to the secrets DB (default: <root>/sfl-secrets.sqlite)")
-	secretsPathAlias := flag.String("sec-path", "", "alias for -secrets-path")
+	secretsPathAlias := flag.String("sec-path", "", "alias for -secrets-path (implies -sec)")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
@@ -129,8 +131,9 @@ func main() {
 	}
 	// -sec is a distinct, self-contained mode: it reads the secrets DB (no
 	// archive discovery, indexing, or live search), so branch out here before
-	// any of that machinery spins up.
-	if *sec {
+	// any of that machinery spins up. An explicit -secrets-path / -sec-path
+	// implies -sec (see above), so the gate is on either signal.
+	if *sec || *secretsPath != "" {
 		if err := runSecretsSearch(secretsSearchArgs{
 			root:        args.Root,
 			pattern:     pattern,

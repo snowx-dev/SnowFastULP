@@ -410,6 +410,14 @@ func run(cfg runConfig) error {
 			resolveSecretsPath(cfg.SecretsPath, cfg.OutputDir, cfg.LibraryDir), termWidth())
 		summary = spliceBeforeFooter(summary, block, summaryFooterLines(termWidth(), updateNotice))
 	}
+	// A prominent encrypted-archive warning comes BEFORE the COMPLETE summary so
+	// a "0 ULP" run can't read as empty when the real cause is a missing password.
+	// Printed on the normal screen (alt-screen already torn down) like the summary.
+	if w := renderEncryptedWarning(stats, cfg.Password != "", termWidth()); len(w) > 0 {
+		for _, ln := range w {
+			fmt.Fprintln(os.Stderr, ln)
+		}
+	}
 	for _, ln := range summary {
 		fmt.Fprintln(os.Stderr, ln)
 	}

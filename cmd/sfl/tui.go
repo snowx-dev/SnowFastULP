@@ -50,6 +50,15 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("#E0B040")).
 				Padding(0, 2)
+	// sflAlertStyle/sflAlertBoxStyle are the prominent red, all-caps treatment
+	// for an undecryptable-archive warning printed above the final summary —
+	// distinct from the amber interrupt accent so "no password" reads as a
+	// harder failure than "stopped".
+	sflAlertStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#DD2E44")).Bold(true)
+	sflAlertBoxStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#DD2E44")).
+				Padding(0, 2)
 	sflEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A242E"))
 
 	// sflDoneFill is the calm sage-green for a completed track's solid bar
@@ -202,11 +211,18 @@ func footerRow(left, right string, width int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+// stderrFile is the real stderr captured at package init. The TUI renders to
+// it directly (not the os.Stderr package var) so that secrets.NewPool can
+// temporarily reassign os.Stderr to /dev/null to silence Titus's vectorscan
+// startup diagnostic without also swallowing the live TUI's draws or breaking
+// terminal-size reads. Both resolve to fd 2 in normal runs.
+var stderrFile = os.Stderr
+
 // stderrIsTTY reports whether the live frame's target (stderr) is a terminal.
 // The TUI and the summary both render to stderr, so this — not stdout — is what
 // gates colored output and the alt-screen frame (mirrors sfs).
 func stderrIsTTY() bool {
-	fi, err := os.Stderr.Stat()
+	fi, err := stderrFile.Stat()
 	if err != nil {
 		return false
 	}
@@ -233,7 +249,7 @@ func termWidth() int {
 // to use all the real estate so long provenance lines truncate as late as
 // possible. Falls back to sflDisplayWidth when the size can't be read.
 func termWidthFull() int {
-	w, _, err := term.GetSize(int(os.Stderr.Fd()))
+	w, _, err := term.GetSize(int(stderrFile.Fd()))
 	if err != nil || w <= 0 {
 		return sflDisplayWidth
 	}
@@ -351,21 +367,6 @@ func gradientBar(percent float64, width int) string {
 	return b.String()
 }
 
-// sflPendingBar is the indeterminate Secrets bar shown while a streaming source
-// (rar, encrypted-header 7z, nested) is open: the candidate denominator is not
-// final, so any percentage would lie (scanned/total ≈ 1 because total chases
-// scanned member-by-member). It renders an all-empty trough with a muted "----"
-// suffix in place of a number, matching gradientBar's cell width so the two
-// bars stay aligned. The row's "Y+" signal still conveys that the denominator
-// is growing.
-func sflPendingBar(width int) string {
-	if width < barSuffixWidth+2 {
-		width = barSuffixWidth + 2
-	}
-	body := width - barSuffixWidth
-	return sflEmptyStyle.Render(strings.Repeat("░", body)) + sflMutedStyle.Render("   ----")
-}
-
 // stderrFrame is a fixed alt-screen block redrawn in place each tick. Falls
 // back to nothing on a non-TTY so piped runs stay clean. Draw and close are
 // serialized so a force-exit (second Ctrl+C / cleanup timeout) can never
@@ -383,7 +384,7 @@ func (f *stderrFrame) close() {
 	if !f.tty || !f.altOn {
 		return
 	}
-	fmt.Fprint(os.Stderr, termctl.ANSIResetScroll+termctl.ANSIShowCursor+termctl.AltScreenLeave)
+	fmt.Fprint(stderrFile, termctl.ANSIResetScroll+termctl.ANSIShowCursor+termctl.AltScreenLeave)
 	f.altOn = false
 }
 
@@ -410,7 +411,7 @@ func (f *stderrFrame) draw(lines []string) {
 	// scroll the buffer on short terminals; Compose erases any rows a taller
 	// previous frame (e.g. the extracting panel) left behind.
 	b.WriteString(tuiframe.Compose(clamped, termHeight()-1))
-	fmt.Fprint(os.Stderr, b.String())
+	fmt.Fprint(stderrFile, b.String())
 }
 
 // monitor samples Progress every ~200ms and redraws the live frame until done.
@@ -619,50 +620,40 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 
 	header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] "+phase), elapsed, width)
 
-	var body []string
 	if scanning {
 		// During discovery the total weight is unknown, so show a live "found"
 		// count instead of a frozen 0% bar.
-		body = []string{
+		body := []string{
 			sflMutedStyle.Render("discovering sources… ") +
 				sflCountStyle.Render(formatInt(int(prog.Discovered()))) +
 				sflMutedStyle.Render(" found"),
 		}
-	} else {
-		statRows := renderExtractStatsRows(
-			prog.Files(), prog.Archives(),
-			prog.Logs(), prog.LogsTotal(), prog.Emitted(), prog.Duplicates(),
-			prog.DoneBytes(), prog.Total(), byteRate,
-		)
-		if prog.SecretsEnabled() {
-			// -secrets frame, sfu-style: a stats box (with the live found/scanned
-			// row), the two labeled bars below it, then the worker panel in its
-			// own box under the bars. Both tracks are active gradients since
-			// extraction and secret scanning run in the same pass.
-			boxBody := append(statRows, renderSecretsLiveRow(prog.SecretsFound(), prog.SecretFilesScanned(), prog.SecretFilesTotal(), prog.SecretStreamsOpen() > 0))
-			box := sflGradientBox(boxBody, width, gradStart, gradEnd)
-			// The Secrets bar is indeterminate while any streaming source is
-			// open: its denominator is still growing, so a percentage would lie.
-			bars := renderSflBarPair("Extract", prog.Fraction(), "Secrets", scanFrac, prog.SecretStreamsOpen() > 0, width)
-			return sflFrameWithBars(header, box, bars, sflWorkerPanelBox(prog, width, inner, tick), width)
-		}
-		body = append([]string{gradientBar(prog.Fraction(), inner)}, statRows...)
-		body = appendSflWorkerBlock(body, prog, inner, tick)
+		return frame(header, sflGradientBox(body, width, gradStart, gradEnd), width)
 	}
 
-	return frame(header, sflGradientBox(body, width, gradStart, gradEnd), width)
-}
-
-// appendSflWorkerBlock appends the concurrent-worker panel (or the single
-// current-path fallback when no registry is wired) to a frame's box body.
-func appendSflWorkerBlock(body []string, prog *sflog.Progress, inner, tick int) []string {
-	if panel := sflWorkerPanel(prog, inner, tick); len(panel) > 0 {
-		return append(body, panel...)
+	statRows := renderExtractStatsRows(
+		prog.Files(), prog.Archives(),
+		prog.Logs(), prog.LogsTotal(), prog.Emitted(), prog.Duplicates(),
+		prog.DoneBytes(), prog.Total(), byteRate,
+	)
+	if prog.SecretsEnabled() {
+		// -secrets frame: a stats box (with the live found/scanned row), the two
+		// labeled bars below it, then the worker panel in its own box under the
+		// bars. Both tracks are active gradients since extraction and secret
+		// scanning run in the same pass.
+		boxBody := append(statRows, renderSecretsLiveRow(prog.SecretsFound(), prog.SecretFilesScanned(), prog.SecretFilesTotal(), prog.SecretStreamsOpen() > 0))
+		box := sflGradientBox(boxBody, width, gradStart, gradEnd)
+		// The Secrets bar is indeterminate while any streaming source is open:
+		// its denominator is still growing, so a percentage would lie.
+		bars := renderSflBarPair("Extract", prog.Fraction(), "Secrets", scanFrac, prog.SecretStreamsOpen() > 0, width)
+		return sflFrameWithBars(header, box, bars, sflWorkerPanelBox(prog, width, inner, tick, sflSecretsFrameOverhead), width)
 	}
-	if cur := prog.Current(); cur != "" {
-		return append(body, sflMutedStyle.Render(truncatePath(cur, inner)))
-	}
-	return body
+	// plain frame, sfu-style: stats box, a single Extract bar below it, then the
+	// worker panel in its own box — same stacking as the -secrets frame minus the
+	// Secrets row/bar. The Secrets bar is -secrets-only by construction.
+	plainBox := sflGradientBox(statRows, width, gradStart, gradEnd)
+	plainBars := []string{sflIndent + sflBarLabel("Extract") + gradientBar(prog.Fraction(), sflBarBody(width))}
+	return sflFrameWithBars(header, plainBox, plainBars, sflWorkerPanelBox(prog, width, inner, tick, sflPlainFrameOverhead), width)
 }
 
 // sflBarLabelW is the fixed label column for the paired -secrets bars so the
@@ -726,9 +717,12 @@ func renderSflBarPair(l1 string, p1 float64, l2 string, p2 float64, p2pending bo
 	body := sflBarBody(width)
 	second := gradientBar(p2, body)
 	if p2pending {
-		// Secrets denominator is not final (a streaming source is open): show
-		// an indeterminate trough instead of a misleading percentage.
-		second = sflPendingBar(body)
+		// Secrets denominator is not final (a streaming source is open): hide
+		// the bar and show a muted "scanning…" hint in its row instead of a
+		// misleading percentage. The row slot is preserved so the fixed-height
+		// frame (and footer) doesn't shift when the bar reappears; the live
+		// "X / Y+" row in the stats box still carries the secrets signal.
+		second = sflMutedStyle.Render("scanning…")
 	}
 	return []string{
 		sflIndent + sflBarLabel(l1) + gradientBar(p1, body),
@@ -762,16 +756,21 @@ func sflFrameWithBars(header string, box, bars, panel []string, width int) []str
 // redrawn) as the busy-worker count changes — the -secrets footer-flicker fix.
 const sflSecretsFrameOverhead = 22
 
-// sflSecretsWorkerRows is the fixed worker-row count for the -secrets frame: as
-// many as fit beneath the frame overhead, capped at sflMaxWorkerRows and the
-// worker count, so the total frame height stays constant tick-to-tick. Returns 0
-// when the terminal is too short for even one row, so the panel is dropped and
-// the footer still shows.
-func sflSecretsWorkerRows(termH, totalWorkers int) int {
+// sflPlainFrameOverhead is the non-worker line count for the single-bar plain
+// extract frame: top margin + header + blank (3), the stats box (2 borders + 4
+// stat rows = 6), the one Extract bar with its blank separator (2), the worker
+// box's blank separator + 2 borders + header row (4), and the footer (3) = 18.
+const sflPlainFrameOverhead = 18
+
+// sflWorkerRows is the fixed worker-row count for a stacked frame: as many as
+// fit beneath the frame's non-worker overhead, capped at sflMaxWorkerRows and
+// the worker count, dropping to 0 on terminals too short for even one row, so
+// the footer keeps a constant screen row as the busy-worker count changes.
+func sflWorkerRows(termH, totalWorkers, overhead int) int {
 	if totalWorkers <= 0 {
 		return 0
 	}
-	rows := termH - 1 - sflSecretsFrameOverhead
+	rows := termH - 1 - overhead
 	if rows > sflMaxWorkerRows {
 		rows = sflMaxWorkerRows
 	}
@@ -784,14 +783,26 @@ func sflSecretsWorkerRows(termH, totalWorkers int) int {
 	return rows
 }
 
+// sflSecretsWorkerRows sizes the worker box for the two-bar -secrets frame.
+func sflSecretsWorkerRows(termH, totalWorkers int) int {
+	return sflWorkerRows(termH, totalWorkers, sflSecretsFrameOverhead)
+}
+
+// sflPlainWorkerRows sizes the worker box for the single-bar plain frame.
+func sflPlainWorkerRows(termH, totalWorkers int) int {
+	return sflWorkerRows(termH, totalWorkers, sflPlainFrameOverhead)
+}
+
 // sflWorkerPanelBox renders the concurrent-worker panel as its own gradient box
-// below the -secrets bars (mirroring how sfu stacks its worker frame under the
-// progress bars). It is drawn at a FIXED height — a reserved header row plus a
-// constant number of worker rows padded with blanks — so the box, and the footer
-// beneath it, never move as workers start and finish. Returns nil only when the
-// terminal is too short to fit any worker row.
-func sflWorkerPanelBox(prog *sflog.Progress, width, inner, tick int) []string {
-	rows := sflSecretsWorkerRows(termHeight(), prog.WorkerCount())
+// below the bars (mirroring how sfu stacks its worker frame under the progress
+// bars). overhead is the frame's non-worker line count (sflSecretsFrameOverhead
+// or sflPlainFrameOverhead) so the box is sized to fit beneath it. It is drawn at
+// a FIXED height — a reserved header row plus a constant number of worker rows
+// padded with blanks — so the box, and the footer beneath it, never move as
+// workers start and finish. Returns nil only when the terminal is too short to
+// fit any worker row.
+func sflWorkerPanelBox(prog *sflog.Progress, width, inner, tick, overhead int) []string {
+	rows := sflWorkerRows(termHeight(), prog.WorkerCount(), overhead)
 	if rows <= 0 {
 		return nil
 	}
@@ -1022,62 +1033,10 @@ func compactIngestArchiveName(path string) string {
 // is vertical room, mirroring sfu's OD frame.
 const (
 	sflMaxWorkerRows = 8
-	// rows the extract frame needs for non-worker content (margins, header,
-	// box borders, bar, five labeled stats rows, footer), with margin for SIGWINCH.
-	sflWorkerReservedRows = 15
 	// widest stage label ("testing password"); the stage column is padded to
 	// this so paths line up across rows.
 	sflStageColW = 16
 )
-
-// sflWorkerRowCap is the per-worker row budget for termHeight and totalWorkers.
-// Pure so tests can pass arbitrary heights. Never more than totalWorkers, never
-// fewer than sflMaxWorkerRows, expanding toward totalWorkers on tall terminals.
-func sflWorkerRowCap(termHeight, totalWorkers int) int {
-	if totalWorkers <= 0 {
-		return 0
-	}
-	available := termHeight - sflWorkerReservedRows
-	if available < sflMaxWorkerRows {
-		available = sflMaxWorkerRows
-	}
-	if available > totalWorkers {
-		available = totalWorkers
-	}
-	return available
-}
-
-// sflWorkerPanel reads the live worker registry and renders it. It returns nil
-// when no registry is wired so the caller can fall back to the single
-// current-path line. tick drives the per-row spinner animation.
-func sflWorkerPanel(prog *sflog.Progress, inner, tick int) []string {
-	total := prog.WorkerCount()
-	if total <= 0 {
-		return nil
-	}
-	active := prog.ActiveWorkers(sflWorkerRowCap(termHeight(), total))
-	return renderSflWorkerPanel(active, total, inner, tick)
-}
-
-// renderSflWorkerPanel is the pure renderer: a header count plus one row per
-// busy worker slot. Empty active set renders nothing.
-func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner, tick int) []string {
-	if len(active) == 0 {
-		return nil
-	}
-	idxMarkerW := lipgloss.Width(fmt.Sprintf("[%d]", total))
-	out := make([]string, 0, len(active)+1)
-	// Only call out the worker count when 2+ are genuinely busy: a single active
-	// row plus a "1 workers active" header makes a (correctly) one-stream archive
-	// look like wasted cores, so collapse to just the row in that case.
-	if len(active) >= 2 {
-		out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d workers active", len(active))))
-	}
-	for _, w := range active {
-		out = append(out, renderSflWorkerRow(w, inner, idxMarkerW, tick))
-	}
-	return out
-}
 
 // sflBothRecentWindow is how recently a slot must have done both ULP and secret
 // work to be labeled "ulp + secrets" — wide enough to survive the ~200ms redraw
@@ -1154,7 +1113,7 @@ func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW, tick int) strin
 // termHeight is the terminal row count (stderr), defaulting to 24 when unknown
 // so the worker panel still sizes sensibly on a non-TTY/redirected run.
 func termHeight() int {
-	_, h, err := term.GetSize(int(os.Stderr.Fd()))
+	_, h, err := term.GetSize(int(stderrFile.Fd()))
 	if err != nil || h <= 0 {
 		return 24
 	}
@@ -1406,6 +1365,56 @@ func libraryTotalBox(libraryLines int64, width int) []string {
 		sflMutedStyle.Render("lines in library"),
 	}
 	return sflGradientBox(body, width, gradStart, gradEnd)
+}
+
+// renderEncryptedWarning is a prominent, all-caps red box printed BEFORE the
+// final summary when archives couldn't be decrypted. Without it a "0 ULP" run
+// reads as empty rather than a password problem; the recap row is a terse
+// in-box count, this box names the cause, lists the affected archives, and
+// tailors the remediation hint to whether -p was supplied (so a user who already
+// passed a list isn't told to "use -p"). Returns nil when there was nothing
+// undecryptable, so the caller can print unconditionally.
+func renderEncryptedWarning(stats sflog.ExtractStats, passwordsProvided bool, width int) []string {
+	n := stats.PasswordNotFound
+	if n <= 0 {
+		return nil
+	}
+	noun := "ARCHIVES"
+	if n == 1 {
+		noun = "ARCHIVE"
+	}
+	title := sflIndent + sflAlertStyle.Render(fmt.Sprintf("⚠ %d %s ENCRYPTED — NO PASSWORD MATCHED", n, noun))
+	inner := boxInner(width)
+	body := []string{
+		sflMutedStyle.Render(func() string {
+			if passwordsProvided {
+				return "None of the supplied password(s) opened these archive(s)."
+			}
+			return "No password was supplied."
+		}()),
+		"",
+	}
+	shown := 0
+	for _, is := range stats.Issues {
+		if is.Kind != sflog.IssuePasswordNotFound {
+			continue
+		}
+		body = append(body, sflMutedStyle.Render(truncatePath(is.Path, inner)))
+		shown++
+	}
+	if rem := n - shown; rem > 0 {
+		body = append(body, sflMutedStyle.Render(fmt.Sprintf("… and %d more not shown", rem)))
+	}
+	body = append(body, "")
+	if passwordsProvided {
+		body = append(body, sflMutedStyle.Render("Verify the list covers this release's password (channel-pinned, per-release)."))
+	} else {
+		body = append(body, sflMutedStyle.Render("Provide one with:  sfl -p <password>   (or -p <password-list-file>)"))
+	}
+	box := insetBox(sflAlertBoxStyle, body, width)
+	// No footer: this is a pre-summary block, not a standalone frame; the
+	// trailing "" separates it from the COMPLETE summary's leading blank.
+	return append([]string{"", title, ""}, box...)
 }
 
 // renderInterruptSummary is printed on the normal screen after a graceful

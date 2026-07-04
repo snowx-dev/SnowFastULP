@@ -542,9 +542,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 			// password resolution (so a secrets-only archive still decrypts) but
 			// keep them out of the byte scale, since they're read capped, not whole.
 			otherFiles = append(otherFiles, f)
-			if f.IsEncrypted() && (probe == nil || f.UncompressedSize64 < probe.UncompressedSize64) {
-				probe = f
-			}
+			maybeEncryptedProbe(f, &probe)
 			continue
 		default:
 			continue
@@ -553,9 +551,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		// Probe with the *smallest* encrypted member so StageTestingPassword
 		// stays a short blip even on a large (split) set, instead of decrypting
 		// the first (possibly huge) member once per candidate password.
-		if f.IsEncrypted() && (probe == nil || f.UncompressedSize64 < probe.UncompressedSize64) {
-			probe = f
-		}
+		maybeEncryptedProbe(f, &probe)
 	}
 	if len(credFiles) == 0 && len(nestedFiles) == 0 && len(otherFiles) == 0 {
 		return archiveScan{}, nil
@@ -825,6 +821,21 @@ func readZipNestedMember(ctx context.Context, f *zipenc.File, ec extractCtx, pw 
 	ns.nestedArchives++
 	o.scan = ns
 	return o
+}
+
+// maybeEncryptedProbe records f as the password probe when it is encrypted and
+// has a non-zero uncompressed size, picking the smallest such member. A 0-byte
+// encrypted member is useless as a probe: decrypting it yields no bytes, so the
+// CRC/flate check in resolveZipPassword can't reject a wrong (e.g. empty)
+// password — which then cascades into every real member failing as a parse
+// error instead of the archive being flagged password-not-found.
+func maybeEncryptedProbe(f *zipenc.File, probe **zipenc.File) {
+	if !f.IsEncrypted() || f.UncompressedSize64 == 0 {
+		return
+	}
+	if *probe == nil || f.UncompressedSize64 < (*probe).UncompressedSize64 {
+		*probe = f
+	}
 }
 
 // resolveZipPassword finds the first candidate that fully decrypts the

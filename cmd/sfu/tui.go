@@ -676,10 +676,12 @@ type lineStat struct {
 	style    lipgloss.Style
 }
 
-// returns rows for Lines metric, inline if it fits else 3-row stacked.
-// stacks only when inline would be ellipsised, so typical runs keep
-// compact look. on stack we ignore inline and rebuild from stats
-func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
+// renderStatRow returns a labeled stat row inline when it fits innerW,
+// else stacks one stat per line under the label. Mirrors the Lines row's
+// compact-or-stack behavior so the Progress row (bytes/chunks/workers,
+// or buckets/workers) stops getting trimmed by gradientBox on narrow
+// terminals — the workers segment was the part being cut off.
+func renderStatRow(label, inline string, stats []lineStat, innerW int) []string {
 	if innerW <= 0 || tuiVisibleWidth(inline) <= innerW {
 		return []string{inline}
 	}
@@ -693,7 +695,7 @@ func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
 			maxSubW = w
 		}
 	}
-	header := statLabel("Lines")
+	header := statLabel(label)
 	blank := strings.Repeat(" ", statLabelColWidth)
 
 	out := make([]string, 0, len(stats))
@@ -707,6 +709,13 @@ func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
 		out = append(out, prefix+sub+"  "+val)
 	}
 	return out
+}
+
+// returns rows for Lines metric, inline if it fits else 3-row stacked.
+// stacks only when inline would be ellipsised, so typical runs keep
+// compact look. on stack we ignore inline and rebuild from stats
+func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
+	return renderStatRow("Lines", inline, stats, innerW)
 }
 
 // pads plain ASCII s w/ trailing spaces to visible width w
@@ -1040,10 +1049,15 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	}
 	totalBytesStr := humanBytes(r.TotalInputs)
 	readBytesStr := padLeft(humanBytes(m.BytesRead.Load()), len(totalBytesStr))
-	progressRow := labelStyle.Render("Progress") + "     " +
+	progressInline := statLabel("Progress") +
 		byteStyle.Render(readBytesStr) + " / " + byteStyle.Render(totalBytesStr) + "    " +
 		"chunks " + countStyle.Render(fmt.Sprintf("%*.1f / %d", chunksDigits+2, chunkProgress, chunksTotal)) + "    " +
 		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, busyWorkers, workerTotal))
+	progressStats := []lineStat{
+		{"read", readBytesStr + " / " + totalBytesStr, byteStyle},
+		{"chunks", fmt.Sprintf("%*.1f / %d", chunksDigits+2, chunkProgress, chunksTotal), countStyle},
+		{"workers", fmt.Sprintf("%*d / %d busy", workersDigits, busyWorkers, workerTotal), countStyle},
+	}
 	systemRow := renderSystemRow(ramMB, cpuPct) + "    " +
 		"buckets " + countStyle.Render(fmt.Sprintf("%d", r.BucketCount))
 
@@ -1051,7 +1065,8 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	innerW := boxInnerWidth(width)
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
-	innerLines = append(innerLines, progressRow, systemRow)
+	innerLines = append(innerLines, renderStatRow("Progress", progressInline, progressStats, innerW)...)
+	innerLines = append(innerLines, systemRow)
 	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
@@ -1108,15 +1123,20 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 		{"unique so far", formatCount(m.LinesUnique.Load()), uniqueStyle},
 		{"rejected (final)", formatCount(m.LinesRejected.Load()), mutedStyle},
 	}
-	progressRow := labelStyle.Render("Progress") + "     " +
+	progressInline := statLabel("Progress") +
 		"buckets " + countStyle.Render(fmt.Sprintf("%*d / %d", bucketsDigits, bd, bt)) + "    " +
 		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.DedupWorkers))
+	progressStats := []lineStat{
+		{"buckets", fmt.Sprintf("%*d / %d", bucketsDigits, bd, bt), countStyle},
+		{"workers", fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.DedupWorkers), countStyle},
+	}
 	systemRow := renderSystemRow(ramMB, cpuPct)
 
 	innerW := boxInnerWidth(width)
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
-	innerLines = append(innerLines, progressRow, systemRow)
+	innerLines = append(innerLines, renderStatRow("Progress", progressInline, progressStats, innerW)...)
+	innerLines = append(innerLines, systemRow)
 	// -od: live library index scan while each bucket's dest set is loaded
 	if r != nil && r.Cfg.DestDedup && r.OdMetrics != nil {
 		if total := r.OdMetrics.KeysTotalEstimate.Load(); total > 0 {

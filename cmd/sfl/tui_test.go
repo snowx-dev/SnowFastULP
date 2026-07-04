@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,26 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
+
+// renderSflWorkerPanel is the pure variable-height worker-panel renderer kept as
+// a test helper: a header count (only when 2+ busy) plus one row per busy slot.
+// Production uses sflWorkerPanelBox (fixed-height, own box) which shares
+// renderSflWorkerRow with this; this helper exercises the row renderer
+// end-to-end with its header logic.
+func renderSflWorkerPanel(active []sflog.ActiveWorker, total, inner, tick int) []string {
+	if len(active) == 0 {
+		return nil
+	}
+	idxMarkerW := lipgloss.Width(fmt.Sprintf("[%d]", total))
+	out := make([]string, 0, len(active)+1)
+	if len(active) >= 2 {
+		out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d workers active", len(active))))
+	}
+	for _, w := range active {
+		out = append(out, renderSflWorkerRow(w, inner, idxMarkerW, tick))
+	}
+	return out
+}
 
 func TestWorkerPathLabel(t *testing.T) {
 	cases := []struct {
@@ -178,22 +199,26 @@ func TestRenderSflBarPairLabelsBothTracks(t *testing.T) {
 	}
 }
 
-// TestRenderSflBarPairSecretsPending covers the indeterminate Secrets bar:
-// while a streaming source is open the denominator is not final, so the bar
-// drops the percentage for a muted "----" trough and never claims 100%.
+// TestRenderSflBarPairSecretsPending covers the hidden Secrets bar: while a
+// streaming source is open the denominator is not final, so the bar is replaced
+// by a muted "scanning…" hint on the same row — no trough, no percentage — and
+// the row slot stays so the fixed-height frame doesn't shift. The Extract bar
+// keeps its real fraction.
 func TestRenderSflBarPairSecretsPending(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.Ascii)
 	rows := renderSflBarPair("Extract", 0.029, "Secrets", 1.0, true, 72)
 	if strings.Contains(rows[1], "100.0%") {
-		t.Fatalf("pending secrets bar must not show a percentage: %q", rows[1])
+		t.Fatalf("pending secrets row must not show a percentage: %q", rows[1])
 	}
-	if !strings.Contains(rows[1], "----") {
-		t.Fatalf("pending secrets bar should show the ---- trough: %q", rows[1])
+	if !strings.Contains(rows[1], "scanning") {
+		t.Fatalf("pending secrets row should show the scanning… hint: %q", rows[1])
+	}
+	if strings.Contains(rows[1], "----") {
+		t.Fatalf("pending secrets row should not render the old trough: %q", rows[1])
 	}
 	if !strings.Contains(rows[1], "Secrets") {
-		t.Fatalf("pending secrets bar lost its label: %q", rows[1])
+		t.Fatalf("pending secrets row lost its label: %q", rows[1])
 	}
-	// Extract bar is unaffected by the Secrets pending state.
 	if !strings.Contains(rows[0], "2.9%") {
 		t.Fatalf("extract bar should still show its real fraction: %q", rows[0])
 	}
@@ -501,28 +526,6 @@ func TestRenderSflWorkerRowTruncatesLongPath(t *testing.T) {
 	}
 }
 
-func TestSflWorkerRowCap(t *testing.T) {
-	cases := []struct {
-		name          string
-		height, total int
-		want          int
-	}{
-		{"no workers", 50, 0, 0},
-		{"very short term keeps floor", 16, 16, sflMaxWorkerRows},
-		{"floor capped by total", 16, 4, 4},
-		{"mid term below total", 24, 16, 9},
-		{"tall term expands toward total", 60, 16, 16},
-		{"tall term capped at total", 100, 12, 12},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := sflWorkerRowCap(tc.height, tc.total); got != tc.want {
-				t.Fatalf("sflWorkerRowCap(%d, %d) = %d, want %d", tc.height, tc.total, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestSflSecretsWorkerRows locks the fixed-height sizing for the two-bar
 // -secrets frame: as many worker rows as fit beneath the frame overhead, capped
 // at sflMaxWorkerRows and the worker count, dropping to 0 on terminals too short
@@ -570,6 +573,69 @@ func TestSflSecretsFrameFitsTerminal(t *testing.T) {
 	}
 }
 
+// TestSflPlainExtractFrameFitsTerminal is the plain-frame counterpart of the
+// -secrets flicker guard: the single-bar plain frame height is exactly
+// sflPlainFrameOverhead + worker rows and never exceeds termHeight-1.
+func TestSflPlainExtractFrameFitsTerminal(t *testing.T) {
+	for h := 16; h <= 80; h++ {
+		rows := sflPlainWorkerRows(h, 16)
+		if rows == 0 {
+			continue
+		}
+		frameHeight := sflPlainFrameOverhead + rows
+		if frameHeight > h-1 {
+			t.Fatalf("termHeight=%d: frame height %d exceeds clamp %d (footer would truncate)",
+				h, frameHeight, h-1)
+		}
+	}
+}
+
+// TestSflPlainExtractFrameStacked locks the unified plain extract frame to the
+// sfu-style stacked layout: a stats box, the Extract bar on its own line below
+// it, and the worker panel in its own box — and NO Secrets bar / Secrets row,
+// which are -secrets-only. It builds the frame from the same helpers the plain
+// branch of renderProgress composes, so a wiring regression here is caught
+// without needing to run the engine to set Progress.Total.
+func TestSflPlainExtractFrameStacked(t *testing.T) {
+	prog := sflog.NewProgress()
+	prog.SetWorkers(4)
+	const width = 80
+	inner := boxInner(width)
+	header := headerLine(sflSpinnerStyle.Render("·"), sflOkStyle.Render("[sfl] EXTRACTING"), 0, width)
+	statRows := renderExtractStatsRows(1, 1, 1, 10, 5, 2, 1<<19, 1<<20, 1e6)
+	plainBox := sflGradientBox(statRows, width, gradStart, gradEnd)
+	plainBars := []string{sflIndent + sflBarLabel("Extract") + gradientBar(prog.Fraction(), sflBarBody(width))}
+	panel := sflWorkerPanelBox(prog, width, inner, 0, sflPlainFrameOverhead)
+	lines := sflFrameWithBars(header, plainBox, plainBars, panel, width)
+	joined := strings.Join(lines, "\n")
+
+	if strings.Contains(joined, "Secrets") {
+		t.Fatalf("plain frame leaked Secrets content (must be -secrets-only):\n%s", joined)
+	}
+	if !strings.Contains(joined, sflBarLabel("Extract")) {
+		t.Fatalf("plain frame missing the Extract bar:\n%s", joined)
+	}
+	// Two gradient boxes: the stats box and the worker box. Each has one ╭ and
+	// one ╰, so the stacked layout (bar between them, worker panel separate) is
+	// present. The old single-box layout had only one of each.
+	topBorders := strings.Count(joined, "╭")
+	botBorders := strings.Count(joined, "╰")
+	if topBorders != 2 || botBorders != 2 {
+		t.Fatalf("plain frame want 2 gradient boxes (stats + worker), got %d top / %d bottom borders:\n%s",
+			topBorders, botBorders, joined)
+	}
+	// The Extract bar sits between the two boxes: the first ╰ (stats box close)
+	// must come before the Extract bar, which must come before the second ╭
+	// (worker box open).
+	statsClose := strings.Index(joined, "╰")
+	extractAt := strings.Index(joined, sflBarLabel("Extract"))
+	workerOpen := statsClose + strings.Index(joined[statsClose:], "╭")
+	if !(statsClose < extractAt && extractAt < workerOpen) {
+		t.Fatalf("Extract bar not between stats box and worker box (statsClose=%d extract=%d workerOpen=%d):\n%s",
+			statsClose, extractAt, workerOpen, joined)
+	}
+}
+
 func TestRenderFinalSummaryReportsSkippedButOmitsIssueDetail(t *testing.T) {
 	lines := renderFinalSummary("out/sfl.txt", sflog.ExtractStats{
 		ArchivesScanned:  3,
@@ -586,11 +652,62 @@ func TestRenderFinalSummaryReportsSkippedButOmitsIssueDetail(t *testing.T) {
 	if !strings.Contains(joined, "3 skipped") {
 		t.Fatalf("summary missing skipped count:\n%s", joined)
 	}
-	// ...but per-issue detail is streamed to the -err file, never stdout.
+	// ...but the encrypted/password signal lives ONLY in the dedicated warning
+	// box printed above the summary (see TestRenderEncryptedWarning), so the
+	// summary box itself must not duplicate it as an in-box row.
+	if strings.Contains(joined, "no password matched") {
+		t.Fatalf("summary box must not duplicate the encrypted signal:\n%s", joined)
+	}
+	// ...and per-issue detail is streamed to the -err file, never stdout.
 	for _, absent := range []string{"passwords not found", "locked.zip"} {
 		if strings.Contains(joined, absent) {
 			t.Fatalf("issue detail %q must not appear on stdout:\n%s", absent, joined)
 		}
+	}
+}
+
+// TestRenderEncryptedWarning tailors the remediation hint to whether -p was
+// supplied, lists the affected archives, and is suppressed when nothing was
+// undecryptable. The dedicated box is what makes a "0 ULP" encrypted run
+// self-diagnosing instead of reading as an empty archive.
+func TestRenderEncryptedWarning(t *testing.T) {
+	stats := func(provided bool) sflog.ExtractStats {
+		return sflog.ExtractStats{
+			PasswordNotFound: 2,
+			Issues: []sflog.Issue{
+				{Path: "/data/a.zip", Kind: sflog.IssuePasswordNotFound},
+				{Path: "/data/b.zip", Kind: sflog.IssuePasswordNotFound},
+			},
+		}
+	}
+	// No -p: tell the user to provide one.
+	noP := strings.Join(renderEncryptedWarning(stats(false), false, 100), "\n")
+	if !strings.Contains(noP, "ENCRYPTED") || !strings.Contains(noP, "No password was supplied") {
+		t.Fatalf("no-(-p) warning missing title/supplied note:\n%s", noP)
+	}
+	if !strings.Contains(noP, "sfl -p") {
+		t.Fatalf("no-(-p) warning missing -p hint:\n%s", noP)
+	}
+	if !strings.Contains(noP, "a.zip") || !strings.Contains(noP, "b.zip") {
+		t.Fatalf("warning missing affected archive paths:\n%s", noP)
+	}
+	// With -p: don't say "use -p" (they did); point at the list instead.
+	withP := strings.Join(renderEncryptedWarning(stats(true), true, 100), "\n")
+	if strings.Contains(withP, "sfl -p") || strings.Contains(withP, "No password was supplied") {
+		t.Fatalf("with-(-p) warning must not re-tell the user to use -p:\n%s", withP)
+	}
+	if !strings.Contains(withP, "supplied password(s) opened") || !strings.Contains(withP, "Verify the list") {
+		t.Fatalf("with-(-p) warning missing list-verification hint:\n%s", withP)
+	}
+	// Suppressed when nothing was undecryptable.
+	if got := renderEncryptedWarning(sflog.ExtractStats{}, false, 100); len(got) != 0 {
+		t.Fatalf("warning must be nil when PasswordNotFound=0, got %v", got)
+	}
+	// "+N more" when the capped issue list is shorter than the total.
+	capped := sflog.ExtractStats{PasswordNotFound: 5, Issues: []sflog.Issue{{Path: "/x.zip", Kind: sflog.IssuePasswordNotFound}}}
+	more := strings.Join(renderEncryptedWarning(capped, false, 100), "\n")
+	if !strings.Contains(more, "4 more not shown") {
+		t.Fatalf("warning missing '+N more' note:\n%s", more)
 	}
 }
 

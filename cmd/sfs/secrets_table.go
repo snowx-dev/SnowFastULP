@@ -1,16 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/charmbracelet/x/term"
-	"github.com/muesli/termenv"
 )
 
 // runSecretsTable streams every matching row into memory, then renders a
@@ -19,14 +21,6 @@ import (
 // is the human view, the TSV path handles pipes/-o. Count goes to stderr so it
 // never mixes with the table on stdout.
 func runSecretsTable(dbPath string, opts secrets.QueryOpts) error {
-	// The table renders to stdout, so its color profile must follow stdout's
-	// TTY status — not stderr's, which applyStderrColorProfile may have
-	// downgraded to Ascii (a piped stderr with a TTY stdout would otherwise
-	// strip the table's color). Restore the prior profile on the way out.
-	prev := lipgloss.DefaultRenderer().ColorProfile()
-	lipgloss.DefaultRenderer().SetColorProfile(secretsProfile(stdoutIsTTY()))
-	defer lipgloss.DefaultRenderer().SetColorProfile(prev)
-
 	var matches []secrets.Match
 	n, err := secrets.QueryDB(dbPath, opts, func(m secrets.Match) error {
 		matches = append(matches, m)
@@ -39,6 +33,15 @@ func runSecretsTable(dbPath string, opts secrets.QueryOpts) error {
 		fmt.Fprintln(os.Stdout, renderSecretsTable(matches, stdoutWidth()))
 	}
 	printSecretsSummary(n, "", true)
+	if n > 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getwd: %w", err)
+		}
+		if _, err := offerSecretsExport(matches, cwd, os.Stdin, os.Stderr); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -60,9 +63,6 @@ var (
 	secTimeStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "162", Dark: "213"})
 	secHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"})
 	secBorderStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "248", Dark: "238"})
-	secHighStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "203"})
-	secMedStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "130", Dark: "214"})
-	secLowStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "245", Dark: "240"})
 )
 
 // Per-column caps keep one pathological cell (a 2 KiB JWT, a deep source path)
@@ -74,23 +74,10 @@ const (
 	secSourceCap = 60
 )
 
-func severityStyle(sev string) lipgloss.Style {
-	switch strings.ToLower(strings.TrimSpace(sev)) {
-	case "high", "critical", "very high":
-		return secHighStyle
-	case "medium", "moderate":
-		return secMedStyle
-	default:
-		return secLowStyle
-	}
-}
-
 // renderSecretsTable lays out matches as a rounded-border table sized to width.
-// StyleFunc indexes into matches so Severity can be colored by value, which the
-// (row, col) callback alone can't recover.
 func renderSecretsTable(matches []secrets.Match, width int) string {
 	t := table.New().
-		Headers("Type", "Secret", "Severity", "Source", "Last seen").
+		Headers("Type", "Secret", "Source", "Last seen").
 		BorderStyle(secBorderStyle).
 		BorderTop(true).BorderBottom(true).BorderHeader(true).BorderColumn(true).
 		Width(width).Wrap(false)
@@ -100,7 +87,6 @@ func renderSecretsTable(matches []secrets.Match, width int) string {
 		t.Row(
 			trimToDisplayWidth(m.RuleName, secTypeCap),
 			trimToDisplayWidth(m.Secret, secSecretCap),
-			m.Severity,
 			trimToDisplayWidth(sourceTail(m.SourcePath), secSourceCap),
 			m.LastSeen.Format("2006-01-02 15:04"),
 		)
@@ -116,13 +102,8 @@ func renderSecretsTable(matches []secrets.Match, width int) string {
 		case 1:
 			return secSecretStyle
 		case 2:
-			if row >= 0 && row < len(matches) {
-				return severityStyle(matches[row].Severity)
-			}
-			return secLowStyle
-		case 3:
 			return secSourceStyle
-		case 4:
+		case 3:
 			return secTimeStyle
 		}
 		return lipgloss.NewStyle()
@@ -145,15 +126,54 @@ func sourceTail(path string) string {
 	return path
 }
 
-// secretsProfile picks the color profile for the secrets table render. The
-// table goes to stdout, so it follows stdout's TTY status, not stderr's (the
-// rest of the TUI targets stderr and applyStderrColorProfile downgrades that).
-// A non-TTY stdout gets Ascii so ANSI escapes never leak into a pipe; a TTY
-// stdout gets its actually-detected profile, undoing any stderr-driven
-// downgrade for the duration of the render.
-func secretsProfile(stdoutTTY bool) termenv.Profile {
-	if !stdoutTTY {
-		return termenv.Ascii
+// offerSecretsExport asks on out (stderr) whether to dump the matched secrets to
+// a clean, one-secret-per-line txt file in cwd. Default is no: an empty or
+// unrecognized reply writes nothing. On yes it dedups the secret values and
+// writes them to sfs_secrets_<stamp>.txt, returning the path. in/out are
+// parameters so the prompt is testable without touching real stdio.
+func offerSecretsExport(matches []secrets.Match, cwd string, in io.Reader, out io.Writer) (string, error) {
+	if len(matches) == 0 {
+		return "", nil
 	}
-	return termenv.NewOutput(os.Stdout).Profile
+	fmt.Fprintf(out, "Export %d secret(s) to a clean txt in %s? [y/N] ", len(matches), cwd)
+	reader := bufio.NewReader(in)
+	line, _ := reader.ReadString('\n')
+	if !confirmYes(strings.TrimSpace(line)) {
+		fmt.Fprintln(out, "skipped")
+		return "", nil
+	}
+	path, err := defaultSecretsExportPath(cwd, time.Now())
+	if err != nil {
+		return "", err
+	}
+	seen := make(map[string]struct{}, len(matches))
+	var buf strings.Builder
+	for _, m := range matches {
+		if m.Secret == "" {
+			continue
+		}
+		if _, dup := seen[m.Secret]; dup {
+			continue
+		}
+		seen[m.Secret] = struct{}{}
+		buf.WriteString(m.Secret)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(buf.String()), 0o644); err != nil {
+		return "", fmt.Errorf("write export: %w", err)
+	}
+	noun := "secrets"
+	if len(seen) == 1 {
+		noun = "secret"
+	}
+	fmt.Fprintf(out, "exported %d %s → %s\n", len(seen), noun, path)
+	return path, nil
+}
+
+func confirmYes(s string) bool {
+	switch strings.ToLower(s) {
+	case "y", "yes":
+		return true
+	}
+	return false
 }

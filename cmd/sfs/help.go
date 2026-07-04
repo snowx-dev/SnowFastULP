@@ -40,7 +40,7 @@ func renderHelp(bin string) string {
 		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
 		{"-since", "DUR", "Only search archives modified within DUR, e.g. 7d, 12h, 90m."},
 		{"-sec", "", "Search the secrets DB (from `sfl -secrets`); PATTERN filters by type ('*' = all)."},
-		{"-secrets-path", "PATH", "Path to the secrets DB (default: <root>/sfl-secrets.sqlite). -sec-path is an alias."},
+		{"-secrets-path", "PATH", "Path to the secrets DB (default: <root>/sfl-secrets.sqlite). Implies -sec; -sec-path is an alias."},
 	}
 	nerds := []argDef{
 		{"-j", "N", "Set search worker count."},
