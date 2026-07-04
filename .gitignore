@@ -37,7 +37,5 @@
 /sfl-*.sqlite
 /sfl-secrets.sqlite
 /sfl-ingest-*.log
-# local visual-check notes — contain real data paths; never commit
-/.visual-checks.md
 *.idx
 *.write.*.tmp
