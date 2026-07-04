@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
@@ -264,6 +265,58 @@ func TestRenderProgressSecretsFinalizePhase(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("finalize frame missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+// TestMatcherBadgeGating locks the go-regex warning: never when -secrets is off,
+// silent on the libhs build, and a tasteful "build with -tags vectorscan + libhs"
+// nudge on the slow pure-Go build — demoted or dropped on narrow terminals so it
+// never crowds out the elapsed clock.
+func TestMatcherBadgeGating(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	base := sflOkStyle.Render("[sfl] EXTRACTING")
+	if got := matcherBadge(false, base, 110); got != "" {
+		t.Fatalf("badge must be empty when -secrets is off, got %q", got)
+	}
+	switch secrets.MatcherBackend {
+	case "libhs":
+		if got := matcherBadge(true, base, 110); got != "" {
+			t.Fatalf("libhs build must not warn, got %q", got)
+		}
+	case "go-regex":
+		got := matcherBadge(true, base, 110)
+		if !strings.Contains(got, "go-regex") || !strings.Contains(got, "libhs") {
+			t.Fatalf("go-regex build should warn with the libhs nudge, got %q", got)
+		}
+		// Narrow terminal: drop entirely rather than crowd the clock/wrap.
+		if narrow := matcherBadge(true, base, 50); narrow != "" {
+			t.Fatalf("narrow terminal should drop the badge, got %q", narrow)
+		}
+	default:
+		t.Fatalf("unknown MatcherBackend %q", secrets.MatcherBackend)
+	}
+}
+
+// TestRenderProgressShowsRegexWarningOnSecretsRun threads the warning through a
+// real frame: a -secrets run on the go-regex build surfaces it in the live
+// header (finalizing phase here, since extraction needs unexported setters),
+// while a libhs build stays silent and a non-secrets run never warns.
+func TestRenderProgressShowsRegexWarningOnSecretsRun(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	prog := sflog.NewProgress()
+	prog.EnableSecrets()
+	prog.BeginSecretsFinalize()
+	joined := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
+	if secrets.MatcherBackend == "go-regex" {
+		if !strings.Contains(joined, "go-regex") || !strings.Contains(joined, "use libhs") {
+			t.Fatalf("go-regex secrets run should surface the libhs warning:\n%s", joined)
+		}
+	} else if strings.Contains(joined, "go-regex") {
+		t.Fatalf("libhs build must not show the go-regex warning:\n%s", joined)
+	}
+	plain := strings.Join(renderProgress(0, sflog.NewProgress(), 0, 0, 0, 80), "\n")
+	if strings.Contains(plain, "go-regex") {
+		t.Fatalf("non-secrets run must not show the matcher warning:\n%s", plain)
 	}
 }
 

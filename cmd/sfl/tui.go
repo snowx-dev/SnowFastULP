@@ -36,14 +36,18 @@ const (
 )
 
 var (
-	sflTitleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFDDE6")).Bold(true)
-	sflOkStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA6")).Bold(true)
-	sflUniqueStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
-	sflAcceptStyle       = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
-	sflCountStyle        = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "51"})
-	sflByteStyle         = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "178", Dark: "222"})
-	sflMutedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6818F"))
-	sflWarnStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
+	sflTitleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFDDE6")).Bold(true)
+	sflOkStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA6")).Bold(true)
+	sflUniqueStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
+	sflAcceptStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "29", Dark: "82"})
+	sflCountStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "51"})
+	sflByteStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "178", Dark: "222"})
+	sflMutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6818F"))
+	sflWarnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
+	// sflNoticeStyle is the non-bold amber used for the in-header go-regex
+	// matcher warning — softer than sflWarnStyle's bold so it reads as a nudge
+	// rather than an alarm while the user is watching extraction.
+	sflNoticeStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
 	sflLabelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#E8B6C6")).Bold(true)
 	sflSpinnerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8FA6")).Bold(true)
 	sflInterruptBoxStyle = lipgloss.NewStyle().
@@ -122,6 +126,32 @@ func headerLine(spinnerStyled, tag string, elapsed time.Duration, width int) str
 		pad = 1
 	}
 	return left + strings.Repeat(" ", pad) + right
+}
+
+// matcherBadge appends a tasteful amber warning to the live header tag when
+// -secrets is running on titus's pure-Go regex matcher (the slow, lib-free
+// fallback) — nudging the user toward the libhs build instead of letting them
+// unknowingly grind through a big dump on the slow engine. Empty when -secrets
+// is off, when the build already uses libhs, or when the terminal is too narrow
+// to fit the badge without squeezing out the elapsed clock. baseTagStyled is the
+// already-styled phase tag the badge will be concatenated to, used to compute
+// the remaining free width.
+func matcherBadge(secretsOn bool, baseTagStyled string, width int) string {
+	if !secretsOn || secrets.MatcherBackend == "libhs" {
+		return ""
+	}
+	// termWidth() caps at sflDisplayWidth (80), so this targets the capped frame:
+	// one concise badge that carries both motivators ("slow" + "use libhs") rather
+	// than a full/short tier whose long form would never fit under the cap.
+	badge := sflNoticeStyle.Render("  · go-regex (slow) — use libhs")
+	// headerLine layout: indent(sflLeftPad) + spinner(1) + "  "(2) + tag + clock
+	// (max "59m59s") + min pad. Drop the badge on narrow terminals where it would
+	// crowd the clock or wrap, so a cramped header never garbles.
+	free := width - sflLeftPad - 1 - 2 - lipgloss.Width(baseTagStyled) - 8
+	if free < lipgloss.Width(badge) {
+		return ""
+	}
+	return badge
 }
 
 // frostTagline renders text along the ice-blue footer gradient, faint, for the
@@ -590,7 +620,8 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 	// A moving spinner + the running found count so the hand-off to the summary
 	// never reads as a frozen 100%.
 	if prog.Phase() == phaseSecretsFinalizeVal {
-		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] FINALIZING SECRETS"), elapsed, width)
+		tag := sflOkStyle.Render("[sfl] FINALIZING SECRETS")
+		header := headerLine(sflSpinnerStyle.Render(spinner), tag+matcherBadge(prog.SecretsEnabled(), tag, width), elapsed, width)
 		box := sflGradientBox([]string{
 			recapRow("Secrets", sflUniqueStyle.Render(formatInt(int(prog.SecretsFound())))+sflMutedStyle.Render(" found")),
 			sflMutedStyle.Render("writing to store…"),
@@ -618,7 +649,9 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 		phase = "SCANNING SECRETS"
 	}
 
-	header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] "+phase), elapsed, width)
+	header := headerLine(sflSpinnerStyle.Render(spinner),
+		sflOkStyle.Render("[sfl] "+phase)+matcherBadge(prog.SecretsEnabled(), sflOkStyle.Render("[sfl] "+phase), width),
+		elapsed, width)
 
 	if scanning {
 		// During discovery the total weight is unknown, so show a live "found"
