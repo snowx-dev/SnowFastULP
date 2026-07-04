@@ -103,16 +103,16 @@ func TestParseAndroidCredentials(t *testing.T) {
 		host, login, password string
 	}{
 		{
-			in:       "android://2S2AVDtVBrUfxRaWYUMU==@com.netflix.mediaclient/:user@gmail.com:secret",
-			host:     "android://2S2AVDtVBrUfxRaWYUMU==@com.netflix.mediaclient/",
+			in:       "android://Zm9vYmFy@com.netflix.mediaclient/:user@gmail.com:secret",
+			host:     "android://Zm9vYmFy@com.netflix.mediaclient/",
 			login:    "user@gmail.com",
 			password: "secret",
 		},
 		{
 			// [NOT_SAVED] placeholder is a non-empty password -> kept
-			in:       "android://kCyQ_-x==@com.pinterest/:malam.sarfaraz@gmail.com:[NOT_SAVED]",
-			host:     "android://kCyQ_-x==@com.pinterest/",
-			login:    "malam.sarfaraz@gmail.com",
+			in:       "android://Zm9vYmFy@com.pinterest/:login.a@example.com:[NOT_SAVED]",
+			host:     "android://Zm9vYmFy@com.pinterest/",
+			login:    "login.a@example.com",
 			password: "[NOT_SAVED]",
 		},
 		{

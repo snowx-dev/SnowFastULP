@@ -16,7 +16,7 @@ func TestFormatRecordStableChoosesRoundTrippableForm(t *testing.T) {
 		{"port url kept after verify", "https://a.example.com:8080:user:pw1", "a.example.com:8080:user:pw1"},
 		{"json tail kept full", `twitter.com:moraxd5:{"uid":"123","token"`, `twitter.com:moraxd5:{"uid":"123","token"`},
 		{"colon url rescued by host-only", "user:pw1:https://clean.example.com/:weird:path", "clean.example.com:user:pw1"},
-		{"unrepresentable dropped", `jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:abdell.zouad@gmail.co:NellaAde9:@Nv@g`, ""},
+		{"unrepresentable dropped", `jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:login.b@example.net:PassWord9:@Nv@g`, ""},
 	}
 	lf := newLineFormatter()
 	for _, tc := range cases {
@@ -56,13 +56,13 @@ func TestFormatRecordStableGuaranteesRoundTrip(t *testing.T) {
 		"https://a.example.com:user@mail.com:pw1",
 		"user:pass:https://site.com",
 		`twitter.com:moraxd5:{"uid":"123","token"`,
-		`dash.cloudflare.com/sign-up:holik@gmail.com:{"cc"`,
+		`dash.cloudflare.com/sign-up:login.c@example.com:{"cc"`,
 		"sub.host.co.uk:8443:bob:secret",
 		"192.168.1.1:user:pass",
 		"10.0.0.5:8080:admin:admin",
 		"plain.example.com:joe:p@ss:word",
 		"user:pw1:https://clean.example.com/:weird:path",
-		`jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:abdell.zouad@gmail.co:NellaAde9:@Nv@g`,
+		`jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:login.b@example.net:PassWord9:@Nv@g`,
 	}
 	lf := newLineFormatter()
 	for _, line := range corpus {

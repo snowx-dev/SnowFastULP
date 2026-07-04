@@ -32,5 +32,12 @@
 *.sfsidx.json.tmp
 /sfs-debug-*.log
 /sfs_results_*.txt
+# sfl run artifacts — may contain real credential data; never commit
+/sfl_*.txt
+/sfl-*.sqlite
+/sfl-secrets.sqlite
+/sfl-ingest-*.log
+# local visual-check notes — contain real data paths; never commit
+/.visual-checks.md
 *.idx
 *.write.*.tmp

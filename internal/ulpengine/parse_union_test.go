@@ -43,12 +43,12 @@ func TestParseUnionCoversStrictAndLoose(t *testing.T) {
 		},
 		{
 			name:      "strict-only: open-brace cookie tail",
-			line:      `dash.cloudflare.com/sign-up:holik@gmail.com:{"cc"`,
+			line:      `dash.cloudflare.com/sign-up:login.c@example.com:{"cc"`,
 			strictOK:  true,
 			looseOK:   false,
 			unionOK:   true,
 			wantHost:  "dash.cloudflare.com",
-			wantLogin: "holik@gmail.com",
+			wantLogin: "login.c@example.com",
 			wantPass:  `{"cc"`,
 		},
 		{

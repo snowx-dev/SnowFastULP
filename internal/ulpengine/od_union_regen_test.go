@@ -26,7 +26,7 @@ func TestODUnionRegenNoStragglers(t *testing.T) {
 		"https://a.example.com:user1:pw1",
 		"https://b.example.com:user2:pw2",
 		`twitter.com:moraxd5:{"uid":"7178515064324310021","token"`,
-		`dash.cloudflare.com/sign-up:holik@gmail.com:{"cc"`,
+		`dash.cloudflare.com/sign-up:login.c@example.com:{"cc"`,
 	}
 	pastArchive := filepath.Join(libDir, "sfu_old.txt.zst")
 	writeZstdArchive(t, pastArchive, lines)
@@ -112,7 +112,7 @@ func TestRoundTripGuardSelfReingestNoStragglers(t *testing.T) {
 		"https://a.example.com:user1:pw1",
 		"https://b.example.com:user2:pw2",
 		`twitter.com:moraxd5:{"uid":"123","token"`, // strict-only but round-trippable -> kept
-		`jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:abdell.zouad@gmail.co:NellaAde9:@Nv@g`, // unrepresentable -> dropped
+		`jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:login.b@example.net:PassWord9:@Nv@g`, // unrepresentable -> dropped
 	}, "\n")+"\n")
 
 	m1 := runBucketedIngest(t, libDir, run1Input, "one")
