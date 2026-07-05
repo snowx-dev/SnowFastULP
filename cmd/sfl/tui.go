@@ -43,9 +43,12 @@ var (
 	sflCountStyle  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "51"})
 	sflByteStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "178", Dark: "222"})
 	sflMutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6818F"))
-	sflWarnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
-	// sflNoticeStyle is the non-bold amber used for the in-header go-regex
-	// matcher warning — softer than sflWarnStyle's bold so it reads as a nudge
+	// sflWarnStyle matches sfu's warnStyle (orange) so rejected/skipped numbers
+	// and the DRY RUN badge read the same across both CLIs. sflNoticeStyle below
+	// stays amber for the softer in-header matcher nudge.
+	sflWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "130", Dark: "214"})
+	// sflNoticeStyle is the amber used for the in-header go-regex matcher
+	// warning — softer than sflWarnStyle's orange so it reads as a nudge
 	// rather than an alarm while the user is watching extraction.
 	sflNoticeStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E"))
 	sflLabelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#E8B6C6")).Bold(true)
@@ -126,6 +129,15 @@ func headerLine(spinnerStyled, tag string, elapsed time.Duration, width int) str
 		pad = 1
 	}
 	return left + strings.Repeat(" ", pad) + right
+}
+
+// dryRunSuffix appends an amber DRY RUN marker to the live header tag so a
+// -odr preview is unmistakable while the run is in flight. Empty on a real run.
+func dryRunSuffix(prog *sflog.Progress) string {
+	if prog == nil || !prog.DryRun() {
+		return ""
+	}
+	return " " + sflWarnStyle.Render("DRY RUN")
 }
 
 // matcherBadge appends a tasteful amber warning to the live header tag when
@@ -604,7 +616,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 	// stats rows (mirroring extract) plus optional regen worker rows.
 	if prog.Phase() == phaseIngestVal {
 		iv, _ := prog.IngestSnapshot()
-		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] INGESTING"), elapsed, width)
+		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] INGESTING")+dryRunSuffix(prog), elapsed, width)
 		bar := gradientBar(iv.Fraction, inner)
 		body := append([]string{bar}, renderIngestStatsRows(iv)...)
 		if iv.Status != "" {
@@ -621,7 +633,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 	// never reads as a frozen 100%.
 	if prog.Phase() == phaseSecretsFinalizeVal {
 		tag := sflOkStyle.Render("[sfl] FINALIZING SECRETS")
-		header := headerLine(sflSpinnerStyle.Render(spinner), tag+matcherBadge(prog.SecretsEnabled(), tag, width), elapsed, width)
+		header := headerLine(sflSpinnerStyle.Render(spinner), tag+matcherBadge(prog.SecretsEnabled(), tag, width)+dryRunSuffix(prog), elapsed, width)
 		box := sflGradientBox([]string{
 			recapRow("Secrets", sflUniqueStyle.Render(formatInt(int(prog.SecretsFound())))+sflMutedStyle.Render(" found")),
 			sflMutedStyle.Render("writing to store…"),
@@ -649,8 +661,9 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 		phase = "SCANNING SECRETS"
 	}
 
+	tag := sflOkStyle.Render("[sfl] " + phase)
 	header := headerLine(sflSpinnerStyle.Render(spinner),
-		sflOkStyle.Render("[sfl] "+phase)+matcherBadge(prog.SecretsEnabled(), sflOkStyle.Render("[sfl] "+phase), width),
+		tag+matcherBadge(prog.SecretsEnabled(), tag, width)+dryRunSuffix(prog),
 		elapsed, width)
 
 	if scanning {
@@ -1210,15 +1223,19 @@ func recapRow(label, value string) string {
 
 // recapCountRows is the labeled metric block (one row per group so big counts
 // never wrap mid-number). Kept separate from the issue block so the ingest
-// frame can slot library-ingest rows before the issues block.
+// frame can slot library-ingest rows before the issues block. Number colors
+// mirror sfu's summary: cyan counts, gold bytes, green unique/accepted, orange
+// skipped — so the two CLIs read the same at a glance.
 func recapCountRows(stats sflog.ExtractStats) []string {
+	dot := sflMutedStyle.Render("  ·  ")
 	rows := []string{
-		recapRow("Logs", sflOkStyle.Render(formatInt(stats.Logs))+
-			sflMutedStyle.Render("  ·  "+formatInt(stats.Credentials)+" parsed")),
+		recapRow("Logs", sflCountStyle.Render(formatInt(stats.Logs))+
+			dot+sflAcceptStyle.Render(formatInt(stats.Credentials))+sflMutedStyle.Render(" parsed")),
 		recapRow("Unique", sflUniqueStyle.Render(formatInt(stats.Emitted))+
-			sflMutedStyle.Render("  ·  "+formatInt(stats.Duplicates)+" duplicates")),
-		recapRow("Sources", sflMutedStyle.Render(fmt.Sprintf("%s files  ·  %s archives  ·  %s skipped",
-			formatInt(stats.FilesScanned), formatInt(stats.ArchivesScanned), formatInt(stats.SkippedFiles+stats.SkippedArchives)))),
+			dot+sflCountStyle.Render(formatInt(stats.Duplicates))+sflMutedStyle.Render(" duplicates")),
+		recapRow("Sources", sflCountStyle.Render(formatInt(stats.FilesScanned))+sflMutedStyle.Render(" files  ·  ")+
+			sflCountStyle.Render(formatInt(stats.ArchivesScanned))+sflMutedStyle.Render(" archives  ·  ")+
+			sflWarnStyle.Render(formatInt(stats.SkippedFiles+stats.SkippedArchives))+sflMutedStyle.Render(" skipped")),
 	}
 	// Secret files scanned only appears on -secrets runs; on plain extracts
 	// SecretFiles is zero and the row is omitted to keep the recap tight.
@@ -1262,8 +1279,12 @@ func renderSflRemovedRows(bullets []string, maxInnerWidth int) []string {
 // Extraction already deduped, so there are no within-run duplicates to show
 // here (sfu's third bullet). Surfacing rejected closes the recap's arithmetic:
 // extraction Unique == Added + rejected + already-in-library.
-func renderIngestLibraryRows(newToLib, alreadyInLib, dropped int64, innerWidth int) []string {
-	rows := []string{recapRow("Added", sflUniqueStyle.Render(formatInt(int(newToLib)))+
+func renderIngestLibraryRows(newToLib, alreadyInLib, dropped int64, innerWidth int, dryRun bool) []string {
+	addedLabel := "Added"
+	if dryRun {
+		addedLabel = "Would add"
+	}
+	rows := []string{recapRow(addedLabel, sflUniqueStyle.Render(formatInt(int(newToLib)))+
 		sflMutedStyle.Render(" entries"))}
 	var bullets []string
 	if dropped > 0 {
@@ -1293,13 +1314,17 @@ func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, noti
 // renderNoIngestSummary is the -od frame when extraction produced no
 // credentials: a calm "done, nothing to do" recap with the library left
 // untouched, rather than an error exit.
-func renderNoIngestSummary(libraryDir string, stats sflog.ExtractStats) []string {
-	return renderNoIngestSummaryWithNotice(libraryDir, stats, nil)
+func renderNoIngestSummary(libraryDir string, stats sflog.ExtractStats, dryRun bool) []string {
+	return renderNoIngestSummaryWithNotice(libraryDir, stats, nil, dryRun)
 }
 
-func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
+func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats, notice *selfupdate.Notice, dryRun bool) []string {
 	width := termWidth()
-	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
+	titleText := "SnowFastLog COMPLETE"
+	if dryRun {
+		titleText = "SnowFastLog DRY RUN"
+	}
+	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render(titleText)
 	body := append(recapCountRows(stats),
 		"",
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
@@ -1313,31 +1338,35 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 // what this run contributed (new vs already-present), and the resulting library
 // line count and path, so the single icy frame ends the run instead of handing
 // off to sfu's summary.
-func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string) []string {
-	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, dropped, stats, outputPaths, nil)
+func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string, dryRun bool) []string {
+	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, dropped, stats, outputPaths, nil, dryRun)
 }
 
-func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string, notice *selfupdate.Notice) []string {
+func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string, notice *selfupdate.Notice, dryRun bool) []string {
 	width := termWidth()
-	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog INGESTED")
+	titleText := "SnowFastLog INGESTED"
+	if dryRun {
+		titleText = "SnowFastLog DRY RUN"
+	}
+	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render(titleText)
 	// Box holds clean stats only: extraction recap, Added/Removed ingest rows,
 	// library path. Failures/skips are streamed to the -err file (never stdout);
 	// the running library total gets its own box below (mirrors sfu's renderODSummary).
-	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, dropped, boxInner(width))...)
+	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, dropped, boxInner(width), dryRun)...)
 	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
 	box := sflGradientBox(body, width, gradStart, gradEnd)
 	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
 	out := []string{"", title, ""}
 	out = append(out, box...)
-	out = append(out, renderIngestOutputFooter(outputPaths)...)
+	out = append(out, renderIngestOutputFooter(outputPaths, dryRun)...)
 	out = append(out, summaryFooterLines(width, notice)...)
 	return out
 }
 
 // renderIngestOutputFooter lists archive(s) written this run below the ingest
 // summary boxes, mirroring sfu's renderDoneOutputFooter layout.
-func renderIngestOutputFooter(paths []string) []string {
+func renderIngestOutputFooter(paths []string, dryRun bool) []string {
 	const label = "Output   "
 	mid := gradStart.BlendLuv(gradEnd, 0.5)
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
@@ -1345,6 +1374,12 @@ func renderIngestOutputFooter(paths []string) []string {
 	labelW := lipgloss.Width(labelCell)
 	prefix := strings.Repeat(" ", sflLeftPad) + border.Render("┃") + "  "
 	blankLabel := strings.Repeat(" ", labelW)
+
+	// dry-run wrote nothing to the library; state that plainly instead of
+	// listing the per-run temp scratch paths (already cleaned by now).
+	if dryRun {
+		return []string{"", prefix + labelCell + sflMutedStyle.Render("(dry run — nothing written)")}
+	}
 
 	// Empty after a completed ingest = nothing new was added (all duplicates); the
 	// engine discarded the empty shard, so state that plainly instead of dropping

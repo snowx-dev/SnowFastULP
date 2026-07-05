@@ -39,8 +39,14 @@ type Config struct {
 	NoEncodingSniff bool // -no-encoding-sniff, forces UTF-8 path
 	DestDedup       bool // -od
 	DestDedupDir    string
-	Debug           *DebugLog
-	Reject          *RejectRecorder
+	// DryRun (-odr): library mode runs the full parse/dedup/compress pipeline
+	// but writes nothing to the library. The would-be archive + sidecars land
+	// in the per-run temp dir (auto-cleaned); od_scan reads existing sidecars
+	// for dedup but skips the v2→v3 upgrade and stale regen writes; -del is
+	// suppressed. Stats are identical to a real -od run.
+	DryRun bool
+	Debug  *DebugLog
+	Reject *RejectRecorder
 }
 
 // default -zst split granularity, lands ~1.2-1.8 GB compressed/part
@@ -266,6 +272,9 @@ func runBucketed(ctx context.Context, r *Resolved, m *Metrics) error {
 	RegisterCleanupPath(runDir)
 	r.Cfg.Debug.Event("runDir: %s", runDir)
 
+	// dry-run uses a discard sink (see newLineSink), so Cfg.Output is never
+	// written and the library dir is never touched — no temp redirect needed.
+
 	stopDbg := startDebugProgress(ctx, r.Cfg.Debug, m, r.OdMetrics)
 	defer stopDbg()
 
@@ -286,30 +295,40 @@ func runBucketed(ctx context.Context, r *Resolved, m *Metrics) error {
 	if r.Cfg.DestDedup {
 		// fail fast on a bad dest dir BEFORE shard does work — the scan now runs
 		// concurrently, so a missing/non-dir would otherwise surface only after
-		// shard wasted effort.
+		// shard wasted effort. Dry-run relaxes this: a missing library is
+		// treated as empty (everything the run produces is "new"), so a user
+		// can preview against a not-yet-existing library path.
 		if fi, statErr := os.Stat(r.Cfg.DestDedupDir); statErr != nil {
-			return fmt.Errorf("od-scan: dest dir: %w", statErr)
-		} else if !fi.IsDir() {
-			return fmt.Errorf("od-scan: dest dir: %s is not a directory", r.Cfg.DestDedupDir)
-		}
-		odRunning = true
-		m.Phase.Store(phaseShard) // OD frame stacks below the shard frame
-		go func() {
-			defer close(odDone)
-			odRes, err := runODScan(odCtx, odConfig{
-				Dest:            r.Cfg.DestDedupDir,
-				CurrentRunStamp: r.Cfg.RunStamp,
-				Buckets:         r.BucketCount,
-				TempDir:         runDir,
-				Debug:           r.Cfg.Debug,
-			}, r.OdMetrics)
-			if err != nil {
-				odErr = err
-				return
+			if !r.Cfg.DryRun {
+				return fmt.Errorf("od-scan: dest dir: %w", statErr)
 			}
-			r.OdResult = odRes
-			destSidecars = odRes.DestSidecarPaths
-		}()
+			r.Cfg.Debug.Event("[odr] dry-run: dest dir absent, treating as empty library: %s", r.Cfg.DestDedupDir)
+		} else if !fi.IsDir() {
+			if !r.Cfg.DryRun {
+				return fmt.Errorf("od-scan: dest dir: %s is not a directory", r.Cfg.DestDedupDir)
+			}
+			r.Cfg.Debug.Event("[odr] dry-run: dest not a dir, treating as empty library: %s", r.Cfg.DestDedupDir)
+		} else {
+			odRunning = true
+			m.Phase.Store(phaseShard) // OD frame stacks below the shard frame
+			go func() {
+				defer close(odDone)
+				odRes, err := runODScan(odCtx, odConfig{
+					Dest:            r.Cfg.DestDedupDir,
+					CurrentRunStamp: r.Cfg.RunStamp,
+					Buckets:         r.BucketCount,
+					TempDir:         runDir,
+					DryRun:          r.Cfg.DryRun,
+					Debug:           r.Cfg.Debug,
+				}, r.OdMetrics)
+				if err != nil {
+					odErr = err
+					return
+				}
+				r.OdResult = odRes
+				destSidecars = odRes.DestSidecarPaths
+			}()
+		}
 	}
 
 	tShard := time.Now()

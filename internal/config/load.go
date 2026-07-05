@@ -40,13 +40,9 @@ func Load(path string, explicit bool) (File, error) {
 		return File{}, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 
-	if strings.TrimSpace(raw.SFU.O) != "" && strings.TrimSpace(raw.SFU.OD) != "" {
-		return File{}, fmt.Errorf("config: [sfu] cannot set both o and od")
-	}
-	if strings.TrimSpace(raw.SFL.O) != "" && strings.TrimSpace(raw.SFL.OD) != "" {
-		return File{}, fmt.Errorf("config: [sfl] cannot set both o and od")
-	}
-
+	// Both o and od may coexist in the config: when no CLI output flag is
+	// given, ApplySFU/ApplySFL pick -od (library mode) in priority over -o.
+	// Any CLI -o/-od/-odr suppresses the config pull so CLI wins.
 	baseDir := filepath.Dir(path)
 	return File{
 		path:    path,

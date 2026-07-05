@@ -388,7 +388,8 @@ type odConfig struct {
 	CurrentRunStamp string // matching files excluded from discovery
 	Buckets         int    // MUST match phase 1/2 B
 	TempDir         string
-	Workers         int // 0 = min(GOMAXPROCS, archivesNeedingRegen)
+	Workers         int  // 0 = min(GOMAXPROCS, archivesNeedingRegen)
+	DryRun          bool // -odr: read existing sidecars for dedup, skip all library writes
 	Debug           *DebugLog
 }
 
@@ -432,16 +433,19 @@ func runODScan(ctx context.Context, cfg odConfig, m *ODMetrics) (*ODResult, erro
 	}
 	cfg.Debug.Event("[od] scan begin: dest=%s, found=%d runs", cfg.Dest, len(runs))
 
-	// orphan sweep, non-fatal
-	if n, err := sweepOrphanedSidecars(cfg.Dest, runs); err != nil {
-		cfg.Debug.Event("[od] orphan sweep: warn: %v", err)
-	} else if n > 0 {
-		cfg.Debug.Event("[od] orphan sweep: removed %d stale .idx files", n)
-	}
-	if n, err := sweepOrphanedSearchSidecars(cfg.Dest, runs); err != nil {
-		cfg.Debug.Event("[od] search orphan sweep: warn: %v", err)
-	} else if n > 0 {
-		cfg.Debug.Event("[od] search orphan sweep: removed %d stale .sfsidx.json files", n)
+	// orphan sweep, non-fatal. skipped in dry-run: removing stale .idx files
+	// from the user's library is a write, and a preview must not mutate it.
+	if !cfg.DryRun {
+		if n, err := sweepOrphanedSidecars(cfg.Dest, runs); err != nil {
+			cfg.Debug.Event("[od] orphan sweep: warn: %v", err)
+		} else if n > 0 {
+			cfg.Debug.Event("[od] orphan sweep: removed %d stale .idx files", n)
+		}
+		if n, err := sweepOrphanedSearchSidecars(cfg.Dest, runs); err != nil {
+			cfg.Debug.Event("[od] search orphan sweep: warn: %v", err)
+		} else if n > 0 {
+			cfg.Debug.Event("[od] search orphan sweep: removed %d stale .sfsidx.json files", n)
+		}
 	}
 
 	if len(runs) == 0 {
@@ -502,7 +506,7 @@ func runODScan(ctx context.Context, cfg odConfig, m *ODMetrics) (*ODResult, erro
 	// regen pool, one task per part. corrupt part = skip w/ warning,
 	// siblings stay usable
 	skippedParts := make(map[string]bool)
-	if len(needRegen) > 0 {
+	if len(needRegen) > 0 && !cfg.DryRun {
 		if m != nil {
 			m.Phase.Store(int32(odPhaseRegen))
 		}
@@ -516,11 +520,20 @@ func runODScan(ctx context.Context, cfg odConfig, m *ODMetrics) (*ODResult, erro
 		if m != nil {
 			m.ArchivesSkipped.Store(int32(len(paths)))
 		}
+	} else if len(needRegen) > 0 && cfg.DryRun {
+		// dry-run: no regen writes. parts with missing/stale sidecars simply
+		// contribute no dedup keys (their sidecar is unreadable as-is), so the
+		// preview may under-count "already in library" for a library with
+		// missing indexes. The library is never mutated.
+		cfg.Debug.Event("[odr] dry-run: skipping regen of %d parts", len(needRegen))
 	}
 
 	// one-time transparent migration: re-sort legacy v2 sidecars to v3 in place.
 	// never decompresses the archive; bounded RAM via the writer's spill/merge.
-	if len(needUpgrade) > 0 {
+	// Skipped in dry-run — the preview assumes the library is on the current
+	// (v3) sidecar format, so existing sidecars are read as-is and the upgrade
+	// is deferred to the next real -od run.
+	if len(needUpgrade) > 0 && !cfg.DryRun {
 		if m != nil {
 			m.Phase.Store(int32(odPhaseUpgrade))
 		}
@@ -528,6 +541,8 @@ func runODScan(ctx context.Context, cfg odConfig, m *ODMetrics) (*ODResult, erro
 			return nil, fmt.Errorf("odScan: upgrade: %w", err)
 		}
 		cfg.Debug.Event("[od] upgraded %d legacy v2 sidecars to sorted v3", len(needUpgrade))
+	} else if len(needUpgrade) > 0 && cfg.DryRun {
+		cfg.Debug.Event("[odr] dry-run: skipping v2→v3 upgrade of %d sidecars (library assumed current format)", len(needUpgrade))
 	}
 
 	// majority-skipped check: > half the library unreadable = refuse run.
@@ -542,15 +557,25 @@ func runODScan(ctx context.Context, cfg odConfig, m *ODMetrics) (*ODResult, erro
 	}
 
 	// run-level counts: fresh = all parts fresh, regen = at least one
-	// dirty and all succeeded, skipped = at least one failed
-	runsFresh, runsRegen, runsSkipped, skippedRunPaths := classifyRunOutcomes(runs, needRegen, skippedParts)
+	// dirty and all succeeded, skipped = at least one failed. In dry-run no
+	// regen/upgrade ran, so report honest zero writes (pass nil needRegen so
+	// classifyRunOutcomes doesn't tag runs as regen based on intent alone).
+	classifyNeedRegen := needRegen
+	if cfg.DryRun {
+		classifyNeedRegen = nil
+	}
+	runsFresh, runsRegen, runsSkipped, skippedRunPaths := classifyRunOutcomes(runs, classifyNeedRegen, skippedParts)
 
+	upgraded := len(needUpgrade)
+	if cfg.DryRun {
+		upgraded = 0
+	}
 	res := &ODResult{
 		ArchivesTotal:       len(runs),
 		ArchivesFresh:       runsFresh,
 		ArchivesRegen:       runsRegen,
 		ArchivesSkipped:     runsSkipped,
-		ArchivesUpgraded:    len(needUpgrade),
+		ArchivesUpgraded:    upgraded,
 		SkippedArchivePaths: skippedRunPaths,
 		FilesTotal:          totalParts,
 		Elapsed:             time.Since(started),

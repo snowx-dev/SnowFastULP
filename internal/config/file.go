@@ -17,6 +17,7 @@ type SFUSection struct {
 	Input           string `toml:"input"`
 	O               string `toml:"o"`
 	OD              string `toml:"od"`
+	ODR             bool   `toml:"odr"`
 	Workers         *int   `toml:"workers"`
 	Dedup           *int   `toml:"dedup"`
 	Buckets         *int   `toml:"buckets"`
@@ -53,20 +54,23 @@ type SFSSection struct {
 
 // SFLSection maps to sfl CLI flags. Input fills positional INPUT_PATH, CLI wins.
 type SFLSection struct {
-	Input         string `toml:"input"`
-	O             string `toml:"o"`
-	OD            string `toml:"od"`
-	Password      string `toml:"p"`
-	Workers       *int   `toml:"workers"`
-	TempDir       string `toml:"temp_dir"`
-	NoTUI         bool   `toml:"no_tui"`
-	Zst           bool   `toml:"zst"`
-	Del           bool   `toml:"del"`
-	NoURI         bool   `toml:"no_uri"`
-	Debug         bool   `toml:"debug"`
-	NoUpdateCheck bool   `toml:"no_update_check"`
-	Secrets       bool   `toml:"secrets"`
-	SecretsPath   string `toml:"secrets_path"`
+	Input         string   `toml:"input"`
+	O             string   `toml:"o"`
+	OD            string   `toml:"od"`
+	ODR           bool     `toml:"odr"`
+	Password      string   `toml:"p"`
+	Workers       *int     `toml:"workers"`
+	TempDir       string   `toml:"temp_dir"`
+	NoTUI         bool     `toml:"no_tui"`
+	Zst           bool     `toml:"zst"`
+	Del           bool     `toml:"del"`
+	NoURI         bool     `toml:"no_uri"`
+	Debug         bool     `toml:"debug"`
+	NoUpdateCheck bool     `toml:"no_update_check"`
+	Secrets       bool     `toml:"secrets"`
+	SecretsPath   string   `toml:"secrets_path"`
+	SecretsAllow  []string `toml:"secrets_allow"`
+	SecretsDeny   []string `toml:"secrets_deny"`
 }
 
 // Path returns the loaded config file path.

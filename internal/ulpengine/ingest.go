@@ -25,6 +25,7 @@ type IngestOptions struct {
 	ZstChunkLines int64     // split granularity, 0 = DefaultZstChunkLines
 	RunStarted    time.Time // run clock origin, zero = time.Now()
 	RunStamp      string    // "<YYYYMMDD>_<id>", "" = derived
+	DryRun        bool      // -odr: full pipeline but no library writes
 
 	// OnResolved, if set, is invoked once the run is resolved (after the
 	// dest-dedup metrics are attached, before Run starts) so a caller can grab
@@ -75,8 +76,12 @@ func Ingest(ctx context.Context, opts IngestOptions, m *Metrics) (*Resolved, err
 	if err != nil {
 		return nil, fmt.Errorf("ingest: resolve library dir: %w", err)
 	}
-	if err := os.MkdirAll(outDirAbs, 0o755); err != nil {
-		return nil, fmt.Errorf("ingest: create library dir: %w", err)
+	// dry-run never creates the library dir; od_scan treats a missing dest as
+	// an empty library and the would-be output lands in the per-run temp dir.
+	if !opts.DryRun {
+		if err := os.MkdirAll(outDirAbs, 0o755); err != nil {
+			return nil, fmt.Errorf("ingest: create library dir: %w", err)
+		}
 	}
 	absOut, err := filepath.Abs(filepath.Join(outDirAbs, WithZstExt(DefaultBasename(stamp), true)))
 	if err != nil {
@@ -100,6 +105,7 @@ func Ingest(ctx context.Context, opts IngestOptions, m *Metrics) (*Resolved, err
 		NoURI:         opts.NoURI,
 		DestDedup:     true,
 		DestDedupDir:  outDirAbs,
+		DryRun:        opts.DryRun,
 		Debug:         opts.Debug,
 	}
 

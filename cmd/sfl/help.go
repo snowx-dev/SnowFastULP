@@ -37,11 +37,20 @@ func renderHelp(bin string) string {
 		{"-no-tui", "", "Use plain text output instead of the live screen."},
 	}
 	nerds := []argDef{
+		{"-odr", "DIR", "Like -od but write nothing; preview what a run would add to the library."},
 		{"-workers", "N", "Set parser/archive worker count."},
 		{"-temp-dir", "PATH", "Store temp files in this folder."},
-		{"-secrets", "", "Scan common secret-bearing files (env, config, keys, docs, source) for secrets (API keys, tokens) into a sqlite store. Requires a `-tags secrets` build."},
-		{"-secrets-path", "PATH", "Where to store the secrets DB (default: <output>/sfl-secrets.sqlite). -sec-path is an alias."},
 		{"-del", "", "Delete source archives/files after a successful run."},
+	}
+	// Secret-scanning flags only exist in a `-tags secrets` build; hide them
+	// from -h otherwise so the help never advertises a missing feature.
+	if secretsEnabled {
+		nerds = append(nerds,
+			argDef{"-secrets", "", "Scan common secret-bearing files (env, config, keys, docs, source) for secrets (API keys, tokens) into a sqlite store."},
+			argDef{"-secrets-path", "PATH", "Where to store the secrets DB. A dir (trailing \"/\" or existing dir) gets sfl-secrets.sqlite appended; a file path is used verbatim. Default: <-o>/<-od>/CWD. -sec-path is an alias."},
+			argDef{"-secrets-allow", "GLOB", "Titus rule-ID glob to keep (e.g. 'np.aws.*'); repeatable. Empty = all rules."},
+			argDef{"-secrets-deny", "GLOB", "Titus rule-ID glob to drop (e.g. 'np.aws.3'); repeatable. Wins over -secrets-allow."},
+		)
 	}
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},

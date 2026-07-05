@@ -30,6 +30,14 @@ type indexedLineSink interface {
 }
 
 func newLineSink(r *Resolved) (lineSink, error) {
+	// dry-run writes nothing: a discard sink counts unique lines + would-be
+	// uncompressed bytes exactly like a real sink (so stats and the live
+	// write-rate match a -od run) but creates no archive, no sidecar, and no
+	// temp file. Compression CPU is skipped entirely.
+	if r.Cfg.DryRun {
+		return discardSink{}, nil
+	}
+
 	writeSearchIdx := r.Cfg.DestDedup && r.Cfg.Compress
 	indexSidecar := r.Cfg.DestDedup
 
@@ -55,6 +63,31 @@ func sinkOutputPaths(s lineSink) []string {
 	}
 	return s.outputPaths()
 }
+
+// discardSink is the dry-run sink: it bumps the same counters a real sink does
+// (LinesUnique, BytesWritten) so the recap stats and live write-rate match a
+// live -od run, but writes nothing to disk — no archive, no sidecar, no temp
+// file. The library is never touched and compression is skipped entirely.
+type discardSink struct{}
+
+func (discardSink) writeBatch(buf []byte, lineCount int, m *Metrics) error {
+	if m != nil && lineCount > 0 {
+		m.LinesUnique.Add(int64(lineCount))
+		m.BytesWritten.Add(int64(len(buf)))
+	}
+	return nil
+}
+
+func (discardSink) writeBatchIndexed(buf []byte, _ []uint64, lineCount int, m *Metrics) error {
+	if m != nil && lineCount > 0 {
+		m.LinesUnique.Add(int64(lineCount))
+		m.BytesWritten.Add(int64(len(buf)))
+	}
+	return nil
+}
+
+func (discardSink) close() error          { return nil }
+func (discardSink) outputPaths() []string { return nil }
 
 // removeOutputFiles discards a failed run's output. It removes each archive plus
 // any sidecars committed for it, so a failed/cancelled run never leaves an orphan

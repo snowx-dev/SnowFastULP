@@ -576,6 +576,10 @@ func renderDedupHeaderBadges(r *ulpengine.Resolved) string {
 		return ""
 	}
 	var badges []string
+	if r.Cfg.DryRun {
+		// lead with the dry-run flag so it's the first thing the eye catches
+		badges = append(badges, warnStyle.Render("DRY RUN"))
+	}
 	if r.Cfg.DestDedup && r.OdMetrics != nil {
 		if total := r.OdMetrics.KeysTotalEstimate.Load(); total > 0 {
 			badges = append(badges, "vs "+formatLibraryCount(total)+" library")
@@ -588,8 +592,13 @@ func renderDedupHeaderBadges(r *ulpengine.Resolved) string {
 		return ""
 	}
 	var out strings.Builder
-	for _, b := range badges {
+	for i, b := range badges {
 		out.WriteString(" ")
+		// first badge (DRY RUN) is already styled; the rest get the muted dot
+		if i == 0 && r.Cfg.DryRun {
+			out.WriteString("· " + b)
+			continue
+		}
 		out.WriteString(mutedStyle.Render("· " + b))
 	}
 	return out.String()
@@ -1166,6 +1175,11 @@ func outputPathsForUI(r *ulpengine.Resolved) []string {
 	if r == nil {
 		return nil
 	}
+	// dry-run writes to a per-run temp dir that's already been cleaned by the
+	// time the summary renders; never surface those scratch paths.
+	if r.Cfg.DryRun {
+		return nil
+	}
 	if len(r.OutputPaths) > 0 {
 		return r.OutputPaths
 	}
@@ -1189,31 +1203,41 @@ func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.R
 		dup = 0
 	}
 
-	header := renderPhaseHeader(okStyle.Render("✓"), "COMPLETE", elapsed, width)
+	phaseLabel := "COMPLETE"
+	if r.Cfg.DryRun {
+		phaseLabel = "COMPLETE · DRY RUN"
+	}
+	header := renderPhaseHeader(okStyle.Render("✓"), phaseLabel, elapsed, width)
 
 	// "Output" reports on-disk size. -zst appends "(N.NNx compressed)"
 	// against the byte counter (uncompressed input to encoder). stat
-	// failure falls back to counter
-	outBytes := m.BytesWritten.Load()
-	outDisplay := humanBytes(outBytes)
-	var ratioNote string
-	if r.Cfg.Compress {
-		paths := outputPathsForUI(r)
-		if len(paths) > 0 {
-			var diskSize int64
-			for _, p := range paths {
-				if fi, err := os.Stat(p); err == nil {
-					diskSize += fi.Size()
+	// failure falls back to counter. Skipped entirely in dry-run: nothing
+	// was written, so a size row would be misleading; the DRY RUN banner +
+	// "(dry run — nothing written)" footer carry that signal instead.
+	var outputRow string
+	if !r.Cfg.DryRun {
+		outBytes := m.BytesWritten.Load()
+		outDisplay := humanBytes(outBytes)
+		var ratioNote string
+		if r.Cfg.Compress {
+			paths := outputPathsForUI(r)
+			if len(paths) > 0 {
+				var diskSize int64
+				for _, p := range paths {
+					if fi, err := os.Stat(p); err == nil {
+						diskSize += fi.Size()
+					}
 				}
-			}
-			if diskSize > 0 {
-				outDisplay = humanBytes(diskSize)
-				if diskSize > 0 && outBytes > 0 {
-					ratio := float64(outBytes) / float64(diskSize)
-					ratioNote = fmt.Sprintf("  (%.2fx compressed)", ratio)
+				if diskSize > 0 {
+					outDisplay = humanBytes(diskSize)
+					if diskSize > 0 && outBytes > 0 {
+						ratio := float64(outBytes) / float64(diskSize)
+						ratioNote = fmt.Sprintf("  (%.2fx compressed)", ratio)
+					}
 				}
 			}
 		}
+		outputRow = labelStyle.Render("Output   ") + byteStyle.Render(outDisplay) + mutedStyle.Render(ratioNote)
 	}
 
 	// path rendered below the frame via renderDoneOutputFooter so long
@@ -1244,8 +1268,16 @@ func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.R
 			countStyle.Render(fmt.Sprintf("%d", r.InputFileCount)) + " " + mutedStyle.Render("files"),
 		labelStyle.Render("Lines    ") + countStyle.Render(formatCount(m.LinesRead.Load())) +
 			" " + mutedStyle.Render("read"),
-		labelStyle.Render("Output   ") + byteStyle.Render(outDisplay) + mutedStyle.Render(ratioNote),
-		labelStyle.Render("Unique   ") + uniqueStyle.Render(formatCount(uniq)) + " " + mutedStyle.Render("entries"),
+	}
+	if outputRow != "" {
+		innerLines = append(innerLines, outputRow)
+	}
+	innerLines = append(innerLines,
+		labelStyle.Render("Unique   ")+uniqueStyle.Render(formatCount(uniq))+" "+mutedStyle.Render("entries"))
+	if r.Cfg.DryRun {
+		// the DRY RUN banner + COMPLETE · DRY RUN header frame the run; "Unique"
+		// is the would-be-added count. No Output row (nothing was written).
+		innerLines = append([]string{warnStyle.Render("DRY RUN — nothing written to the library")}, innerLines...)
 	}
 	// rejected uses warnStyle on final recap (vs muted in live) b/c
 	// number IS the actionable outcome here. label stays muted
@@ -1288,9 +1320,16 @@ func pluralizeArchives(n int) string {
 
 // libraryLineCountTotal is the indexed line count across the whole library
 // after this run: prior archives (phase 0) plus unique lines just written.
-func libraryLineCountTotal(res *ulpengine.ODResult, m *ulpengine.Metrics) int64 {
-	total := int64(res.TotalKeysLoaded)
-	if m != nil {
+// In dry-run nothing is written, so it reports the unchanged pre-run total.
+func libraryLineCountTotal(r *ulpengine.Resolved, m *ulpengine.Metrics) int64 {
+	if r == nil || r.OdResult == nil {
+		if m != nil {
+			return m.LinesUnique.Load()
+		}
+		return 0
+	}
+	total := int64(r.OdResult.TotalKeysLoaded)
+	if m != nil && !r.Cfg.DryRun {
 		total += m.LinesUnique.Load()
 	}
 	return total
@@ -1309,7 +1348,7 @@ func renderODSummary(r *ulpengine.Resolved, m *ulpengine.Metrics, width int) []s
 	}
 
 	innerLines := []string{
-		uniqueStyle.Render(formatCount(libraryLineCountTotal(res, m))),
+		uniqueStyle.Render(formatCount(libraryLineCountTotal(r, m))),
 		mutedStyle.Render("lines in library"),
 	}
 	if res.ArchivesUpgraded > 0 {
@@ -1389,6 +1428,15 @@ func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
 		return nil
 	}
 	const doneOutputFooterLabel = "Output   "
+	// dry-run wrote to a per-run temp dir, already cleaned; surface an explicit
+	// note instead of a path to a removed scratch file.
+	if r.Cfg.DryRun {
+		mid := doneStart.BlendLuv(doneEnd, 0.5)
+		border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
+		labelCell := labelStyle.Render(doneOutputFooterLabel)
+		prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
+		return []string{"", prefix + labelCell + mutedStyle.Render("(dry run — nothing written)")}
+	}
 	// Post-run r.OutputPaths is authoritative (this footer only renders on
 	// success): empty means every line was rejected or already in the library
 	// and the engine discarded the generated shard. Show an explicit note rather

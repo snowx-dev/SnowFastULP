@@ -99,7 +99,7 @@ func TestRenderIngestSummaryShowsNewVsAlreadyAndLibrarySize(t *testing.T) {
 		Logs:        2,
 		Credentials: 10,
 		Emitted:     10,
-	}, []string{"/data/Library/sfu_20260701_part1.txt.zst"})
+	}, []string{"/data/Library/sfu_20260701_part1.txt.zst"}, false)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"INGESTED",
@@ -126,7 +126,7 @@ func TestRenderNoIngestSummaryReportsLibraryUnchanged(t *testing.T) {
 		SkippedArchives:  1,
 		PasswordNotFound: 1,
 		Issues:           []sflog.Issue{{Path: "/data/locked.zip", Kind: sflog.IssuePasswordNotFound}},
-	})
+	}, false)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"COMPLETE",
@@ -772,7 +772,7 @@ func TestRenderIngestOutputFooter(t *testing.T) {
 	lines := renderIngestOutputFooter([]string{
 		"/lib/sfu_20260701_part1.txt.zst",
 		"/lib/sfu_20260701_part2.txt.zst",
-	})
+	}, false)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"Output", "part1.txt.zst", "part2.txt.zst"} {
 		if !strings.Contains(joined, want) {
@@ -789,7 +789,7 @@ func TestRenderIngestOutputFooterNothingNew(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	defer lipgloss.SetColorProfile(prev)
 
-	joined := strings.Join(renderIngestOutputFooter(nil), "\n")
+	joined := strings.Join(renderIngestOutputFooter(nil, false), "\n")
 	if !strings.Contains(joined, "(nothing new)") {
 		t.Fatalf("want (nothing new) footer for empty ingest, got:\n%s", joined)
 	}
@@ -898,5 +898,57 @@ func TestSflWorkerStageLabelBothRecent(t *testing.T) {
 	row := renderSflWorkerRow(sflog.ActiveWorker{Index: 0, Path: "/data/a.rar", Stage: sflog.StageExtracting, LastULP: now, LastSec: now}, 60, 4, 0)
 	if !strings.Contains(row, "ulp + secrets") {
 		t.Fatalf("both-recent row missing combined label:\n%s", row)
+	}
+}
+
+// -odr dry-run: ingest summary title becomes "SnowFastLog DRY RUN", the
+// Added row is relabeled "Would add", and the output footer states nothing
+// was written instead of listing (temp, already-cleaned) part paths.
+func TestRenderIngestSummaryDryRun(t *testing.T) {
+	lines := renderIngestSummary("/data/Library", 1234, 5, 3, 2, sflog.ExtractStats{
+		Logs:        2,
+		Credentials: 10,
+		Emitted:     10,
+	}, []string{"/data/Library/sfu_20260701_part1.txt.zst"}, true)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"DRY RUN",
+		"Would add",
+		"(dry run — nothing written)",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("dry-run ingest summary missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "INGESTED") {
+		t.Errorf("dry-run title should be DRY RUN, not INGESTED:\n%s", joined)
+	}
+	// the part path must NOT be surfaced in a dry-run footer
+	if strings.Contains(joined, "sfu_20260701_part1.txt.zst") {
+		t.Errorf("dry-run footer must not list the would-be part path:\n%s", joined)
+	}
+}
+
+// dry-run with nothing extracted still flags DRY RUN in the title.
+func TestRenderNoIngestSummaryDryRun(t *testing.T) {
+	lines := renderNoIngestSummary("/data/Library", sflog.ExtractStats{
+		Logs: 1, ArchivesScanned: 1, SkippedArchives: 1, PasswordNotFound: 1,
+	}, true)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "DRY RUN") {
+		t.Errorf("dry-run no-ingest summary missing DRY RUN title:\n%s", joined)
+	}
+	if strings.Contains(joined, "SnowFastLog COMPLETE") {
+		t.Errorf("dry-run no-ingest title should be DRY RUN, not COMPLETE:\n%s", joined)
+	}
+}
+
+// the live header carries an amber DRY RUN marker when the run is a preview.
+func TestRenderProgressDryRunHeader(t *testing.T) {
+	prog := sflog.NewProgress()
+	prog.SetDryRun(true)
+	joined := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
+	if !strings.Contains(joined, "DRY RUN") {
+		t.Fatalf("dry-run live header missing DRY RUN marker:\n%s", joined)
 	}
 }

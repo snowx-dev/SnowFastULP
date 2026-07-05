@@ -53,6 +53,62 @@ func isDirHint(p string) bool {
 	return false
 }
 
+// outputMode captures which output sink the run targets and whether it's a
+// dry-run preview. Kept pure so the -o / -od / -odr mutual-exclusion and
+// config-odr rules are unit-testable independently of main()'s exit path.
+type outputMode struct {
+	destDedup   bool // -od or -odr: incremental dedup against a library
+	dryRun      bool // -odr: write nothing, just preview
+	outArg      string
+	outFlagName string // "-o" | "-od" | "-odr", for error messages
+}
+
+// resolveOutputMode enforces the -o / -od / -odr mutual exclusion and the
+// config-odr-on-od rule. odPassed/odrPassed are whether the user set those
+// flags on the CLI (flag.Visit); odrCfg is the resolved [sfu].odr bool.
+func resolveOutputMode(out, outDedup, outDryRun string, odPassed, odrPassed, odrCfg bool) (outputMode, error) {
+	outCount := 0
+	if out != "" {
+		outCount++
+	}
+	if outDedup != "" {
+		outCount++
+	}
+	if outDryRun != "" {
+		outCount++
+	}
+	if outCount > 1 {
+		return outputMode{}, fmt.Errorf("-o, -od, and -odr are mutually exclusive; pick one")
+	}
+	if odPassed && strings.TrimSpace(outDedup) == "" {
+		return outputMode{}, fmt.Errorf("-od requires a directory path; got empty string")
+	}
+	if odrPassed && strings.TrimSpace(outDryRun) == "" {
+		return outputMode{}, fmt.Errorf("-odr requires a directory path; got empty string")
+	}
+	m := outputMode{outArg: out, outFlagName: "-o"}
+	if outDedup != "" {
+		m.destDedup = true
+		m.outArg = outDedup
+		m.outFlagName = "-od"
+	}
+	if outDryRun != "" {
+		m.destDedup = true
+		m.dryRun = true
+		m.outArg = outDryRun
+		m.outFlagName = "-odr"
+	}
+	// config odr=true flips dry-run on a -od run, reusing the od path.
+	if !m.dryRun && odrCfg {
+		if !m.destDedup {
+			return outputMode{}, fmt.Errorf("[sfu] odr=true requires a library path; set [sfu].od or pass -od/-odr DIR")
+		}
+		m.dryRun = true
+		m.outFlagName = "-odr"
+	}
+	return m, nil
+}
+
 func main() {
 	// A panic anywhere below (e.g. inside ulpengine.Run) would otherwise crash
 	// with the alt-screen still up and the cursor hidden. Restore first, then
@@ -110,6 +166,7 @@ func main() {
 
 	out := flag.String("o", "", "output directory (default: CWD; see -h for file naming)")
 	outDedup := flag.String("od", "", "output directory with incremental dedup against past sfu_*.txt.zst archives in the same dir (auto-enables -zst; mutually exclusive with -o)")
+	outDryRun := flag.String("odr", "", "like -od but writes nothing: preview what a run would add to the library (auto-enables -zst; mutually exclusive with -o and -od)")
 	workers := flag.Int("workers", 0, "phase-1 parser goroutines (0=auto)")
 	workersAlias := flag.Int("j", 0, "alias for -workers")
 	dedupW := flag.Int("dedup", 0, "phase-2 dedup goroutines (0=auto)")
@@ -138,8 +195,9 @@ func main() {
 	// Accept -j as an alias for -workers (sfs uses -j) so the same invocation
 	// works across all three CLIs; explicit -workers wins.
 	visited.ResolveIntAlias(workers, workersAlias, "workers", "j")
+	var odrCfg bool
 	if err := fileCfg.ApplySFU(visited, config.SFUFlags{
-		O: out, OD: outDedup, TempDir: tempDir,
+		O: out, OD: outDedup, ODR: &odrCfg, TempDir: tempDir,
 		Workers: workers, Dedup: dedupW, Buckets: buckets,
 		SplitZst: splitZst,
 		NoTUI:    noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
@@ -185,26 +243,23 @@ func main() {
 		fatalf("input: %v", err)
 	}
 
-	// -o and -od mutually exclusive. -od does incremental dedup vs past
+	// -o, -od, -odr mutually exclusive. -od does incremental dedup vs past
 	// sfu archives and implies -zst (sidecar/regen only reads .zst).
-	// flag.Visit only iterates user-set flags, so explicit `-od ""`
-	// shows up while a missing flag doesnt
+	// -odr is -od's dry-run twin: same pipeline + stats, no library writes.
+	// flag.Visit only iterates user-set flags, so explicit `-od ""` /
+	// `-odr ""` show up while a missing flag doesnt
 	odPassed := visited["od"]
-	if *outDedup != "" && *out != "" {
-		usagef("-od and -o are mutually exclusive; pick one")
+	odrPassed := visited["odr"]
+	mode, err := resolveOutputMode(*out, *outDedup, *outDryRun, odPassed, odrPassed, odrCfg)
+	if err != nil {
+		usagef("%v", err)
 	}
-	if odPassed && strings.TrimSpace(*outDedup) == "" {
-		usagef("-od requires a directory path; got empty string")
-	}
-	destDedup := *outDedup != ""
-	outArg := *out
-	outFlagName := "-o"
-	if destDedup {
-		outArg = *outDedup
-		outFlagName = "-od"
-		if !*zst {
-			*zst = true
-		}
+	destDedup := mode.destDedup
+	dryRun := mode.dryRun
+	outArg := mode.outArg
+	outFlagName := mode.outFlagName
+	if destDedup && !*zst {
+		*zst = true
 	}
 
 	outDir, autoMkdir, err := resolveOutputDir(outFlagName, outArg)
@@ -225,7 +280,7 @@ func main() {
 		fatalf("resolve output: %v", err)
 	}
 
-	if autoMkdir {
+	if autoMkdir && !dryRun {
 		if err := os.MkdirAll(outDirAbs, 0o755); err != nil {
 			fatalf("create output dir: %v", err)
 		}
@@ -249,6 +304,7 @@ func main() {
 		NoEncodingSniff: *noEncodingSniff,
 		DestDedup:       destDedup,
 		DestDedupDir:    outDirAbs,
+		DryRun:          dryRun,
 	}
 	r, err := ulpengine.Resolve(cfg)
 	if err != nil {
@@ -380,7 +436,7 @@ func main() {
 		reg.ExitWithCode(1)
 	}
 
-	if *delSrc {
+	if *delSrc && !dryRun {
 		// delete BEFORE logCompletion so outcome lands in same block
 		deleted, err := ulpengine.DeleteParsedInputs(inputs, r.OutputPaths)
 		if err != nil {

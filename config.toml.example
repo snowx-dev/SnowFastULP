@@ -1,20 +1,31 @@
-# Optional defaults for sfu and sfs. Copy to your config path (see README).
-# CLI flags always override these values. Relative paths resolve against the
-# directory containing THIS file, not the CWD where you invoke sfu/sfs.
+# TL;DR — copy this file to your SnowFast config path:
+#   Linux/macOS:  ~/.config/snowfast/config.toml
+#                 (or $XDG_CONFIG_HOME/snowfast/config.toml when XDG_CONFIG_HOME is set)
+#   Windows:      %AppData%\snowfast\config.toml
+# Override: -config PATH, --config PATH, or SNOWFAST_CONFIG env var (must exist).
+# Default path may be absent (no config loaded); explicit overrides must exist.
+#
+# Optional defaults for sfu, sfs, and sfl. CLI flags always override these values.
+# Relative paths resolve against the directory containing THIS file, not the CWD
+# where you invoke sfu/sfs/sfl. Leading ~/ expands to home.
 #
 # Naming: TOML keys use snake_case, CLI flags use kebab-case. The loader
 # maps them automatically (e.g. `temp_dir` here = `-temp-dir` on the CLI).
 # All other keys map 1:1 with their flag name.
+# Full docs: https://snowfast.todo/docs/guides/configuration
 
-# ---- sfu (parser + dedup) ---------------------------------------------------
+# ---- sfu (parser + dedup + antipublic library) ---------------------------------------------------
 [sfu]
 # I/O — pair these three for bare `./sfu` invocation:
 # input = "./dumps/raw/"      # fills the positional INPUT_PATH when no argv;
                                # CLI positional wins when both are set.
-# o     = "./out/"            # single-run output dir (mutually exclusive with od).
+# o     = "./out/"            # single-run output dir. May coexist with od:
+                               # with no CLI flag, od wins (library mode) and o
+                               # is ignored. Any CLI -o/-od/-odr overrides both.
 # od    = "./library/"        # incremental dedup against past sfu_*.txt.zst in
                                # this dir; auto-enables zst.
-# del   = true                # after success, delete parsed inputs (irreversible).
+# odr   = false               # dry-run: like od but write nothing (reuses od path).
+# del   = true                # after success ONLY, delete parsed inputs (irreversible).
 
 # Output format
 # zst        = true           # zstd-compress the merged output (searchable by sfs).
@@ -38,7 +49,7 @@
 # debug        = false        # write structured job debug log in CWD.
 # debug_reject = false        # append parser-rejected lines to a file in CWD.
 
-# ---- sfs (zst archive search) ----------------------------------------------
+# ---- sfs (txt & zst archive search) ----------------------------------------------
 [sfs]
 # I/O
 # dir    = "./library/"       # default search dir when no positional given.
@@ -63,12 +74,18 @@
 # Diagnostics
 # debug = false               # write structured job debug log in CWD.
 
+# Secret search (reads the sqlite DB written by `sfl -secrets`)
+# sec          = false        # search the secrets DB instead of ULP archives.
+# secrets_path = ""           # DB path. Setting this (or -sec-path) implies sec.
+
 # ---- sfl (stealer log extraction) ------------------------------------------
 [sfl]
 # I/O — pair these for bare `./sfl` invocation:
 # input = "./logs/"           # extracted log, folder of logs, archive, or archive dir.
-# o     = "./ulp/"            # classic ULP output dir (mutually exclusive with od).
+# o     = "./ulp/"            # classic ULP output dir. May coexist with od:
+                               # with no CLI flag, od wins and o is ignored.
 # od    = "./library/"        # ingest extracted ULPs into an existing sfu library.
+# odr   = false               # dry-run: like od but write nothing (reuses od).
 # p     = "passwords.txt"     # archive password or password-list file.
 # del   = false               # after success, delete parsed source archives/files.
 
@@ -84,3 +101,14 @@
 # no_tui          = false     # disable live TUI; print plain summary at end.
 # debug           = false     # write structured job debug log in CWD.
 # no_update_check = false     # disable update availability checks.
+
+
+# ----------- Requires building sfl with dedicated libs, check online documentation for more details
+# ---- This is intentionally gate-kept to avoid putting something too powerful in everyone's hands
+
+# secrets       = false       # scan non-credential files for secrets into a sqlite store.
+# secrets_path  = ""          # where to write sfl-secrets.sqlite (default: <o>/<od>/CWD).
+# secrets_allow = ["np.aws.*"]   # glob of titus rule IDs to keep; empty = all rules.
+# secrets_deny  = ["np.aws.3"]   # glob of titus rule IDs to drop; wins over secrets_allow.
+# Full rule list available in online docs:
+

@@ -3,7 +3,6 @@ package config_test
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/snowx-dev/SnowFastULP/internal/config"
@@ -48,14 +47,37 @@ no_uri = true
 	}
 }
 
-func TestLoadRejectsBothSFLOAndOD(t *testing.T) {
+func TestLoadAcceptsBothSFLOAndOD(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("[sfl]\no = \"/a\"\nod = \"/b\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := config.Load(path, true)
-	if err == nil || !strings.Contains(err.Error(), "[sfl] cannot set both o and od") {
-		t.Fatalf("err = %v", err)
+	if _, err := config.Load(path, true); err != nil {
+		t.Fatalf("Load rejected both o and od: %v", err)
+	}
+}
+
+// config sets both o and od and no CLI output flag is given: -od wins, -o is
+// ignored (library mode priority). Mirrors the sfu behavior.
+func TestApplySFLConfigODTakesPriorityOverO(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[sfl]\no = \"/a\"\nod = \"/b\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, od := "", ""
+	if err := f.ApplySFL(config.Visited{}, config.SFLFlags{O: &o, OD: &od}); err != nil {
+		t.Fatalf("ApplySFL returned error: %v", err)
+	}
+	if od != "/b" {
+		t.Fatalf("od = %q, want /b (priority)", od)
+	}
+	if o != "" {
+		t.Fatalf("o = %q, want empty (ignored when od wins)", o)
 	}
 }
 
@@ -144,5 +166,91 @@ func TestApplySFLCLIOOverridesConfigOD(t *testing.T) {
 	}
 	if od != "" {
 		t.Fatalf("od = %q, want config value ignored", od)
+	}
+}
+
+// [sfl] odr = true reuses the od path: ApplySFL resolves od into the OD flag
+// and sets ODR=true so the CLI flips dry-run on a -od run. The CLI -odr path
+// suppresses the config od pull so the two don't trip mutual exclusion.
+func TestApplySFLODRReusesODPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[sfl]\nod = \"lib\"\nodr = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.SFL.ODR {
+		t.Fatalf("SFL.ODR = false, want true")
+	}
+
+	od, odr := "", false
+	if err := f.ApplySFL(config.Visited{}, config.SFLFlags{OD: &od, ODR: &odr}); err != nil {
+		t.Fatalf("ApplySFL: %v", err)
+	}
+	if want := filepath.Join(dir, "lib"); od != want {
+		t.Fatalf("od = %q, want resolved %q", od, want)
+	}
+	if !odr {
+		t.Fatalf("odr flag not enabled from config")
+	}
+
+	// CLI -odr suppresses the config od pull so mutual exclusion in main()
+	// doesn't see both od and odr populated from config.
+	od2, odr2 := "", false
+	if err := f.ApplySFL(config.Visited{"odr": true}, config.SFLFlags{OD: &od2, ODR: &odr2}); err != nil {
+		t.Fatalf("ApplySFL with -odr: %v", err)
+	}
+	if od2 != "" {
+		t.Fatalf("config od should NOT be pulled when -odr is on the CLI; od = %q", od2)
+	}
+}
+
+// config secrets_allow/deny populate the flag slices when no CLI flag is set.
+func TestApplySFLSecretsAllowDenyFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[sfl]\nsecrets_allow = [\"np.aws.*\"]\nsecrets_deny = [\"np.aws.3\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allow, deny []string
+	if err := f.ApplySFL(config.Visited{}, config.SFLFlags{SecretsAllow: &allow, SecretsDeny: &deny}); err != nil {
+		t.Fatal(err)
+	}
+	if len(allow) != 1 || allow[0] != "np.aws.*" {
+		t.Fatalf("allow = %v, want [np.aws.*]", allow)
+	}
+	if len(deny) != 1 || deny[0] != "np.aws.3" {
+		t.Fatalf("deny = %v, want [np.aws.3]", deny)
+	}
+}
+
+// CLI -secrets-allow / -secrets-deny win over config: the config slices are
+// not pulled into the flag pointers when the flag was visited.
+func TestApplySFLSecretsAllowCLIOverridesConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[sfl]\nsecrets_allow = [\"np.aws.*\"]\nsecrets_deny = [\"np.aws.3\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow, deny := []string{"np.slack.*"}, []string{}
+	if err := f.ApplySFL(config.Visited{"secrets-allow": true, "secrets-deny": true}, config.SFLFlags{SecretsAllow: &allow, SecretsDeny: &deny}); err != nil {
+		t.Fatal(err)
+	}
+	if len(allow) != 1 || allow[0] != "np.slack.*" {
+		t.Fatalf("CLI allow lost to config: allow = %v", allow)
+	}
+	if len(deny) != 0 {
+		t.Fatalf("CLI deny (empty) lost to config: deny = %v", deny)
 	}
 }

@@ -37,3 +37,18 @@ func TestRenderHelpMatchesSnowFastLayout(t *testing.T) {
 		t.Fatalf("help should not use flag.PrintDefaults layout\n\n%s", help)
 	}
 }
+
+// Default build has no secret-scanning support compiled in, so -h must not
+// advertise any -secrets* flag. The secrets-build counterpart lives in
+// secrets_help_test.go (//go:build secrets).
+func TestRenderHelpHidesSecretsWhenDisabled(t *testing.T) {
+	if secretsEnabled {
+		t.Skip("secrets compiled in; covered by secrets_help_test.go")
+	}
+	help := renderHelp("sfl")
+	for _, s := range []string{"-secrets", "-secrets-path", "-sec-path", "-secrets-allow", "-secrets-deny"} {
+		if strings.Contains(help, s) {
+			t.Fatalf("default-build help advertises %q\n\n%s", s, help)
+		}
+	}
+}

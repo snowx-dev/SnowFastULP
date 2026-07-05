@@ -30,7 +30,7 @@ func TestSecretsEndToEnd(t *testing.T) {
 
 	run := func() (sflog.ExtractStats, secrets.Stats) {
 		t.Helper()
-		sink, closeFn, err := buildSecretSink(dbPath, 2)
+		sink, closeFn, err := buildSecretSink(dbPath, 2, secrets.RuleFilter{})
 		if err != nil {
 			t.Fatalf("buildSecretSink: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestSecretsDedupSkipsIdenticalMembers(t *testing.T) {
 	}
 	buildZip(t, filepath.Join(in, "dupes.zip"), files)
 
-	sink, closeFn, err := buildSecretSink(filepath.Join(t.TempDir(), "s.sqlite"), 4)
+	sink, closeFn, err := buildSecretSink(filepath.Join(t.TempDir(), "s.sqlite"), 4, secrets.RuleFilter{})
 	if err != nil {
 		t.Fatalf("buildSecretSink: %v", err)
 	}

@@ -335,3 +335,50 @@ func TestRenderDoneLinesIncludesLibrarySkipped(t *testing.T) {
 		t.Errorf("DONE row should show 15 as the dest-skipped count\nfull:\n%s", joined)
 	}
 }
+
+// -odr dry-run: the live header carries a DRY RUN badge, the COMPLETE frame is
+// relabeled, an explicit "nothing written" banner sits inside the box, the
+// output footer states the dry-run, and the library recap reports the
+// unchanged pre-run total (not total + would-be-added).
+func TestRenderDryRunSummary(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	m.LinesAccepted.Store(100)
+	m.LinesUnique.Store(7) // would-be-added; must NOT inflate the library total
+	m.LinesRejected.Store(3)
+	m.LinesSkippedByDest.Store(20)
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 20, InputFileCount: 1, Workers: 1,
+		DedupWorkers: 1, BucketCount: 1,
+	}
+	r.Cfg.DestDedup = true
+	r.Cfg.Compress = true
+	r.Cfg.DryRun = true
+	r.OdResult = &ulpengine.ODResult{
+		ArchivesTotal:   4,
+		TotalKeysLoaded: 1_000_000,
+	}
+
+	// live header badge
+	if badges := renderDedupHeaderBadges(r); !strings.Contains(badges, "DRY RUN") {
+		t.Errorf("dry-run header missing DRY RUN badge; got %q", badges)
+	}
+
+	out := renderFinalStdoutSummary(time.Second, m, r, 100, nil)
+	joined := strings.Join(out, "\n")
+	for _, want := range []string{
+		"COMPLETE · DRY RUN",
+		"DRY RUN — nothing written to the library",
+		"(dry run — nothing written)",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("dry-run summary missing %q\nfull:\n%s", want, joined)
+		}
+	}
+	// library recap = unchanged pre-run total (1,000,000), not 1,000,007
+	if strings.Contains(joined, "1,000,007") {
+		t.Errorf("dry-run library total must stay unchanged; got 1,000,007\nfull:\n%s", joined)
+	}
+	if !strings.Contains(joined, "1,000,000") {
+		t.Errorf("dry-run library total should show unchanged 1,000,000\nfull:\n%s", joined)
+	}
+}

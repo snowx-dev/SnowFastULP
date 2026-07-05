@@ -47,6 +47,7 @@ func renderHelp(bin string) string {
 		{"-no-tui", "", "Use plain text output instead of the live screen."},
 	}
 	nerds := []argDef{
+		{"-odr", "DIR", "Like -od but write nothing; preview what a run would add to the library."},
 		{"-workers", "N", "Set parser worker count."},
 		{"-dedup", "N", "Set dedup worker count."},
 		{"-buckets", "N", "Set the number of temp buckets."},

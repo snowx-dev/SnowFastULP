@@ -53,14 +53,37 @@ clean = true
 	}
 }
 
-func TestLoadRejectsBothOAndOD(t *testing.T) {
+func TestLoadAcceptsBothOAndOD(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("[sfu]\no = \"/a\"\nod = \"/b\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := config.Load(path, true)
-	if err == nil || !strings.Contains(err.Error(), "both o and od") {
-		t.Fatalf("err = %v", err)
+	if _, err := config.Load(path, true); err != nil {
+		t.Fatalf("Load rejected both o and od: %v", err)
+	}
+}
+
+// config sets both o and od and no CLI output flag is given: -od wins, -o is
+// ignored (library mode priority).
+func TestApplySFUConfigODTakesPriorityOverO(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[sfu]\no = \"/a\"\nod = \"/b\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, od := "", ""
+	if err := f.ApplySFU(config.Visited{}, config.SFUFlags{O: &o, OD: &od}); err != nil {
+		t.Fatalf("ApplySFU returned error: %v", err)
+	}
+	if od != "/b" {
+		t.Fatalf("od = %q, want /b (priority)", od)
+	}
+	if o != "" {
+		t.Fatalf("o = %q, want empty (ignored when od wins)", o)
 	}
 }
 

@@ -44,3 +44,23 @@ func TestRenderHelpUsesShortBeginnerFriendlyFlagDescriptions(t *testing.T) {
 		}
 	}
 }
+
+// -odr is documented in the nerdy tier so library-mode users can find the
+// dry-run preview without it cluttering the beginner block.
+func TestRenderHelpIncludesODRInNerdyTier(t *testing.T) {
+	help := renderHelp("sfu")
+	for _, want := range []string{"-odr", "preview what a run would add to the library"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help missing %q\n\n%s", want, help)
+		}
+	}
+	// it must NOT be in the primary tier (beginner block keeps -o/-od/-zst/...)
+	// — the nerdy tier starts at this header, so -odr must appear after it.
+	nerdyStart := strings.Index(help, "Args (for nerds):")
+	if nerdyStart < 0 {
+		t.Fatal("could not locate nerdy tier header in help")
+	}
+	if idx := strings.Index(help[:nerdyStart], "-odr"); idx >= 0 {
+		t.Errorf("-odr should be in the nerdy tier, not the primary block:\n%s", help)
+	}
+}

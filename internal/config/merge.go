@@ -48,6 +48,7 @@ func (v Visited) ResolveStringAlias(canonical, alias *string, canonicalName, ali
 // SFUFlags holds pointers to sfu flag variables for config merge.
 type SFUFlags struct {
 	O, OD, TempDir          *string
+	ODR                     *bool
 	Workers, Dedup, Buckets *int
 	SplitZst                *int64
 	NoTUI, Zst, Del, NoURI  *bool
@@ -57,19 +58,31 @@ type SFUFlags struct {
 
 // ApplySFU applies unvisited config values to sfu flags.
 func (f File) ApplySFU(v Visited, fl SFUFlags) error {
-	if !v.set("o") && !v.set("od") && f.SFU.O != "" {
+	// Any CLI output flag (-o/-od/-odr) suppresses the config o/od pull so
+	// CLI wins. When none are on the CLI and the config sets both o and od,
+	// -od takes priority (library mode) and o is ignored — a legacy -o in the
+	// config won't silently override -od.
+	odFromCfg := false
+	if !v.set("o") && !v.set("od") && !v.set("odr") && f.SFU.OD != "" {
+		p, err := f.ResolvedSFUDir("od")
+		if err != nil {
+			return err
+		}
+		*fl.OD = p
+		odFromCfg = true
+	}
+	if !v.set("o") && !v.set("od") && !v.set("odr") && !odFromCfg && f.SFU.O != "" {
 		p, err := f.ResolvedSFUDir("o")
 		if err != nil {
 			return err
 		}
 		*fl.O = p
 	}
-	if !v.set("o") && !v.set("od") && f.SFU.OD != "" {
-		p, err := f.ResolvedSFUDir("od")
-		if err != nil {
-			return err
-		}
-		*fl.OD = p
+	// config odr=true flips dry-run on a -od run (reuses the od path). CLI
+	// -odr sets dry-run directly in main, so this is additive and harmless
+	// when both are present.
+	if f.SFU.ODR {
+		*fl.ODR = true
 	}
 	if !v.set("workers") && f.SFU.Workers != nil {
 		*fl.Workers = *f.SFU.Workers
@@ -197,12 +210,14 @@ func setSFSStreamFlag(fl SFSFlags) {
 
 // SFLFlags holds pointers to sfl flag variables for config merge.
 type SFLFlags struct {
-	O, OD, TempDir, Password *string
-	SecretsPath              *string
-	Workers                  *int
-	NoTUI, Zst, Del, NoURI   *bool
-	Debug, NoUpdateCheck     *bool
-	Secrets                  *bool
+	O, OD, TempDir, Password  *string
+	ODR                       *bool
+	SecretsPath               *string
+	SecretsAllow, SecretsDeny *[]string
+	Workers                   *int
+	NoTUI, Zst, Del, NoURI    *bool
+	Debug, NoUpdateCheck      *bool
+	Secrets                   *bool
 }
 
 // ApplySFL applies unvisited config values to sfl flags. Unlike ApplySFU/
@@ -213,19 +228,28 @@ type SFLFlags struct {
 // nil-safe: a nil map makes every v.set(...) return false, so a nil Visited
 // means "nothing was set on the command line" and every config value applies.
 func (f File) ApplySFL(v Visited, fl SFLFlags) error {
-	if !v.set("o") && !v.set("od") && f.SFL.O != "" && fl.O != nil {
+	// Any CLI output flag (-o/-od/-odr) suppresses the config o/od pull so
+	// CLI wins. When none are on the CLI and the config sets both o and od,
+	// -od takes priority (library mode) and o is ignored — mirrors ApplySFU.
+	odFromCfg := false
+	if !v.set("o") && !v.set("od") && !v.set("odr") && f.SFL.OD != "" && fl.OD != nil {
+		p, err := f.ResolvedSFLDir("od")
+		if err != nil {
+			return err
+		}
+		*fl.OD = p
+		odFromCfg = true
+	}
+	if !v.set("o") && !v.set("od") && !v.set("odr") && !odFromCfg && f.SFL.O != "" && fl.O != nil {
 		p, err := f.ResolvedSFLDir("o")
 		if err != nil {
 			return err
 		}
 		*fl.O = p
 	}
-	if !v.set("o") && !v.set("od") && f.SFL.OD != "" && fl.OD != nil {
-		p, err := f.ResolvedSFLDir("od")
-		if err != nil {
-			return err
-		}
-		*fl.OD = p
+	// config odr=true flips dry-run on a -od run (reuses the od path).
+	if f.SFL.ODR && fl.ODR != nil {
+		*fl.ODR = true
 	}
 	if !v.set("workers") && f.SFL.Workers != nil && fl.Workers != nil {
 		*fl.Workers = *f.SFL.Workers
@@ -273,6 +297,19 @@ func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 			return err
 		}
 		*fl.SecretsPath = p
+	}
+	// CLI slices win: only pull config allow/deny when the matching flag was
+	// not visited. A non-empty config slice replaces the (empty) default; the
+	// caller then builds a RuleFilter from the merged result.
+	if !v.set("secrets-allow") && len(f.SFL.SecretsAllow) > 0 && fl.SecretsAllow != nil {
+		merged := make([]string, len(f.SFL.SecretsAllow))
+		copy(merged, f.SFL.SecretsAllow)
+		*fl.SecretsAllow = merged
+	}
+	if !v.set("secrets-deny") && len(f.SFL.SecretsDeny) > 0 && fl.SecretsDeny != nil {
+		merged := make([]string, len(f.SFL.SecretsDeny))
+		copy(merged, f.SFL.SecretsDeny)
+		*fl.SecretsDeny = merged
 	}
 	return nil
 }

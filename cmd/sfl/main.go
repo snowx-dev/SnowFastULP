@@ -48,8 +48,13 @@ type runConfig struct {
 	NoUpdateCheck bool
 	Secrets       bool
 	SecretsPath   string
+	SecretsAllow  []string
+	SecretsDeny   []string
 	UpdateChecker *selfupdate.Checker
 	Started       time.Time
+	// DryRun (-odr): run the full extract+ingest pipeline but write nothing
+	// to the library; the summary reports what would have been added.
+	DryRun bool
 	// ForcePlainTUI is set when VT processing can't be enabled (legacy Windows
 	// console), forcing plain output so ANSI escapes never leak as raw text.
 	ForcePlainTUI bool
@@ -85,6 +90,7 @@ func main() {
 
 	out := flag.String("o", "", "output directory")
 	outDedup := flag.String("od", "", "sfu library directory")
+	outDryRun := flag.String("odr", "", "like -od but writes nothing: preview what a run would add to the library")
 	password := flag.String("p", "", "archive password or password-list file")
 	workers := flag.Int("workers", 0, "parser/archive worker count (0=auto)")
 	workersAlias := flag.Int("j", 0, "alias for -workers")
@@ -98,6 +104,9 @@ func main() {
 	secretsOn := flag.Bool("secrets", false, "scan non-credential files for secrets (API keys, tokens) into a sqlite store")
 	secretsPath := flag.String("secrets-path", "", "path to the secrets sqlite DB (default: <output>/sfl-secrets.sqlite)")
 	secretsPathAlias := flag.String("sec-path", "", "alias for -secrets-path")
+	var secretsAllow, secretsDeny []string
+	flag.Var(stringAccum{&secretsAllow}, "secrets-allow", "glob of titus rule IDs to keep (e.g. 'np.aws.*'); repeatable. Empty = all rules.")
+	flag.Var(stringAccum{&secretsDeny}, "secrets-deny", "glob of titus rule IDs to drop (e.g. 'np.aws.3'); repeatable. Wins over -secrets-allow.")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update check")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
@@ -109,13 +118,16 @@ func main() {
 	// works across all three CLIs; explicit -workers wins.
 	visited.ResolveIntAlias(workers, workersAlias, "workers", "j")
 	visited.ResolveStringAlias(secretsPath, secretsPathAlias, "secrets-path", "sec-path")
+	var odrCfg bool
 	if err := fileCfg.ApplySFL(visited, config.SFLFlags{
-		O: out, OD: outDedup, TempDir: tempDir, Password: password,
+		O: out, OD: outDedup, ODR: &odrCfg, TempDir: tempDir, Password: password,
 		SecretsPath: secretsPath,
 		Workers:     workers,
 		NoTUI:       noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
 		Debug: debug, NoUpdateCheck: noUpdateCheck,
-		Secrets: secretsOn,
+		Secrets:      secretsOn,
+		SecretsAllow: &secretsAllow,
+		SecretsDeny:  &secretsDeny,
 	}); err != nil {
 		fatalf("%v", err)
 	}
@@ -127,24 +139,61 @@ func main() {
 		flag.Usage()
 		reg.ExitWithCode(2)
 	}
-	if *out != "" && *outDedup != "" {
-		usagef("-od and -o are mutually exclusive; pick one")
+	// -o, -od, -odr mutually exclusive. -odr is -od's dry-run twin: same
+	// pipeline + stats, no library writes. Config [sfl] odr=true flips
+	// dry-run on a -od run, reusing the od path.
+	odPassed := visited["od"]
+	odrPassed := visited["odr"]
+	outCount := 0
+	if *out != "" {
+		outCount++
 	}
-	destDedup := *outDedup != ""
+	if *outDedup != "" {
+		outCount++
+	}
+	if *outDryRun != "" {
+		outCount++
+	}
+	if outCount > 1 {
+		usagef("-o, -od, and -odr are mutually exclusive; pick one")
+	}
+	if odPassed && strings.TrimSpace(*outDedup) == "" {
+		usagef("-od requires a directory path; got empty string")
+	}
+	if odrPassed && strings.TrimSpace(*outDryRun) == "" {
+		usagef("-odr requires a directory path; got empty string")
+	}
+	dryRun := false
+	destDedup := *outDedup != "" || *outDryRun != ""
 	if !destDedup && *out == "" {
 		*out = "."
 	}
 	if destDedup {
 		*zst = true
 	}
+	if *outDryRun != "" {
+		dryRun = true
+	}
+	if !dryRun && odrCfg {
+		if !destDedup {
+			usagef("[sfl] odr=true requires a library path; set [sfl].od or pass -od/-odr DIR")
+		}
+		dryRun = true
+	}
 	w := resolveWorkerCount(*workers, runtime.GOMAXPROCS(0))
 
+	libraryDir := *outDedup
+	if *outDryRun != "" {
+		libraryDir = *outDryRun
+	}
 	cfg := runConfig{
-		Input: inputArg, OutputDir: *out, LibraryDir: *outDedup, Password: *password,
+		Input: inputArg, OutputDir: *out, LibraryDir: libraryDir, Password: *password,
 		TempDir: *tempDir, Workers: w, Compress: *zst, DeleteSources: *delSrc,
 		NoURI: *noURI, NoTUI: *noTUI, Debug: *debug, ErrFile: *errFile, NoUpdateCheck: *noUpdateCheck,
 		Secrets: *secretsOn, SecretsPath: *secretsPath,
+		SecretsAllow: secretsAllow, SecretsDeny: secretsDeny,
 		Started: started, ForcePlainTUI: !vtOK,
+		DryRun: dryRun,
 	}
 	cfg.UpdateChecker = selfupdate.NewChecker(version.String, os.Args[0], cfg.NoUpdateCheck)
 	cfg.UpdateChecker.Start()
@@ -225,6 +274,7 @@ func run(cfg runConfig) error {
 	dbg.Header(cfg, len(passwords), snk.outPath)
 
 	prog := sflog.NewProgress()
+	prog.SetDryRun(cfg.DryRun)
 	tuiOff := cfg.NoTUI || !stderrIsTTY() || cfg.ForcePlainTUI
 	monDone := make(chan struct{})
 	var monWG sync.WaitGroup
@@ -269,7 +319,8 @@ func run(cfg runConfig) error {
 	var closeSecrets func()
 	if cfg.Secrets {
 		sink, closeFn, serr := buildSecretSink(
-			resolveSecretsPath(cfg.SecretsPath, cfg.OutputDir, cfg.LibraryDir), cfg.Workers)
+			resolveSecretsPath(cfg.SecretsPath, cfg.OutputDir, cfg.LibraryDir), cfg.Workers,
+			secrets.RuleFilter{Allow: cfg.SecretsAllow, Deny: cfg.SecretsDeny})
 		if serr != nil {
 			return fmt.Errorf("secrets: %w", serr)
 		}
@@ -369,7 +420,7 @@ func run(cfg runConfig) error {
 	}
 	snk.cleanup()
 
-	if cfg.DeleteSources {
+	if cfg.DeleteSources && !cfg.DryRun {
 		deleted, err := deleteParsedSources(cfg.Input, results, snk.protected)
 		if err != nil {
 			return fmt.Errorf("delete sources: %w", err)
@@ -387,7 +438,7 @@ func run(cfg runConfig) error {
 	}
 	switch {
 	case cfg.LibraryDir != "" && libEmpty:
-		summary = renderNoIngestSummaryWithNotice(cfg.LibraryDir, stats, updateNotice)
+		summary = renderNoIngestSummaryWithNotice(cfg.LibraryDir, stats, updateNotice, cfg.DryRun)
 	case cfg.LibraryDir != "":
 		var newToLib, alreadyInLib, dropped int64
 		if ingestMet != nil {
@@ -397,7 +448,7 @@ func run(cfg runConfig) error {
 			// arithmetic, Unique == Added + already-in-library + dropped.
 			dropped = ingestMet.LinesRejected.Load()
 		}
-		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, dropped, stats, ingestOutputPaths(ingestRes), updateNotice)
+		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, dropped, stats, ingestOutputPaths(ingestRes), updateNotice, cfg.DryRun)
 	default:
 		summary = renderFinalSummaryWithNotice(outPath, stats, updateNotice)
 	}
@@ -648,6 +699,7 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 		NoURI:      cfg.NoURI,
 		RunStarted: startedOrNow(cfg),
 		Debug:      elog,
+		DryRun:     cfg.DryRun,
 		OnResolved: func(r *ulpengine.Resolved) {
 			if r != nil {
 				od.Store(r.OdMetrics)
@@ -838,7 +890,9 @@ func ingestLibraryLines(r *ulpengine.Resolved, m *ulpengine.Metrics) int64 {
 		return 0
 	}
 	total := int64(r.OdResult.TotalKeysLoaded)
-	if m != nil {
+	// dry-run writes nothing, so the library total is the pre-run size only;
+	// LinesUnique here is the would-be-added count, not a real addition.
+	if m != nil && !r.Cfg.DryRun {
 		total += m.LinesUnique.Load()
 	}
 	return total

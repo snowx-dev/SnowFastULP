@@ -35,10 +35,12 @@ func (a *secretSinkAdapter) ScanSecrets(ctx context.Context, content []byte, pro
 	return len(fs)
 }
 
-// buildSecretSink constructs the scanner pool + store for -secrets. It returns
-// the sink and a close func that tears both down and yields the run's stats.
-func buildSecretSink(path string, workers int) (sflog.SecretSink, func() (secrets.Stats, error), error) {
-	pool, err := secrets.NewPool(scannerPoolSize(workers))
+// buildSecretSink constructs the scanner pool + store for -secrets. The filter
+// is applied at scanner build so the matcher only compiles surviving rules. It
+// returns the sink and a close func that tears both down and yields the run's
+// stats.
+func buildSecretSink(path string, workers int, filter secrets.RuleFilter) (sflog.SecretSink, func() (secrets.Stats, error), error) {
+	pool, err := secrets.NewPool(scannerPoolSize(workers), filter)
 	if err != nil {
 		return nil, nil, err
 	}

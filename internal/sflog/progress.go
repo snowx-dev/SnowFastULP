@@ -47,6 +47,10 @@ type Progress struct {
 	// not final, so the TUI renders "Y+" to signal "still growing".
 	secretStreamsOpen atomic.Int64
 
+	// dryRun (-odr): the live header and completion summary flag the run as a
+	// preview so the user knows nothing will be written to the library.
+	dryRun atomic.Bool
+
 	// workers is the live status registry the TUI reads to render concurrent
 	// activity. Sized once by SetWorkers; guarded by workersMu for the slice
 	// header (resize) and the free-list, slot fields themselves are atomic.
@@ -260,6 +264,15 @@ func (p *Progress) EnableSecrets() {
 	}
 }
 func (p *Progress) SecretsEnabled() bool { return p != nil && p.secretsOn.Load() }
+
+// SetDryRun flags the run as a -odr preview so the live header and completion
+// summary mark it as DRY RUN. Called once from run() before extraction starts.
+func (p *Progress) SetDryRun(v bool) {
+	if p != nil {
+		p.dryRun.Store(v)
+	}
+}
+func (p *Progress) DryRun() bool { return p != nil && p.dryRun.Load() }
 func (p *Progress) SecretsFound() int64 {
 	if p == nil {
 		return 0

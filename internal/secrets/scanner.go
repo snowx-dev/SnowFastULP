@@ -4,6 +4,7 @@ package secrets
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 
@@ -20,9 +21,35 @@ type Pool struct {
 // (~150-200ms), so they are built concurrently: a per-core pool then costs one
 // scanner's build latency instead of size× it. On any failure every scanner
 // built so far is closed and the first error returned.
-func NewPool(size int) (*Pool, error) {
+//
+// A non-empty RuleFilter loads the builtin rules once, applies the glob
+// allow/deny to rule IDs, and injects the survivors via titus.WithRules so the
+// matcher only compiles the rules that will fire — smaller + faster than
+// filtering findings post-scan. An empty filter leaves titus on its default
+// loader (no behavior change).
+func NewPool(size int, filter RuleFilter) (*Pool, error) {
 	if size < 1 {
 		size = 1
+	}
+	if err := filter.Validate(); err != nil {
+		return nil, err
+	}
+	var ruleOpt titus.Option
+	if !filter.Empty() {
+		rules, err := titus.LoadBuiltinRules()
+		if err != nil {
+			return nil, fmt.Errorf("secrets: load rules: %w", err)
+		}
+		filtered := make([]*titus.Rule, 0, len(rules))
+		for _, r := range rules {
+			if filter.Keep(r.ID) {
+				filtered = append(filtered, r)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("secrets: filter %s matched no rules", filter)
+		}
+		ruleOpt = titus.WithRules(filtered)
 	}
 	ch := make(chan *titus.Scanner, size)
 	// Titus's vectorscan matcher prints a startup diagnostic to os.Stderr
@@ -47,7 +74,13 @@ func NewPool(size int) (*Pool, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s, err := titus.NewScanner()
+			var s *titus.Scanner
+			var err error
+			if ruleOpt != nil {
+				s, err = titus.NewScanner(ruleOpt)
+			} else {
+				s, err = titus.NewScanner()
+			}
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
