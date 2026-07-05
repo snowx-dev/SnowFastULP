@@ -7,7 +7,7 @@
 #   -buildid=        clear Go's per-build identifier
 # Combined with CGO_ENABLED=0, same source + same Go version → same SHA256.
 
-VERSION       ?= 0.1.1-dev
+VERSION       ?= 0.2-dev
 BUILD_FLAGS   := -trimpath -buildvcs=false -ldflags="-s -w -buildid= -X github.com/snowx-dev/SnowFastULP/internal/version.String=$(VERSION)"
 PKG           := ./cmd/sfu
 PKG_SFS       := ./cmd/sfs

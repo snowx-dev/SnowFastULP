@@ -16,7 +16,7 @@ Usage:
   install.sh [--dry-run]
 
 Environment:
-  SNOWFAST_VERSION       Install a specific version, e.g. 0.1.1 or v0.1.1
+  SNOWFAST_VERSION       Install a specific version, e.g. 0.2 or v0.2
   SNOWFAST_INSTALL_DIR   Install into this directory instead of auto-detecting
   SNOWFAST_UPDATE_URL    Update manifest URL (default: https://sfu-update.snowx.dev/)
   SNOWFAST_REF           Raw GitHub ref for config.toml.example (default: main)
