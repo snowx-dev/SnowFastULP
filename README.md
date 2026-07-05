@@ -40,7 +40,13 @@ irm https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install
 sfu .\dump.txt -o .\cleaned\
 ```
 
-Open a new terminal if the installer updates PATH. Point `sfu` at a file or folder, keep the result somewhere useful. That is the whole first run.
+After installing, open a new terminal so PATH is updated. Point `sfu` at a file or folder, keep the result somewhere useful. That is the whole first run.
+
+```bash
+sfu ./path-to-ulp-dumps/ -od ./library/          # clean + dedup into a searchable library
+sfs ./library "facebook.com:"       # search .zst archives without decompressing
+sfl ./path-to-logs/ -od ./library/  # extract ULP from folders and archives
+```
 
 
 Curious for more? Check out the online page and docs, take it to the next level.
@@ -75,7 +81,7 @@ Flags, config, build, FAQ, and the full `sfu` / `sfs` / `sfl` references [live i
 - [Prequel](https://eternally.blue) // Search inspo
 - [lateralmovement](https://guns.lol/lateralmovement) // Cleaner inspo + data golbin
 - Duckyhax // Beta testing
-- Log Tester com // Excellent peers & feedbacks
+- [Logstester](https://t.me/logstester) com // Excellent peers & feedbacks
 
 ## License
 
