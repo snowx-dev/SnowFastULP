@@ -74,8 +74,8 @@ func main() {
 	silent := flag.Bool("silent", false, "deprecated alias for -s")
 	clean := flag.Bool("clean", false, "strip URL scheme prefixes from output lines")
 	since := flag.String("since", "", "only search archives modified within this window, e.g. 7d, 12h, 90m (default: all)")
-	workers := flag.Int("j", 0, "worker goroutines (0 = GOMAXPROCS)")
-	workersAlias := flag.Int("workers", 0, "alias for -j")
+	workers := flag.Int("j", 0, "")
+	workersAlias := flag.Int("workers", 0, "") // sfu/sfl spelling
 	debugFlag := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
 	// 1 MiB default matches the search engine default; tune only after profiling.
@@ -87,27 +87,21 @@ func main() {
 	// global hit cap: stop the whole search + exit cleanly after N total hits.
 	// 0 = unlimited. distinct from -max-hits-per-chunk (per-chunk safety valve).
 	limit := flag.Int("l", 0, "stop after N total hits, then exit (0 = unlimited)")
-	// -sec switches to the secrets DB (written by `sfl -secrets`): the PATTERN
-	// filters by secret type (rule id/name, "*" = all) instead of a line match.
-	// -secrets-path / -sec-path imply -sec: pointing at a secrets DB only makes
-	// sense in secrets mode, so the user shouldn't have to repeat -sec.
 	sec := flag.Bool("sec", false, "search the secrets DB instead of ULP archives")
-	secretsPath := flag.String("secrets-path", "", "path to the secrets DB (default: <root>/sfl-secrets.sqlite)")
-	secretsPathAlias := flag.String("sec-path", "", "alias for -secrets-path (implies -sec)")
+	secPath := flag.String("sec-path", "", "")
+	secretsPathAlias := flag.String("secrets-path", "", "") // sfl spelling
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
 		reg.ExitWithCode(2)
 	}
 	visited := config.NewVisited()
-	// Accept -workers as an alias for -j (sfu/sfl use -workers) so the same
-	// invocation works across all three CLIs; explicit -j wins.
 	visited.ResolveIntAlias(workers, workersAlias, "j", "workers")
-	visited.ResolveStringAlias(secretsPath, secretsPathAlias, "secrets-path", "sec-path")
+	visited.ResolveStringAlias(secPath, secretsPathAlias, "sec-path", "secrets-path")
 	if err := cfg.ApplySFS(visited, config.SFSFlags{
 		O: outFile, Txt: txtMode, Stream: stream, Silent: silent, Clean: clean, J: workers, Debug: debugFlag,
 		DecodeStep: decodeStep, MaxHitsPerChunk: maxHitsPerChunk, Limit: limit, Since: since,
-		Sec: sec, SecretsPath: secretsPath,
+		Sec: sec, SecretsPath: secPath,
 	}); err != nil {
 		fatal("%v", err)
 	}
@@ -129,15 +123,12 @@ func main() {
 	if pattern == "" {
 		fatal("empty pattern")
 	}
-	// -sec is a distinct, self-contained mode: it reads the secrets DB (no
-	// archive discovery, indexing, or live search), so branch out here before
-	// any of that machinery spins up. An explicit -secrets-path / -sec-path
-	// implies -sec (see above), so the gate is on either signal.
-	if *sec || *secretsPath != "" {
+	// -sec (or -sec-path) skips archive discovery/indexing.
+	if *sec || *secPath != "" {
 		if err := runSecretsSearch(secretsSearchArgs{
 			root:        args.Root,
 			pattern:     pattern,
-			secretsPath: *secretsPath,
+			secretsPath: *secPath,
 			since:       *since,
 			limit:       *limit,
 			outFile:     *outFile,

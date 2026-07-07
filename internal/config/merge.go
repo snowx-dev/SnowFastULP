@@ -33,8 +33,8 @@ func (v Visited) ResolveIntAlias(canonical, alias *int, canonicalName, aliasName
 	v[canonicalName] = true
 }
 
-// ResolveStringAlias is the string counterpart of ResolveIntAlias, used for the
-// -secrets-path / -sec-path pair. Same precedence: an explicit canonical wins;
+// ResolveStringAlias is the string counterpart of ResolveIntAlias (e.g. sfs
+// -sec-path / -secrets-path). Same precedence: an explicit canonical wins;
 // when only the alias was set its value is copied into the canonical pointer
 // and the canonical is marked visited so it beats a config-file value.
 func (v Visited) ResolveStringAlias(canonical, alias *string, canonicalName, aliasName string) {
@@ -188,7 +188,7 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	if !v.set("sec") && f.SFS.Sec && fl.Sec != nil {
 		*fl.Sec = true
 	}
-	if !v.set("secrets-path") && f.SFS.SecretsPath != "" && fl.SecretsPath != nil {
+	if !v.set("sec-path") && f.SFS.SecretsPath != "" && fl.SecretsPath != nil {
 		p, err := ResolvePath(f.baseDir, f.SFS.SecretsPath)
 		if err != nil {
 			return err

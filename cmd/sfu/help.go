@@ -40,8 +40,8 @@ func renderHelp(bin string) string {
 
 	primary := []argDef{
 		{"-o", "DIR", "Write output files to this folder."},
-		{"-od", "DIR", "Write and dedup against old compressed results in this folder; this also compresses output."},
-		{"-zst", "", "Compress the output with zstd."},
+		{"-od", "DIR", "Antipublic Library. Write and dedup against previous compressed results in this folder; this also compresses output."},
+		{"-zst", "", "One time compress the output with zstd."},
 		{"-del", "", "Delete input .txt files after a successful run."},
 		{"-no-uri", "", "Save only host:login:password."},
 		{"-no-tui", "", "Use plain text output instead of the live screen."},

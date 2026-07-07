@@ -17,7 +17,7 @@ const secretsDBName = "sfl-secrets.sqlite"
 type secretsSearchArgs struct {
 	root        string // positional DIR (or [sfs].dir); the DB default lives here
 	pattern     string // type filter; "*" or "" => all rows
-	secretsPath string // -secrets-path override
+	secretsPath string // -sec-path override
 	since       string // raw -since window ("" => no lower bound)
 	limit       int    // -l cap (0 => unlimited)
 	outFile     string // -o (explicit); "" when streaming/default
@@ -114,7 +114,7 @@ func openSecretsOutput(outFile string) (*os.File, io.Writer, error) {
 	return f, f, nil
 }
 
-// resolveSecretsDBPath mirrors sfl's resolver: an explicit -secrets-path wins,
+// resolveSecretsDBPath mirrors sfl's resolver: an explicit -sec-path wins,
 // else the DB is expected at <root>/sfl-secrets.sqlite (root defaults to CWD).
 func resolveSecretsDBPath(flag, root string) string {
 	if flag != "" {

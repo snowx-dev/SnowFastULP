@@ -29,21 +29,21 @@ secrets_path = "vault/secrets.sqlite"
 
 	fs := flag.NewFlagSet("sfs", flag.ContinueOnError)
 	sec := fs.Bool("sec", false, "")
-	secretsPath := fs.String("secrets-path", "", "")
+	secPath := fs.String("sec-path", "", "")
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
 	visited := config.Visited{}
 	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
 
-	if err := f.ApplySFS(visited, config.SFSFlags{Sec: sec, SecretsPath: secretsPath}); err != nil {
+	if err := f.ApplySFS(visited, config.SFSFlags{Sec: sec, SecretsPath: secPath}); err != nil {
 		t.Fatal(err)
 	}
 	if !*sec {
 		t.Fatal("sec = false, want true (from TOML)")
 	}
-	if want := filepath.Join(dir, "vault/secrets.sqlite"); *secretsPath != want {
-		t.Fatalf("secrets-path = %q, want %q (resolved against config dir)", *secretsPath, want)
+	if want := filepath.Join(dir, "vault/secrets.sqlite"); *secPath != want {
+		t.Fatalf("sec-path = %q, want %q (resolved against config dir)", *secPath, want)
 	}
 }
 
@@ -66,17 +66,19 @@ secrets_path = "vault/secrets.sqlite"
 
 	fs := flag.NewFlagSet("sfs", flag.ContinueOnError)
 	sec := fs.Bool("sec", false, "")
-	secretsPath := fs.String("secrets-path", "", "")
+	secPath := fs.String("sec-path", "", "")
+	secretsPathAlias := fs.String("secrets-path", "", "")
 	if err := fs.Parse([]string{"-secrets-path", "/abs/override.sqlite"}); err != nil {
 		t.Fatal(err)
 	}
 	visited := config.Visited{}
 	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
+	visited.ResolveStringAlias(secPath, secretsPathAlias, "sec-path", "secrets-path")
 
-	if err := f.ApplySFS(visited, config.SFSFlags{Sec: sec, SecretsPath: secretsPath}); err != nil {
+	if err := f.ApplySFS(visited, config.SFSFlags{Sec: sec, SecretsPath: secPath}); err != nil {
 		t.Fatal(err)
 	}
-	if *secretsPath != "/abs/override.sqlite" {
-		t.Fatalf("secrets-path = %q, want the CLI value", *secretsPath)
+	if *secPath != "/abs/override.sqlite" {
+		t.Fatalf("sec-path = %q, want the CLI value", *secPath)
 	}
 }

@@ -40,7 +40,7 @@ func renderHelp(bin string) string {
 		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
 		{"-since", "DUR", "Only search archives modified within DUR, e.g. 7d, 12h, 90m."},
 		{"-sec", "", "Search the secrets DB (from `sfl -secrets`); PATTERN filters by type ('*' = all)."},
-		{"-secrets-path", "PATH", "Path to the secrets DB (default: <root>/sfl-secrets.sqlite). Implies -sec; -sec-path is an alias."},
+		{"-sec-path", "PATH", "Secrets DB path (default: <root>/sfl-secrets.sqlite). Implies -sec."},
 	}
 	nerds := []argDef{
 		{"-j", "N", "Set search worker count."},
@@ -48,7 +48,9 @@ func renderHelp(bin string) string {
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
 		{"-no-update-check", "", "Disable background update availability check."},
-		{"-silent", "", "Deprecated alias for -s."},
+		{"-silent", "", "Alias for -s."},
+		{"-workers", "N", "Alias for -j."},
+		{"-secrets-path", "PATH", "Alias for -sec-path."},
 		{"-decode-step", "BYTES", "Per-Read decode budget (default 1048576)."},
 		{"-max-hits-per-chunk", "N", "Truncate hits per chunk to N (default 0 = unbounded). Safety valve for `:` / `@` -style queries."},
 	}
