@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_OWNER="${SNOWFAST_REPO_OWNER:-snowx-dev}"
 REPO_NAME="${SNOWFAST_REPO_NAME:-SnowFastULP}"
-DOCS_URL="${SNOWFAST_DOCS_URL:-https://snowfast.todo/docs}"
+DOCS_URL="${SNOWFAST_DOCS_URL:-https://snowfast.snowx.dev/docs}"
 RAW_REF="${SNOWFAST_REF:-main}"
 UPDATE_URL="${SNOWFAST_UPDATE_URL:-https://sfu-update.snowx.dev/}"
 DRY_RUN=false

@@ -12,7 +12,7 @@
 # Naming: TOML keys use snake_case, CLI flags use kebab-case. The loader
 # maps them automatically (e.g. `temp_dir` here = `-temp-dir` on the CLI).
 # All other keys map 1:1 with their flag name.
-# Full docs: https://snowfast.todo/docs/guides/configuration
+# Full docs: https://snowfast.snowx.dev/docs/guides/configuration
 
 # ---- sfu (parser + dedup + antipublic library) ---------------------------------------------------
 [sfu]

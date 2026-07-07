@@ -6,7 +6,7 @@ param(
     [string]$RepoOwner = $(if ($env:SNOWFAST_REPO_OWNER) { $env:SNOWFAST_REPO_OWNER } else { "snowx-dev" }),
     [string]$RepoName = $(if ($env:SNOWFAST_REPO_NAME) { $env:SNOWFAST_REPO_NAME } else { "SnowFastULP" }),
     [string]$Ref = $(if ($env:SNOWFAST_REF) { $env:SNOWFAST_REF } else { "main" }),
-    [string]$DocsUrl = $(if ($env:SNOWFAST_DOCS_URL) { $env:SNOWFAST_DOCS_URL } else { "https://snowfast.todo/docs" })
+    [string]$DocsUrl = $(if ($env:SNOWFAST_DOCS_URL) { $env:SNOWFAST_DOCS_URL } else { "https://snowfast.snowx.dev/docs" })
 )
 
 $ErrorActionPreference = "Stop"
