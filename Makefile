@@ -168,7 +168,7 @@ test:
 
 vet:
 	go vet ./...
-	@unformatted=$$(gofmt -l .); \
+	@unformatted=$$(gofmt -l . | grep -v '^third_party/'); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt would change:" >&2; \
 		echo "$$unformatted" >&2; \

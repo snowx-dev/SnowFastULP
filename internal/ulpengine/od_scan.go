@@ -977,9 +977,9 @@ func streamArchiveLines(ctx context.Context, path string, decoderConcurrency int
 			if m != nil {
 				m.RegenBytesRead.Add(delta)
 			}
-		if ws != nil {
-			ws.BytesDone.Store(rawNow)
-		}
+			if ws != nil {
+				ws.BytesDone.Store(rawNow)
+			}
 			lastReportedRaw = rawNow
 		}
 		if rerr != nil {
