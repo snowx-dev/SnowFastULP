@@ -56,36 +56,66 @@ jobs:
           echo "reproducibility ok, both builds matched"
 
       - name: Draft GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          draft: true
-          generate_release_notes: true
-          body: |
-            ## SnowFastULP ${{ steps.ver.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body_file="$(mktemp)"
+          cat > "$body_file" <<'EOF'
+          ## SnowFastULP ${{ steps.ver.outputs.version }}
 
-            Cross-platform binaries built reproducibly via GitHub Actions. Each release is built twice and verified to produce identical SHA256 hashes before publishing.
+          v0.1 had `sfu` and `sfs`. v0.2 adds `sfl`, secret scanning, one-line installers, and `update` on all three binaries.
 
-            ### Verifying
+          ### New
 
-            ```bash
-            sha256sum -c SHA256SUMS
-            ```
+          - **`sfl`** — pull ULP lines from stealer log folders and archives (zip/rar/7z, passworded, nested)
+          - **Secrets** — `sfl -secrets` finds tokens/keys; `sfs -sec` searches them
+          - **Install** — `install.sh` / `install.ps1` for Linux, macOS, Windows
+          - **Self-update** — `sfu update`, `sfs update`, `sfl update`
 
-            ### Platform notes
+          ### Quick start
 
-            - **Linux**: `chmod +x` and run
-            - **macOS**: `chmod +x` then first run may require System Settings, Privacy and Security, "Allow anyway". Binaries are unsigned.
-            - **Windows**: SmartScreen may warn, click "More info" then "Run anyway". Binaries are unsigned.
-          files: |
-            dist/SnowFastULP-${{ steps.ver.outputs.version }}-linux-amd64
-            dist/SnowFastULP-${{ steps.ver.outputs.version }}-macos-arm64
-            dist/SnowFastULP-${{ steps.ver.outputs.version }}-windows-amd64.exe
-            dist/SnowFastSearch-${{ steps.ver.outputs.version }}-linux-amd64
-            dist/SnowFastSearch-${{ steps.ver.outputs.version }}-macos-arm64
-            dist/SnowFastSearch-${{ steps.ver.outputs.version }}-windows-amd64.exe
-            dist/SnowFastLog-${{ steps.ver.outputs.version }}-linux-amd64
-            dist/SnowFastLog-${{ steps.ver.outputs.version }}-macos-arm64
-            dist/SnowFastLog-${{ steps.ver.outputs.version }}-windows-amd64.exe
-            dist/SnowFastULP-${{ steps.ver.outputs.version }}-binaries.zip
-            dist/SHA256SUMS
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.sh | bash
+          sfl ./logs/ -od ./library/
+          sfs ./library "facebook.com:"
+          ```
+
+          ### Binaries
+
+          | Binary | Does |
+          |--------|------|
+          | `sfu` | Clean + dedup ULP dumps |
+          | `sfs` | Search `.txt` / `.zst` (and secrets DB) |
+          | `sfl` | Extract ULP from stealer logs |
+
+          Platforms: linux-amd64, macos-arm64, windows-amd64. Verify with `sha256sum -c SHA256SUMS`.
+
+          Full flags and docs: https://snowfast.snowx.dev
+
+          ### Verifying
+
+          ```bash
+          sha256sum -c SHA256SUMS
+          ```
+
+          ### Platform notes
+
+          - **Linux**: `chmod +x` and run
+          - **macOS**: `chmod +x` then first run may require System Settings, Privacy and Security, "Allow anyway". Binaries are unsigned.
+          - **Windows**: SmartScreen may warn, click "More info" then "Run anyway". Binaries are unsigned.
+          EOF
+          gh release create "${{ github.ref_name }}" \
+            --draft \
+            --title "${{ github.ref_name }}" \
+            --notes-file "$body_file" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-linux-amd64" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-macos-arm64" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-windows-amd64.exe" \
+            "dist/SnowFastSearch-${{ steps.ver.outputs.version }}-linux-amd64" \
+            "dist/SnowFastSearch-${{ steps.ver.outputs.version }}-macos-arm64" \
+            "dist/SnowFastSearch-${{ steps.ver.outputs.version }}-windows-amd64.exe" \
+            "dist/SnowFastLog-${{ steps.ver.outputs.version }}-linux-amd64" \
+            "dist/SnowFastLog-${{ steps.ver.outputs.version }}-macos-arm64" \
+            "dist/SnowFastLog-${{ steps.ver.outputs.version }}-windows-amd64.exe" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-binaries.zip" \
+            "dist/SHA256SUMS"
