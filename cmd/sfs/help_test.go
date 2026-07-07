@@ -16,15 +16,21 @@ func TestRenderHelpMatchesSFULayout(t *testing.T) {
 		"Args (for nerds):",
 		"Args (for devs):",
 		"-o FILE",
-		"Write results to this file instead of stdout.",
+		"auto-generated CWD file.",
+		"-s",
+		"Stream results to stdout without the live screen.",
 		"-silent",
-		"Use plain text output instead of the live screen.",
+		"Alias for -s.",
 		"-clean",
 		"Strip URL schemes from output lines.",
 		"-j N",
 		"Set search worker count.",
+		"-sec-path",
 		"-debug",
 		"Write a debug log for this run.",
+		"'gmail' -s | head",
+		"'*' -since 5m -o recent.txt",
+		"PATTERN '*' exports every line",
 	}
 	for _, s := range want {
 		if !strings.Contains(help, s) {

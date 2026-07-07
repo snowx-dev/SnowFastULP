@@ -51,7 +51,7 @@ func TestRunWritesHitsToOutputFile(t *testing.T) {
 		archives: []string{arch},
 		workers:  1,
 		outFile:  outPath,
-		silent:   true,
+		stream:   true,
 		started:  time.Now(),
 		metrics:  metrics,
 	})

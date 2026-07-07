@@ -12,7 +12,6 @@ import (
 
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
 	"github.com/snowx-dev/SnowFastULP/internal/index"
-	"github.com/snowx-dev/SnowFastULP/internal/output"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -28,11 +27,17 @@ var hitsPool = sync.Pool{
 
 const (
 	outWin = 1 << 20
-	// max bytes per dec.Read inside searchChunk. 1 MiB matches zindex.cpp,
-	// fits L2 on Skylake-X+/Zen 4+/Apple Silicon. older Broadwell/Haswell
-	// (256 KiB L2) or Zen 2/3 (512 KiB L2) lose ~3%, tune via -decode-step
+	// max bytes per dec.Read inside searchChunk. 1 MiB matches zindex.cpp;
+	// tune via -decode-step only after profiling the target workload.
 	defaultDecodeStep = 1 << 20
 	minDecodeStep     = 4 << 10
+
+	// maxDecoderWindow caps the zstd decompression window per decoder. Untrusted
+	// archives may declare a huge window (klauspost defaults to 512 MiB), which
+	// would let one crafted frame allocate that much × every worker. 128 MiB
+	// covers anything sfu writes (≤8 MiB) and standard `zstd --long` (≤128 MiB);
+	// a frame above this fails the chunk via OnChunkError rather than the run.
+	maxDecoderWindow = 128 << 20
 )
 
 // Hit is one pattern match.
@@ -61,8 +66,6 @@ type Metrics struct {
 	IndexArchivesActive  atomic.Int64
 	IndexFrameScanActive atomic.Int64
 	IndexDecodeActive    atomic.Int64
-	indexFocusMu         sync.Mutex
-	indexFocusName       string
 }
 
 const (
@@ -79,6 +82,7 @@ type Config struct {
 	// per-chunk hit cap. 0 = unbounded. safety valve vs pathological queries
 	// (eg `:` on multi-GiB ULP). when hit, chunk truncates and OnChunkCapped fires
 	MaxHitsPerChunk int
+	MatchAll        bool // pattern "*" — emit every non-empty line
 	Pattern         []byte
 	Workers         int
 	Archives        []string
@@ -108,7 +112,7 @@ func resolveDecodeStep(req int) int {
 
 // Run searches all archives using a worker pool over chunks.
 func Run(cfg Config) error {
-	if len(cfg.Pattern) == 0 {
+	if !cfg.MatchAll && len(cfg.Pattern) == 0 {
 		return fmt.Errorf("empty pattern")
 	}
 	ctx := cfg.Ctx
@@ -138,37 +142,16 @@ func Run(cfg Config) error {
 	decodeStep := resolveDecodeStep(cfg.DecodeStep)
 	tasks := make(chan task, cfg.Workers*4)
 	var wg sync.WaitGroup
-	remaining := make(map[int]int64)
+	tracker := newArchiveTracker(cfg.Metrics, cfg.OnArchiveDone)
 	for _, arch := range cfg.Archives {
 		sc := cfg.Sidecars[arch]
 		if sc == nil {
 			continue
 		}
-		ord := cfg.ArchiveOrd[arch]
-		remaining[ord] = int64(len(sc.Chunks))
+		tracker.seed(cfg.ArchiveOrd[arch], int64(len(sc.Chunks)))
 	}
-
-	var archiveDoneMu sync.Mutex
-	markChunkDone := func(ord int) {
-		archiveDoneMu.Lock()
-		remaining[ord]--
-		done := remaining[ord] == 0
-		if done && cfg.Metrics != nil {
-			cfg.Metrics.ArchivesDone.Add(1)
-		}
-		archiveDoneMu.Unlock()
-		if done && cfg.OnArchiveDone != nil {
-			cfg.OnArchiveDone(ord)
-		}
-	}
-	bumpChunk := func(chunkBytes int64) {
-		if cfg.Metrics != nil {
-			cfg.Metrics.ChunksDone.Add(1)
-			if chunkBytes > 0 {
-				cfg.Metrics.BytesChunkDone.Add(chunkBytes)
-			}
-		}
-	}
+	markChunkDone := tracker.markDone
+	bumpChunk := tracker.bump
 
 	// per-worker single-slot fileCache holds <=1 open archive. dispatcher
 	// hands chunks of one archive contiguously, prev fd closes on archive
@@ -213,20 +196,25 @@ func Run(cfg Config) error {
 		slot := &workerSlot{}
 		defer closeSlot(slot)
 
-		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxDecoderWindow))
 		if err != nil {
+			// Worker-setup failure (not tied to a chunk): surface it via the
+			// sentinel archive="" / chunkID=-1 so callers can log it instead of
+			// dying silently with zero output.
+			if cfg.OnChunkError != nil {
+				cfg.OnChunkError("", -1, fmt.Errorf("zstd reader init: %w", err))
+			}
 			return
 		}
 		defer dec.Close()
 
 		for t := range tasks {
-			chunkBytes := t.chunk.UncompressedEnd - t.chunk.UncompressedStart
 			// on cancel: drain silently, skip bumpChunk + markChunkDone.
 			// signaling "done" would let OrderedPrinter flush partial results
 			if ctx.Err() != nil {
-				_ = chunkBytes
 				continue
 			}
+			chunkBytes := t.chunk.UncompressedEnd - t.chunk.UncompressedStart
 			file, err := openSlot(slot, t.archive)
 			if err != nil {
 				if cfg.OnChunkError != nil {
@@ -238,37 +226,41 @@ func Run(cfg Config) error {
 			}
 			hitsP := hitsPool.Get().(*[]localHit)
 			*hitsP = (*hitsP)[:0]
-			localHits, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk)
+			// emit streams each decode-step's matches to the drain loop as the
+			// chunk is scanned, instead of withholding them until the whole
+			// (multi-GB) chunk finishes — keeps the live display + -l responsive.
+			emit := func(batch []localHit) error {
+				for i := range batch {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					select {
+					case cfg.Hits <- Hit{
+						ArchiveOrd: t.archiveOrd,
+						Archive:    t.archive,
+						ChunkID:    t.chunk.ChunkID,
+						Offset:     batch[i].offset,
+						Line:       batch[i].line,
+					}:
+						if cfg.Metrics != nil {
+							cfg.Metrics.Hits.Add(1)
+						}
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return nil
+			}
+			emitted, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.MatchAll, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk, emit)
 			if err != nil {
 				if cfg.OnChunkError != nil {
 					cfg.OnChunkError(t.archive, t.chunk.ChunkID, err)
 				}
 			}
 			if capped && cfg.OnChunkCapped != nil {
-				cfg.OnChunkCapped(t.archive, t.chunk.ChunkID, len(localHits))
+				cfg.OnChunkCapped(t.archive, t.chunk.ChunkID, emitted)
 			}
-			if err == nil {
-				for _, h := range localHits {
-					hit := Hit{
-						ArchiveOrd: t.archiveOrd,
-						Archive:    t.archive,
-						ChunkID:    t.chunk.ChunkID,
-						Offset:     h.offset,
-						Line:       h.line,
-					}
-					if ctx.Err() != nil {
-						break
-					}
-					select {
-					case cfg.Hits <- hit:
-						if cfg.Metrics != nil {
-							cfg.Metrics.Hits.Add(1)
-						}
-					case <-ctx.Done():
-					}
-				}
-			}
-			*hitsP = localHits[:0]
+			*hitsP = (*hitsP)[:0]
 			hitsPool.Put(hitsP)
 			bumpChunk(chunkBytes)
 			markChunkDone(t.archiveOrd)
@@ -313,15 +305,25 @@ type localHit struct {
 	line   string
 }
 
-func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, metrics *Metrics, hits []localHit, decodeStep, maxHits int) ([]localHit, bool, error) {
-	matcher := newPatternMatcher(pattern)
-	overlap := len(pattern) - 1
-	if overlap < 0 {
-		overlap = 0
+// searchChunk decodes the chunk in decodeStep reads and, after each read,
+// flushes that step's matches via emit — so hits reach the caller continuously
+// rather than only when the whole chunk finishes. A lineAssembler stitches
+// complete lines across read seams, so a matched line is never truncated at a
+// decode-step boundary (and a pattern straddling a seam needs no overlap window).
+// scratch is a reusable hit buffer (caller-pooled); it's cleared after every
+// flush. Returns the number of hits emitted, whether the per-chunk cap (maxHits)
+// truncated the chunk, and any decode/emit error (hits found before an error are
+// still emitted).
+func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, matchAll bool, metrics *Metrics, scratch []localHit, decodeStep, maxHits int, emit func([]localHit) error) (int, bool, error) {
+	var process processFn
+	if matchAll {
+		process = matchAllRegion
+	} else {
+		matcher := newPatternMatcher(pattern)
+		process = patternRegion(&matcher)
 	}
 
-	buf := make([]byte, outWin+overlap)
-	dst := buf[overlap:]
+	buf := make([]byte, outWin)
 	section := io.NewSectionReader(f, chunk.CompressedOffset, chunk.CompressedSize)
 	var src io.Reader = section
 	if ctx != nil {
@@ -330,68 +332,74 @@ func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index
 	dec.Reset(src)
 
 	absOff := chunk.UncompressedStart
-	first := true
 	capped := false
+	emitted := 0
+	hits := scratch[:0]
+	var asm lineAssembler
+
+	// flush this step's accumulated hits, truncating to the per-chunk cap.
+	// capped is set only on real truncation (emitted+len(hits) > maxHits), so a
+	// chunk whose hits exactly fill the cap is not flagged as truncated.
+	flush := func() error {
+		if len(hits) == 0 {
+			return nil
+		}
+		if maxHits > 0 && emitted+len(hits) > maxHits {
+			hits = hits[:maxHits-emitted]
+			capped = true
+		}
+		if len(hits) > 0 {
+			if err := emit(hits); err != nil {
+				return err
+			}
+			emitted += len(hits)
+		}
+		hits = hits[:0]
+		return nil
+	}
 
 	for {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
-				return hits, capped, err
+				return emitted, capped, err
 			}
 		}
-		readLen := len(dst)
+		readLen := len(buf)
 		if readLen > decodeStep {
 			readLen = decodeStep
 		}
-		nOut, err := dec.Read(dst[:readLen])
+		nOut, err := dec.Read(buf[:readLen])
 		if nOut > 0 {
 			if metrics != nil {
 				metrics.BytesScanned.Add(int64(nOut))
 			}
-			var searchPtr []byte
-			var searchLen int
-			var base int64
-			if first {
-				searchPtr = dst[:nOut]
-				searchLen = nOut
-				base = absOff
-			} else {
-				searchPtr = buf[:overlap+nOut]
-				searchLen = overlap + nOut
-				base = absOff - int64(overlap)
-			}
-			hits = appendHits(hits, searchPtr, searchLen, &matcher, base)
-
+			hits = asm.feed(hits, buf[:nOut], absOff, process)
 			absOff += int64(nOut)
-			first = false
 
-			// cap reached, stop decoding. one cap notification per chunk
-			if maxHits > 0 && len(hits) >= maxHits {
-				if len(hits) > maxHits {
-					hits = hits[:maxHits]
-				}
-				capped = true
-				return hits, capped, nil
+			// emit this step's hits so they reach the drain loop promptly
+			if ferr := flush(); ferr != nil {
+				return emitted, capped, ferr
 			}
-
-			if overlap > 0 {
-				if nOut >= overlap {
-					copy(buf, dst[nOut-overlap:nOut])
-				} else {
-					copy(buf, buf[nOut:overlap])
-					copy(buf[overlap-nOut:], dst[:nOut])
-				}
+			// cap reached, stop decoding. capped (if set) was flagged inside
+			// flush on actual truncation, not merely on hitting the boundary.
+			if maxHits > 0 && emitted >= maxHits {
+				return emitted, capped, nil
 			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return hits, capped, err
+			return emitted, capped, err
 		}
 	}
 
-	return hits, capped, nil
+	// finalize the trailing line (no terminating newline) before the chunk ends.
+	hits = asm.flush(hits, process)
+	if ferr := flush(); ferr != nil {
+		return emitted, capped, ferr
+	}
+	return emitted, capped, nil
 }
 
 type ctxReader struct {
@@ -406,29 +414,9 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-// writes matches into caller-owned dst slice, lets worker reuse pooled
-// backing across chunks, removes log2(N) slice-grow allocs per chunk
-func appendHits(dst []localHit, text []byte, textLen int, matcher *patternMatcher, baseOff int64) []localHit {
-	patLen := len(matcher.pat)
-	if patLen == 0 || textLen < patLen {
-		return dst
-	}
-	offset := 0
-	for offset+patLen <= textLen {
-		rel := matcher.find(text[offset:textLen])
-		if rel < 0 {
-			break
-		}
-		pos := offset + rel
-		line := extractLine(text, textLen, pos)
-		if line != "" {
-			dst = append(dst, localHit{offset: baseOff + int64(pos), line: line})
-		}
-		offset = pos + 1
-	}
-	return dst
-}
-
+// extractLine returns the complete line containing the match at matchPos. text
+// is a region of whole '\n'-terminated lines (assembled by lineAssembler), so the
+// surrounding newlines are always present — the line is never buffer-truncated.
 func extractLine(text []byte, textLen, matchPos int) string {
 	if matchPos >= textLen {
 		return ""
@@ -438,7 +426,7 @@ func extractLine(text []byte, textLen, matchPos int) string {
 	for start > 0 && text[start-1] != '\n' {
 		start--
 	}
-	for end < textLen && text[end] != '\n' && text[end] != 0 {
+	for end < textLen && text[end] != '\n' {
 		end++
 	}
 	// inline CRLF strip, cheaper than bytes.TrimRight on dense-hit path
@@ -524,7 +512,7 @@ func NewWriter(w io.Writer, clean bool) *Writer {
 func (pw *Writer) WriteHit(h Hit) error {
 	line := h.Line
 	if pw.clean {
-		line = output.CleanLine(line)
+		line = cleanLine(line)
 	}
 	_, err := fmt.Fprintln(pw.w, line)
 	return err

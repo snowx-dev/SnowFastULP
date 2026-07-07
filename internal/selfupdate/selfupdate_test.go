@@ -1,0 +1,510 @@
+package selfupdate
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"0.1.1", "0.1.1", 0},
+		{"0.1", "0.1.0", 0},        // missing component == 0
+		{"0.2", "0.1.9", 1},        // numeric, not lexical
+		{"0.1.9", "0.1.10", -1},    // 9 < 10 numerically
+		{"1.0.0", "0.9.9", 1},      // major dominates
+		{"0.1.1-dev", "0.1.1", -1}, // prerelease ranks below release
+		{"0.1.1", "0.1.1-dev", 1},
+		{"0.1.1-dev", "0.1", 1},        // base 0.1.1 > 0.1 despite prerelease
+		{"0.1", "0.1.1-dev", -1},       // mirror of above
+		{"0.1.1-rc1", "0.1.1-rc2", -1}, // prerelease string order
+	}
+	for _, c := range cases {
+		if got := compareVersions(c.a, c.b); got != c.want {
+			t.Errorf("compareVersions(%q,%q)=%d want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestParseManifestHash(t *testing.T) {
+	sum := sha256.Sum256([]byte("payload"))
+	want := sum[:]
+	got, err := parseManifestHash(hex.EncodeToString(want), "SnowFastULP-0.2-linux-amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("digest = %x, want %x", got, want)
+	}
+	if _, err := parseManifestHash("not-a-hash", "bad"); err == nil {
+		t.Fatal("expected invalid hash error")
+	}
+}
+
+func TestPlanUpdatesUsesControlledManifestHashAndURL(t *testing.T) {
+	suffix := mustAssetSuffix(t)
+	latest := "0.2.0"
+	assetName := fmt.Sprintf("SnowFastULP-%s-%s", latest, suffix)
+	payload := []byte("new-sfu")
+	sum := sha256.Sum256(payload)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "sfu"+exeExt())
+	if err := os.WriteFile(target, []byte("old-sfu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := &updateManifest{
+		Version: latest,
+		Assets: map[string]manifestAsset{
+			assetName: {
+				SHA256: hex.EncodeToString(sum[:]),
+				URL:    "https://updates.example/sfu",
+			},
+		},
+	}
+
+	pending, err := planUpdates(manifest, latest, suffix, dir, exeExt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+	if pending[0].url != "https://updates.example/sfu" {
+		t.Fatalf("url = %q", pending[0].url)
+	}
+	if got := hex.EncodeToString(pending[0].hash); got != manifest.Assets[assetName].SHA256 {
+		t.Fatalf("hash = %s, want %s", got, manifest.Assets[assetName].SHA256)
+	}
+}
+
+func TestProductBasename(t *testing.T) {
+	if got := productBasename("/opt/bin/sfu"); got != "sfu" {
+		t.Fatalf("got %q want sfu", got)
+	}
+	if got := productBasename("/opt/bin/sfs.exe"); got != "sfs" {
+		t.Fatalf("got %q want sfs", got)
+	}
+	if got := productBasename("/opt/bin/sfl.exe"); got != "sfl" {
+		t.Fatalf("got %q want sfl", got)
+	}
+}
+
+func TestCheckInvokedBinaryName(t *testing.T) {
+	if err := checkInvokedBinaryName("/opt/bin/sfu"); err != nil {
+		t.Fatalf("sfu: %v", err)
+	}
+	if err := checkInvokedBinaryName("/opt/bin/sfs"); err != nil {
+		t.Fatalf("sfs: %v", err)
+	}
+	if err := checkInvokedBinaryName("/opt/bin/sfl"); err != nil {
+		t.Fatalf("sfl: %v", err)
+	}
+	err := checkInvokedBinaryName("/opt/bin/SnowFastULP-0.1-linux-amd64")
+	if err == nil {
+		t.Fatal("expected error for release download name")
+	}
+	if !strings.Contains(err.Error(), `SnowFastULP-*  → sfu`) {
+		t.Fatalf("expected rename hint, got: %v", err)
+	}
+}
+
+func TestApplyOrderInvokedLast(t *testing.T) {
+	pending := []pendingUpdate{
+		{bin: "sfu", target: "/bin/sfu"},
+		{bin: "sfs", target: "/bin/sfs"},
+	}
+	order := applyOrder(pending, "sfu")
+	if len(order) != 2 || pending[order[0]].bin != "sfs" || pending[order[1]].bin != "sfu" {
+		t.Fatalf("order = %v, want sfs then sfu", order)
+	}
+	order = applyOrder(pending, "sfs")
+	if len(order) != 2 || pending[order[0]].bin != "sfu" || pending[order[1]].bin != "sfs" {
+		t.Fatalf("order = %v, want sfu then sfs", order)
+	}
+}
+
+func TestRunAlreadyUpToDate(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	srv, _ := startMockReleaseServer(t, "0.1.1", suffix, []byte("new-sfu"), []byte("new-sfs"))
+	defer srv.Close()
+
+	dir, hooks := installTestBinaries(t, "old-sfu", "old-sfs", "sfu")
+	var buf bytes.Buffer
+	if err := run(nil, "0.1.1", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "already up to date") {
+		t.Fatalf("output = %q", buf.String())
+	}
+	assertFileContents(t, filepath.Join(dir, "sfu"+exeExt()), "old-sfu")
+	assertFileContents(t, filepath.Join(dir, "sfs"+exeExt()), "old-sfs")
+}
+
+func TestRunIntegrationUpdatesBothBinaries(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	newSFU := []byte("#!/bin/sh\necho sfu-0.1.2\n")
+	newSFS := []byte("#!/bin/sh\necho sfs-0.1.2\n")
+	srv, _ := startMockReleaseServer(t, "0.1.2", suffix, newSFU, newSFS)
+	defer srv.Close()
+
+	dir, hooks := installTestBinaries(t, "old-sfu", "old-sfs", "sfu")
+	var buf bytes.Buffer
+	if err := run(nil, "0.1.1", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "updated sfu, sfs to 0.1.2") {
+		t.Fatalf("output = %q", buf.String())
+	}
+	assertFileContents(t, filepath.Join(dir, "sfu"+exeExt()), string(newSFU))
+	assertFileContents(t, filepath.Join(dir, "sfs"+exeExt()), string(newSFS))
+}
+
+func TestRunIntegrationUpdatesThreeBinaries(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	newSFU := []byte("#!/bin/sh\necho sfu-0.1.2\n")
+	newSFS := []byte("#!/bin/sh\necho sfs-0.1.2\n")
+	newSFL := []byte("#!/bin/sh\necho sfl-0.1.2\n")
+	srv, _ := startMockReleaseServerWithSFL(t, "0.1.2", suffix, newSFU, newSFS, newSFL)
+	defer srv.Close()
+
+	dir, hooks := installTestBinariesWithSFL(t, "old-sfu", "old-sfs", "old-sfl", "sfl")
+	var buf bytes.Buffer
+	if err := run(nil, "0.1.1", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "updated sfu, sfs, sfl to 0.1.2") {
+		t.Fatalf("output = %q", buf.String())
+	}
+	assertFileContents(t, filepath.Join(dir, "sfu"+exeExt()), string(newSFU))
+	assertFileContents(t, filepath.Join(dir, "sfs"+exeExt()), string(newSFS))
+	assertFileContents(t, filepath.Join(dir, "sfl"+exeExt()), string(newSFL))
+}
+
+func TestRunApplyOrderInvokedBinaryLast(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	srv, _ := startMockReleaseServer(t, "0.1.2", suffix, []byte("new-sfu"), []byte("new-sfs"))
+	defer srv.Close()
+
+	_, hooks := installTestBinaries(t, "old-sfu", "old-sfs", "sfu")
+	var applied []string
+	applyPayloadHook = func(_ []byte, target string, _ []byte) error {
+		applied = append(applied, filepath.Base(target))
+		return nil
+	}
+	t.Cleanup(func() { applyPayloadHook = nil })
+
+	if err := run(nil, "0.1.1", new(bytes.Buffer), &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(applied) != 2 {
+		t.Fatalf("applied = %v, want 2 targets", applied)
+	}
+	if applied[0] != "sfs"+exeExt() || applied[1] != "sfu"+exeExt() {
+		t.Fatalf("apply order = %v, want sfs then sfu when invoked as sfu", applied)
+	}
+}
+
+func TestRunChecksumMismatchLeavesBinariesUntouched(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	goodSFU := []byte("good-sfu")
+	goodSFS := []byte("good-sfs")
+	srv, names := startMockReleaseServer(t, "0.1.2", suffix, goodSFU, goodSFS)
+	defer srv.Close()
+
+	// Corrupt the sfu payload on the wire while keeping the manifest hash honest.
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases/latest":
+			writeMockReleaseJSON(w, srv.URL, "0.1.2", suffix, names)
+		case "/asset/sfu":
+			_, _ = w.Write([]byte("tampered"))
+		case "/asset/sfs":
+			_, _ = w.Write(goodSFS)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	dir, hooks := installTestBinaries(t, "old-sfu", "old-sfs", "sfu")
+	err = run(nil, "0.1.1", new(bytes.Buffer), &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	})
+	if err == nil {
+		t.Fatal("expected checksum mismatch error")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("err = %v", err)
+	}
+	assertFileContents(t, filepath.Join(dir, "sfu"+exeExt()), "old-sfu")
+	assertFileContents(t, filepath.Join(dir, "sfs"+exeExt()), "old-sfs")
+}
+
+func TestRunPartialUpdateReportsVersionSkew(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	srv, _ := startMockReleaseServer(t, "0.1.2", suffix, []byte("new-sfu"), []byte("new-sfs"))
+	defer srv.Close()
+
+	_, hooks := installTestBinaries(t, "old-sfu", "old-sfs", "sfu")
+
+	// Invoked as sfu → apply order is [sfs, sfu]. Let the sibling (sfs) apply,
+	// then fail the invoked binary (sfu) so the pair ends up version-skewed.
+	applyPayloadHook = func(_ []byte, target string, _ []byte) error {
+		if productBasename(target) == "sfu" {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	}
+	t.Cleanup(func() { applyPayloadHook = nil })
+
+	err = run(nil, "0.1.1", new(bytes.Buffer), &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	})
+	if err == nil {
+		t.Fatal("expected a partial-update error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"updating sfu failed",
+		"already updated to 0.1.2: sfs",
+		"still on the old version: sfu",
+		"re-run `sfu update`",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("partial-update error missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestRunOnlySFUPresentUpdatesSingleBinary(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	newSFU := []byte("#!/bin/sh\necho sfu-only\n")
+	srv, _ := startMockReleaseServer(t, "0.1.2", suffix, newSFU, []byte("unused-sfs"))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ext := exeExt()
+	sfuPath := filepath.Join(dir, "sfu"+ext)
+	if err := os.WriteFile(sfuPath, []byte("old-sfu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := run(nil, "0.1.1", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: sfuPath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "updated sfu to 0.1.2") {
+		t.Fatalf("output = %q", buf.String())
+	}
+	assertFileContents(t, sfuPath, string(newSFU))
+}
+
+func TestRunDowngradeBlockedWhenCurrentNewerThanLatest(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	srv, _ := startMockReleaseServer(t, "0.1.0", suffix, []byte("old"), []byte("old"))
+	defer srv.Close()
+
+	dir, hooks := installTestBinaries(t, "current-sfu", "current-sfs", "sfu")
+	var buf bytes.Buffer
+	if err := run(nil, "0.1.2", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: hooks.executablePath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(buf.String(), "already up to date (0.1.2)") {
+		t.Fatalf("output = %q", buf.String())
+	}
+	assertFileContents(t, filepath.Join(dir, "sfu"+exeExt()), "current-sfu")
+}
+
+func TestRunReleaseDownloadNameRejected(t *testing.T) {
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	srv, _ := startMockReleaseServer(t, "0.1.2", suffix, []byte("x"), []byte("y"))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ext := exeExt()
+	badName := filepath.Join(dir, "SnowFastULP-0.1.1-linux-amd64"+ext)
+	if err := os.WriteFile(badName, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = run(nil, "0.1.0", new(bytes.Buffer), &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: badName,
+	})
+	if err == nil || !strings.Contains(err.Error(), `SnowFastULP-*  → sfu`) {
+		t.Fatalf("expected rename hint, got %v", err)
+	}
+}
+
+type mockAssetNames struct {
+	sfu, sfs, sfl string
+	sfuHash       string
+	sfsHash       string
+	sflHash       string
+}
+
+func startMockReleaseServer(t *testing.T, version, suffix string, sfuPayload, sfsPayload []byte) (*httptest.Server, mockAssetNames) {
+	t.Helper()
+	return startMockReleaseServerWithSFL(t, version, suffix, sfuPayload, sfsPayload, nil)
+}
+
+func startMockReleaseServerWithSFL(t *testing.T, version, suffix string, sfuPayload, sfsPayload, sflPayload []byte) (*httptest.Server, mockAssetNames) {
+	t.Helper()
+	names := mockAssetNames{
+		sfu:     fmt.Sprintf("SnowFastULP-%s-%s", version, suffix),
+		sfs:     fmt.Sprintf("SnowFastSearch-%s-%s", version, suffix),
+		sfuHash: hexHash(sfuPayload),
+		sfsHash: hexHash(sfsPayload),
+	}
+	if sflPayload != nil {
+		names.sfl = fmt.Sprintf("SnowFastLog-%s-%s", version, suffix)
+		names.sflHash = hexHash(sflPayload)
+	}
+	var baseURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases/latest":
+			writeMockReleaseJSON(w, baseURL, version, suffix, names)
+		case "/asset/sfu":
+			_, _ = w.Write(sfuPayload)
+		case "/asset/sfs":
+			_, _ = w.Write(sfsPayload)
+		case "/asset/sfl":
+			if sflPayload == nil {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(sflPayload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	baseURL = srv.URL
+	return srv, names
+}
+
+func writeMockReleaseJSON(w http.ResponseWriter, base, version, suffix string, names mockAssetNames) {
+	manifest := updateManifest{
+		Version: version,
+		Assets:  map[string]manifestAsset{},
+	}
+	if base != "" {
+		manifest.Assets[names.sfu] = manifestAsset{SHA256: names.sfuHash, URL: base + "/asset/sfu"}
+		manifest.Assets[names.sfs] = manifestAsset{SHA256: names.sfsHash, URL: base + "/asset/sfs"}
+		if names.sfl != "" {
+			manifest.Assets[names.sfl] = manifestAsset{SHA256: names.sflHash, URL: base + "/asset/sfl"}
+		}
+	}
+	_ = json.NewEncoder(w).Encode(manifest)
+}
+
+func hexHash(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func installTestBinaries(t *testing.T, sfuContent, sfsContent, invoked string) (string, *testHooks) {
+	t.Helper()
+	return installTestBinariesWithSFL(t, sfuContent, sfsContent, "", invoked)
+}
+
+func installTestBinariesWithSFL(t *testing.T, sfuContent, sfsContent, sflContent, invoked string) (string, *testHooks) {
+	t.Helper()
+	dir := t.TempDir()
+	ext := exeExt()
+	sfuPath := filepath.Join(dir, "sfu"+ext)
+	sfsPath := filepath.Join(dir, "sfs"+ext)
+	sflPath := filepath.Join(dir, "sfl"+ext)
+	mode := os.FileMode(0o755)
+	if runtime.GOOS == "windows" {
+		mode = 0o644
+	}
+	if err := os.WriteFile(sfuPath, []byte(sfuContent), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sfsPath, []byte(sfsContent), mode); err != nil {
+		t.Fatal(err)
+	}
+	if sflContent != "" {
+		if err := os.WriteFile(sflPath, []byte(sflContent), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invokedPath := sfuPath
+	if invoked == "sfs" {
+		invokedPath = sfsPath
+	}
+	if invoked == "sfl" {
+		invokedPath = sflPath
+	}
+	return dir, &testHooks{executablePath: invokedPath}
+}
+
+func assertFileContents(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(got) != want {
+		t.Fatalf("%s = %q, want %q", path, string(got), want)
+	}
+}

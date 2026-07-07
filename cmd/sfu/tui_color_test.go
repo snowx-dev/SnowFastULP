@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
 // forces lipgloss truecolor SGR even on non-TTY runner, restored on cleanup
@@ -71,8 +72,8 @@ func TestFooterURLUsesBlueBiasedGradient(t *testing.T) {
 
 // visual breathing room: leading blank line, gap between bars
 func TestRenderShardLayoutIncludesTopOffsetAndBarGap(t *testing.T) {
-	m := &metrics{}
-	r := &resolved{totalInputs: 1 << 30, inputFileCount: 1, workers: 4, dedupWorkers: 2, bucketCount: 64}
+	m := &ulpengine.Metrics{}
+	r := &ulpengine.Resolved{TotalInputs: 1 << 30, InputFileCount: 1, Workers: 4, DedupWorkers: 2, BucketCount: 64}
 	lines := renderShardLines(time.Now(), time.Second, m, r, 100, 100, 1, 1, 0, 80)
 	if lines[0] != "" {
 		t.Errorf("first line should be a blank top offset, got %q", lines[0])

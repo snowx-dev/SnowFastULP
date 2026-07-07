@@ -3,8 +3,19 @@
 /sfu.exe
 /sfs
 /sfs.exe
+/sfl
+/sfl.exe
 /bin/
 /dist/
+
+# local scratch / test data — never commit (may contain real credential dumps)
+/tmp/
+/demo/
+.DS_Store
+
+# local working notes — not part of the published tree
+/docs/
+/plans/
 
 # default output and shard temp files when running from repo root
 /deduplicated.txt
@@ -20,5 +31,11 @@
 *.sfsidx.json
 *.sfsidx.json.tmp
 /sfs-debug-*.log
+/sfs_results_*.txt
+# sfl run artifacts — may contain real credential data; never commit
+/sfl_*.txt
+/sfl-*.sqlite
+/sfl-secrets.sqlite
+/sfl-ingest-*.log
 *.idx
 *.write.*.tmp

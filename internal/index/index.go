@@ -118,7 +118,6 @@ func Ensure(ctx context.Context, archivePath string, prog Progress, act *zstdfra
 
 	if path, ok := searchidx.ResolveExistingSidecar(archivePath); ok {
 		meta.SidecarPath = path
-		meta.Missing = false
 		if _, idxMod, err := sidecarTimestamps(archivePath, path); err == nil {
 			meta.SidecarMod = idxMod
 		}

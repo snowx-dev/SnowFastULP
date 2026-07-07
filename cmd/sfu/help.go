@@ -40,13 +40,14 @@ func renderHelp(bin string) string {
 
 	primary := []argDef{
 		{"-o", "DIR", "Write output files to this folder."},
-		{"-od", "DIR", "Write and dedup against old compressed results in this folder; this also compresses output."},
-		{"-zst", "", "Compress the output with zstd."},
+		{"-od", "DIR", "Antipublic Library. Write and dedup against previous compressed results in this folder; this also compresses output."},
+		{"-zst", "", "One time compress the output with zstd."},
 		{"-del", "", "Delete input .txt files after a successful run."},
 		{"-no-uri", "", "Save only host:login:password."},
 		{"-no-tui", "", "Use plain text output instead of the live screen."},
 	}
 	nerds := []argDef{
+		{"-odr", "DIR", "Like -od but write nothing; preview what a run would add to the library."},
 		{"-workers", "N", "Set parser worker count."},
 		{"-dedup", "N", "Set dedup worker count."},
 		{"-buckets", "N", "Set the number of temp buckets."},
@@ -58,6 +59,7 @@ func renderHelp(bin string) string {
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
 		{"-debug-reject", "", "Write rejected input lines to a debug file."},
+		{"-no-update-check", "", "Disable background update availability check."},
 	}
 
 	// fixed flag col, computed off unstyled length (SGR escapes would skew)
@@ -84,6 +86,10 @@ func renderHelp(bin string) string {
 		mutedStyle.Render("[-o DIR]") + "\n")
 	b.WriteString(mutedStyle.Render("    More flags below: Args for nerds, then Args for devs (-debug, -debug-reject).") + "\n")
 	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG)") + "\n\n")
+
+	b.WriteString(labelStyle.Render("Commands:") + "\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " update   " +
+		mutedStyle.Render("# upgrade sfu, sfs & sfl to the latest release") + "\n\n")
 
 	b.WriteString(labelStyle.Render("Examples:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./logins.txt\n")

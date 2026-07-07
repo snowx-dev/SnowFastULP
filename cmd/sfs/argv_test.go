@@ -15,6 +15,7 @@ import (
 func newSFSTestFS() *flag.FlagSet {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("o", "", "output file")
+	fs.Bool("s", false, "stream")
 	fs.Bool("txt", false, "txt mode")
 	fs.Bool("silent", false, "silent")
 	fs.Bool("clean", false, "clean")
@@ -42,13 +43,13 @@ func TestSplitPositional(t *testing.T) {
 
 func TestSplitPositionalTxtFlag(t *testing.T) {
 	fs := newSFSTestFS()
-	flags, pos := cliargs.SplitPositional([]string{"-txt", "-silent", "pat"}, fs)
+	flags, pos := cliargs.SplitPositional([]string{"-txt", "-s", "pat"}, fs)
 	if len(pos) != 1 || pos[0] != "pat" {
 		t.Fatalf("pos = %v", pos)
 	}
 	hasTxt := false
 	for _, f := range flags {
-		if f == "-txt" || f == "-silent" {
+		if f == "-txt" || f == "-s" {
 			hasTxt = true
 		}
 	}
@@ -117,6 +118,16 @@ func TestParseSearchArgsDirWithoutPattern(t *testing.T) {
 	_, err := parseSearchArgs([]string{dir})
 	if err == nil {
 		t.Fatal("expected error for directory without pattern")
+	}
+}
+
+func TestParseSearchArgsStarPattern(t *testing.T) {
+	args, err := parseSearchArgs([]string{"*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args.Pattern != "*" {
+		t.Fatalf("pattern = %q, want *", args.Pattern)
 	}
 }
 

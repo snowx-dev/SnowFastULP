@@ -65,7 +65,7 @@ func TestStatLabelPadsToColumn(t *testing.T) {
 }
 
 func TestRenderInterruptLinesContainsHint(t *testing.T) {
-	lines := renderInterruptLines(0, 80)
+	lines := renderInterruptLines(0, 80, nil)
 	if len(lines) == 0 {
 		t.Fatal("expected non-empty interrupt frame")
 	}
@@ -73,6 +73,16 @@ func TestRenderInterruptLinesContainsHint(t *testing.T) {
 	for _, want := range []string{"INTERRUPTED", "Ctrl+C", "cleanup", "Flushing"} {
 		if !strings.Contains(all, want) {
 			t.Errorf("expected interrupt frame to contain %q, got:\n%s", want, all)
+		}
+	}
+}
+
+func TestRenderInterruptLinesShowsCleanupLog(t *testing.T) {
+	log := []string{"removed temp dir /tmp/sfu-shard-abc", "removed /out/partial.zst"}
+	joined := strings.Join(renderInterruptLines(0, 80, log), "\n")
+	for _, want := range log {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("interrupt frame missing cleanup line %q:\n%s", want, joined)
 		}
 	}
 }

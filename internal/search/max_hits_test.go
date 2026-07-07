@@ -3,36 +3,19 @@ package search_test
 import (
 	"bytes"
 	"context"
-	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/snowx-dev/SnowFastULP/internal/index"
 	"github.com/snowx-dev/SnowFastULP/internal/search"
-
-	"github.com/klauspost/compress/zstd"
 )
 
-// one zstd frame with N copies of line, one hit per line
+// writeRepeatedZST writes count copies of line into a single-frame zst at path,
+// delegating the frame plumbing to writeBytesZST.
 func writeRepeatedZST(t *testing.T, path string, line string, count int) {
 	t.Helper()
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	body := bytes.Repeat([]byte(line), count)
-	enc, err := zstd.NewWriter(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := enc.Write(body); err != nil {
-		t.Fatal(err)
-	}
-	if err := enc.Close(); err != nil {
-		t.Fatal(err)
-	}
+	writeBytesZST(t, path, bytes.Repeat([]byte(line), count))
 }
 
 func TestSearchMaxHitsPerChunkTruncates(t *testing.T) {
@@ -179,9 +162,9 @@ func TestSearchMaxHitsExactBoundary(t *testing.T) {
 	if got != 50 {
 		t.Fatalf("hits = %d, want 50", got)
 	}
-	// current behavior: len(hits) >= cap fires even on empty rest.
-	// acceptable noise, gate on "more data remained" if it becomes annoying
-	if capEvents != 1 {
-		t.Logf("note: OnChunkCapped fired %d time(s) at exact boundary (documented behavior)", capEvents)
+	// Path B: hits == cap with no overflow is not truncation, so OnChunkCapped
+	// must not fire at the exact boundary.
+	if capEvents != 0 {
+		t.Errorf("OnChunkCapped fired %d time(s) at the exact boundary; want 0 (no truncation)", capEvents)
 	}
 }

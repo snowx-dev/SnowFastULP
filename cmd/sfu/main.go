@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -9,27 +8,23 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/cliargs"
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/console"
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
 
-// per-run output basename, "sfu_<YYYYMMDD>_<runID>.txt". day-level
-// prefix groups runs in ls w/o leaking time-of-day. chunked zstd
-// sink reuses the stamp for part names
-func defaultBasename(stamp string) string {
-	return "sfu_" + stamp + ".txt"
-}
-
-// default output path, <stamp>.txt in CWD
-func defaultOutputName(stamp string) string {
-	return defaultBasename(stamp)
-}
+// reg is the shared terminal restore/exit registry: the live frame registers
+// its teardown via Set, and every exit path (graceful ExitWithCode, force-exit
+// on a second Ctrl-C, cleanup timeout, fatal/usage) routes through it so the
+// alt-screen is always left cleanly. ulpengine.PrintManualCleanupHint prints
+// stranded scratch paths on a force-exit.
+var reg = termctl.New(os.Stderr, ulpengine.PrintManualCleanupHint)
 
 // validates output dir flag, empty = CWD. must look like a dir, plain
 // file paths rejected. flagName used in error msg
@@ -58,27 +53,85 @@ func isDirHint(p string) bool {
 	return false
 }
 
-// appends .zst when compress and not already suffixed (case-insensitive)
-func withZstExt(p string, compress bool) string {
-	if !compress {
-		return p
+// outputMode captures which output sink the run targets and whether it's a
+// dry-run preview. Kept pure so the -o / -od / -odr mutual-exclusion and
+// config-odr rules are unit-testable independently of main()'s exit path.
+type outputMode struct {
+	destDedup   bool // -od or -odr: incremental dedup against a library
+	dryRun      bool // -odr: write nothing, just preview
+	outArg      string
+	outFlagName string // "-o" | "-od" | "-odr", for error messages
+}
+
+// resolveOutputMode enforces the -o / -od / -odr mutual exclusion and the
+// config-odr-on-od rule. odPassed/odrPassed are whether the user set those
+// flags on the CLI (flag.Visit); odrCfg is the resolved [sfu].odr bool.
+func resolveOutputMode(out, outDedup, outDryRun string, odPassed, odrPassed, odrCfg bool) (outputMode, error) {
+	outCount := 0
+	if out != "" {
+		outCount++
 	}
-	if strings.EqualFold(filepath.Ext(p), ".zst") {
-		return p
+	if outDedup != "" {
+		outCount++
 	}
-	return p + ".zst"
+	if outDryRun != "" {
+		outCount++
+	}
+	if outCount > 1 {
+		return outputMode{}, fmt.Errorf("-o, -od, and -odr are mutually exclusive; pick one")
+	}
+	if odPassed && strings.TrimSpace(outDedup) == "" {
+		return outputMode{}, fmt.Errorf("-od requires a directory path; got empty string")
+	}
+	if odrPassed && strings.TrimSpace(outDryRun) == "" {
+		return outputMode{}, fmt.Errorf("-odr requires a directory path; got empty string")
+	}
+	m := outputMode{outArg: out, outFlagName: "-o"}
+	if outDedup != "" {
+		m.destDedup = true
+		m.outArg = outDedup
+		m.outFlagName = "-od"
+	}
+	if outDryRun != "" {
+		m.destDedup = true
+		m.dryRun = true
+		m.outArg = outDryRun
+		m.outFlagName = "-odr"
+	}
+	// config odr=true flips dry-run on a -od run, reusing the od path.
+	if !m.dryRun && odrCfg {
+		if !m.destDedup {
+			return outputMode{}, fmt.Errorf("[sfu] odr=true requires a library path; set [sfu].od or pass -od/-odr DIR")
+		}
+		m.dryRun = true
+		m.outFlagName = "-odr"
+	}
+	return m, nil
 }
 
 func main() {
-	// enable VT processing on Windows so TUI ANSI renders. no-op on Unix
-	console.EnableVT()
+	// A panic anywhere below (e.g. inside ulpengine.Run) would otherwise crash
+	// with the alt-screen still up and the cursor hidden. Restore first, then
+	// re-panic so the stack trace prints on a clean screen. No-op until the
+	// monitor installs the hook.
+	defer func() {
+		if r := recover(); r != nil {
+			reg.Restore()
+			panic(r)
+		}
+	}()
+
+	// enable VT processing on Windows so TUI ANSI renders. no-op on Unix.
+	// vtOK is false only on a legacy console that can't render ANSI, which
+	// forces plain mode below so escapes never leak as raw text.
+	vtOK := console.EnableVT()
 
 	started := time.Now()
-	runID, err := newRunID()
+	runID, err := ulpengine.NewRunID()
 	if err != nil {
 		fatalf("%v", err)
 	}
-	stamp := runStamp(started, runID)
+	stamp := ulpengine.RunStamp(started, runID)
 
 	flag.Usage = func() { printHelp(filepath.Base(os.Args[0]), os.Stderr) }
 
@@ -90,8 +143,21 @@ func main() {
 	}
 	if cliargs.IsHelpRequest(os.Args[1:]) {
 		printHelp(filepath.Base(os.Args[0]), os.Stdout)
-		os.Exit(0)
+		reg.ExitWithCode(0)
 	}
+
+	// `update` / `upgrade`: replace installed SnowFast binaries with the latest release.
+	// Handled before cfg load so a bad config can't block self-update.
+	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
+		if err != nil {
+			fatalf("%v", err)
+		}
+		return
+	}
+
+	// Gate color on stderr (the TUI + summary target): a redirected stderr log
+	// must never accumulate ANSI escapes even when stdout is a TTY.
+	applyStderrColorProfile()
 
 	fileCfg, err := config.LoadFromArgv(os.Args[1:])
 	if err != nil {
@@ -100,19 +166,22 @@ func main() {
 
 	out := flag.String("o", "", "output directory (default: CWD; see -h for file naming)")
 	outDedup := flag.String("od", "", "output directory with incremental dedup against past sfu_*.txt.zst archives in the same dir (auto-enables -zst; mutually exclusive with -o)")
+	outDryRun := flag.String("odr", "", "like -od but writes nothing: preview what a run would add to the library (auto-enables -zst; mutually exclusive with -o and -od)")
 	workers := flag.Int("workers", 0, "phase-1 parser goroutines (0=auto)")
+	workersAlias := flag.Int("j", 0, "alias for -workers")
 	dedupW := flag.Int("dedup", 0, "phase-2 dedup goroutines (0=auto)")
 	buckets := flag.Int("buckets", 0, "override adaptive bucket count (0=auto)")
 	tempDir := flag.String("temp-dir", "", "directory for shard temp files (default: same dir as -o)")
 	noTUI := flag.Bool("no-tui", false, "disable live TUI; print plain summary at end")
 	zst := flag.Bool("zst", false, "compress output with zstd (highly efficient and searchable)")
-	splitZst := flag.Int64("split-zst", defaultZstChunkLines, "with -zst: split every N unique lines (default ~1.5GB/part); 0=single archive")
+	splitZst := flag.Int64("split-zst", ulpengine.DefaultZstChunkLines, "with -zst: split every N unique lines (default ~1.5GB/part); 0=single archive")
 	delSrc := flag.Bool("del", false, "after success, delete all parsed input .txt files (irreversible)")
 	noURI := flag.Bool("no-uri", false, "emit host:login:password (drop URL path/query)")
 	loose := flag.Bool("loose", false, "high-recall parser: accepts host:port:user:pw, bare host:user:pw, LPU; less precise output")
 	noEncodingSniff := flag.Bool("no-encoding-sniff", false, "skip BOM detection; treat all inputs as UTF-8 (debug / A-B benchmark)")
 	debug := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	debugReject := flag.Bool("debug-reject", false, "append parser-rejected lines to a file in CWD")
+	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
 
 	// allow positional anywhere on cmdline. flag.Parse stops at first
 	// non-flag, so split first and pass only flag tokens
@@ -120,11 +189,15 @@ func main() {
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
 		// CommandLine defaults to ExitOnError, this branch only fires
 		// if mode is ever switched. treat as usage failure
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 	visited := config.NewVisited()
+	// Accept -j as an alias for -workers (sfs uses -j) so the same invocation
+	// works across all three CLIs; explicit -workers wins.
+	visited.ResolveIntAlias(workers, workersAlias, "workers", "j")
+	var odrCfg bool
 	if err := fileCfg.ApplySFU(visited, config.SFUFlags{
-		O: out, OD: outDedup, TempDir: tempDir,
+		O: out, OD: outDedup, ODR: &odrCfg, TempDir: tempDir,
 		Workers: workers, Dedup: dedupW, Buckets: buckets,
 		SplitZst: splitZst,
 		NoTUI:    noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
@@ -149,7 +222,7 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "sfu: no input path provided; %s\n\n", cfgHint)
 			flag.Usage()
-			os.Exit(2)
+			reg.ExitWithCode(2)
 		}
 		inputArg = cfgInput
 	case 1:
@@ -157,7 +230,7 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "sfu: expected exactly one input path; got %d\n\n", len(positional))
 		flag.Usage()
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 
 	cwd, err := os.Getwd()
@@ -165,31 +238,28 @@ func main() {
 		fatalf("getwd: %v", err)
 	}
 
-	inputs, err := collectInputs(inputArg)
+	inputs, err := ulpengine.CollectInputs(inputArg)
 	if err != nil {
 		fatalf("input: %v", err)
 	}
 
-	// -o and -od mutually exclusive. -od does incremental dedup vs past
+	// -o, -od, -odr mutually exclusive. -od does incremental dedup vs past
 	// sfu archives and implies -zst (sidecar/regen only reads .zst).
-	// flag.Visit only iterates user-set flags, so explicit `-od ""`
-	// shows up while a missing flag doesnt
+	// -odr is -od's dry-run twin: same pipeline + stats, no library writes.
+	// flag.Visit only iterates user-set flags, so explicit `-od ""` /
+	// `-odr ""` show up while a missing flag doesnt
 	odPassed := visited["od"]
-	if *outDedup != "" && *out != "" {
-		usagef("-od and -o are mutually exclusive; pick one")
+	odrPassed := visited["odr"]
+	mode, err := resolveOutputMode(*out, *outDedup, *outDryRun, odPassed, odrPassed, odrCfg)
+	if err != nil {
+		usagef("%v", err)
 	}
-	if odPassed && strings.TrimSpace(*outDedup) == "" {
-		usagef("-od requires a directory path; got empty string")
-	}
-	destDedup := *outDedup != ""
-	outArg := *out
-	outFlagName := "-o"
-	if destDedup {
-		outArg = *outDedup
-		outFlagName = "-od"
-		if !*zst {
-			*zst = true
-		}
+	destDedup := mode.destDedup
+	dryRun := mode.dryRun
+	outArg := mode.outArg
+	outFlagName := mode.outFlagName
+	if destDedup && !*zst {
+		*zst = true
 	}
 
 	outDir, autoMkdir, err := resolveOutputDir(outFlagName, outArg)
@@ -200,29 +270,30 @@ func main() {
 	if err != nil {
 		fatalf("resolve output dir: %v", err)
 	}
-	base := defaultBasename(stamp)
+	base := ulpengine.DefaultBasename(stamp)
 
 	// output path = dir + basename + optional .zst. 1 vs N parts decided
 	// later by chunkedZstdSink. multi-part rename only fires when _part2
 	// actually opens, so single-archive runs never carry _part suffix
-	absOut, err := filepath.Abs(filepath.Join(outDirAbs, withZstExt(base, *zst)))
+	absOut, err := filepath.Abs(filepath.Join(outDirAbs, ulpengine.WithZstExt(base, *zst)))
 	if err != nil {
 		fatalf("resolve output: %v", err)
 	}
 
-	if autoMkdir {
+	if autoMkdir && !dryRun {
 		if err := os.MkdirAll(outDirAbs, 0o755); err != nil {
 			fatalf("create output dir: %v", err)
 		}
 	}
 
-	cfg := pipelineConfig{
+	cfg := ulpengine.Config{
 		Inputs:          inputs,
 		Output:          absOut,
 		TempDir:         *tempDir,
 		Workers:         *workers,
 		DedupWorkers:    *dedupW,
 		Buckets:         *buckets,
+		FastPathOff:     fileCfg.SFU.NoFastPath,
 		Compress:        *zst,
 		ZstChunkLines:   *splitZst,
 		RunStarted:      started,
@@ -233,38 +304,39 @@ func main() {
 		NoEncodingSniff: *noEncodingSniff,
 		DestDedup:       destDedup,
 		DestDedupDir:    outDirAbs,
+		DryRun:          dryRun,
 	}
-	r, err := resolvePipelineConfig(cfg)
+	r, err := ulpengine.Resolve(cfg)
 	if err != nil {
 		fatalf("config: %v", err)
 	}
-	ensureDestDedupMetrics(r)
+	ulpengine.EnsureDestDedupMetrics(r)
 
-	var dbg *debugLog
-	var rr *rejectRecorder
+	var dbg *ulpengine.DebugLog
+	var rr *ulpengine.RejectRecorder
 	var debugLogPath string
 	if *debug {
-		p, err := debugArtifactPath(cwd, "sfu-debug", ".log", stamp)
+		p, err := ulpengine.DebugArtifactPath(cwd, "sfu-debug", ".log", stamp)
 		if err != nil {
 			fatalf("debug log path: %v", err)
 		}
 		debugLogPath = p
-		dbg, err = newDebugLog(p)
+		dbg, err = ulpengine.NewDebugLog(p)
 		if err != nil {
 			fatalf("debug log: %v", err)
 		}
-		r.cfg.Debug = dbg
+		r.Cfg.Debug = dbg
 	}
 	if *debugReject {
-		p, err := debugArtifactPath(cwd, "sfu-rejected", ".txt", stamp)
+		p, err := ulpengine.DebugArtifactPath(cwd, "sfu-rejected", ".txt", stamp)
 		if err != nil {
 			fatalf("debug-reject path: %v", err)
 		}
-		rr, err = newRejectRecorder(p)
+		rr, err = ulpengine.NewRejectRecorder(p)
 		if err != nil {
 			fatalf("debug-reject: %v", err)
 		}
-		r.cfg.Reject = rr
+		r.Cfg.Reject = rr
 	}
 	defer func() {
 		if dbg != nil {
@@ -277,8 +349,8 @@ func main() {
 
 	binName := filepath.Base(os.Args[0])
 	if dbg != nil {
-		dbg.writeHeader(binName, started, os.Args, inputs, r)
-		dbg.logResolutionRationale(r)
+		dbg.WriteHeader(binName, started, os.Args, inputs, r)
+		dbg.LogResolutionRationale(r)
 		if *debug {
 			fmt.Fprintf(os.Stderr, "debug log: %s\n", debugLogPath)
 		}
@@ -291,17 +363,20 @@ func main() {
 		}
 	}
 
+	updateChecker := selfupdate.NewChecker(version.String, os.Args[0], *noUpdateCheck)
+	updateChecker.Start()
+
 	// sweep orphan shard subdirs from crashed runs. best-effort,
 	// failures silent in sweepStaleTempDirs
-	if err := os.MkdirAll(r.tempDir, 0o755); err == nil {
-		if n := sweepStaleTempDirs(r.tempDir, ""); n > 0 {
-			dbg.Event("swept %d orphan temp dir(s) under %s", n, r.tempDir)
+	if err := os.MkdirAll(r.TempDir, 0o755); err == nil {
+		if n := ulpengine.SweepStaleWorkDirs(r.TempDir, ""); n > 0 {
+			dbg.Event("swept %d orphan temp dir(s) under %s", n, r.TempDir)
 		}
 	}
 
 	// install handlers BEFORE preflight prompt so Ctrl-C at the prompt
 	// exits 130 cleanly instead of swallowing the keystroke
-	ctx, cancel, signaled := signalContext()
+	ctx, cancel, signaled := reg.SignalContext()
 	defer cancel()
 
 	ok, err := preflightCheck(ctx, r, isStdinTTY(os.Stdin), os.Stdin, os.Stderr)
@@ -309,19 +384,19 @@ func main() {
 		// ctx.Err at the prompt = user Ctrl-C'd. exit 130 not "preflight: ..."
 		if ctx.Err() != nil {
 			fmt.Fprintln(os.Stderr, "\ninterrupted")
-			os.Exit(130)
+			reg.ExitWithCode(130)
 		}
 		fatalf("preflight: %v", err)
 	}
 	if !ok {
 		fmt.Fprintln(os.Stderr, "aborted by user")
-		os.Exit(2)
+		reg.ExitWithCode(2)
 	}
 
-	m := &metrics{totalInputBytes: r.totalInputs}
+	m := &ulpengine.Metrics{TotalInputBytes: r.TotalInputs}
 
 	doneCh := make(chan struct{})
-	tuiOff := *noTUI || !stdoutIsCharDevice()
+	tuiOff := *noTUI || !stderrIsCharDevice() || !vtOK
 
 	var monitorWG sync.WaitGroup
 	if !tuiOff {
@@ -329,7 +404,7 @@ func main() {
 		go monitor(doneCh, started, m, r, signaled, &monitorWG)
 	}
 
-	runErr := run(ctx, r, m)
+	runErr := ulpengine.Run(ctx, r, m)
 
 	close(doneCh)
 
@@ -343,111 +418,74 @@ func main() {
 		// user Ctrl-C = exit 130 + terse msg, not "context canceled"
 		sig := signaled()
 		if dbg != nil {
-			dbg.logTermination(runErr, sig, time.Since(started))
+			dbg.LogTermination(runErr, sig, time.Since(started))
 		}
 		if sig {
-			fmt.Fprintln(os.Stderr, "\ninterrupted")
-			os.Exit(130)
+			// reassure a confused user who Ctrl+C'd mid-migration: the dest
+			// library is only ever touched via atomic sidecar renames + a
+			// discarded-on-failure output, so nothing is half-written.
+			if r.Cfg.DestDedup {
+				fmt.Fprintln(os.Stderr, "\ninterrupted — existing library left intact (no archives modified); safe to re-run.")
+			} else {
+				fmt.Fprintln(os.Stderr, "\ninterrupted")
+			}
+			ulpengine.PrintManualCleanupHint(os.Stderr)
+			reg.ExitWithCode(130)
 		}
 		fmt.Fprintf(os.Stderr, "\nerror: %v\n", runErr)
-		os.Exit(1)
+		reg.ExitWithCode(1)
 	}
 
-	if *delSrc {
+	if *delSrc && !dryRun {
 		// delete BEFORE logCompletion so outcome lands in same block
-		deleted, err := deleteParsedInputs(inputs, r.OutputPaths)
+		deleted, err := ulpengine.DeleteParsedInputs(inputs, r.OutputPaths)
 		if err != nil {
 			dbg.Event("del: FAILED after removing %d/%d input(s) err=%v", len(deleted), len(inputs), err)
 			fmt.Fprintf(os.Stderr, "sfu: delete inputs: %v\n", err)
-			os.Exit(1)
+			reg.ExitWithCode(1)
 		}
 		r.DeletedInputPaths = deleted
 		dbg.Event("del: removed %d input file(s)", len(deleted))
 	}
 
 	if dbg != nil {
-		dbg.logCompletion(m, time.Since(started), r)
+		dbg.LogCompletion(m, time.Since(started), r)
 	}
 
 	// DONE block to stderr, alt-screen already left. stderr keeps stdout
 	// clean for `sfu in -o ./out/ | grep ...` pipelines. lipgloss strips
 	// styling automatically on non-TTY stderr
 	tw := termWidth()
-	for _, ln := range renderFinalStdoutSummary(time.Since(started), m, r, tw) {
+	// NoticeForSummary returns nil when the check is disabled, so no extra guard.
+	updateNotice := updateChecker.NoticeForSummary()
+	for _, ln := range renderFinalStdoutSummary(time.Since(started), m, r, tw, updateNotice) {
 		fmt.Fprintln(os.Stderr, ln)
-	}
-}
-
-func ensureDestDedupMetrics(r *resolved) {
-	if r == nil || !r.cfg.DestDedup {
-		return
-	}
-	if r.odMetrics == nil {
-		r.odMetrics = &odMetrics{}
-	}
-	if r.outputIdxMetrics == nil {
-		r.outputIdxMetrics = &odMetrics{}
 	}
 }
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfu: "+format+"\n", args...)
-	os.Exit(1)
+	reg.ExitWithCode(1)
 }
 
 // argv-shape error, exit 2 (distinct from runtime 1)
 func usagef(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfu: "+format+"\n", args...)
-	os.Exit(2)
-}
-
-// returns ctx cancelled on SIGINT/SIGTERM and a "did signal cause this?"
-// closure. two-stage:
-//
-//	1st signal: set flag, cancel ctx (graceful drain + monitor flips
-//	            to INTERRUPTED frame)
-//	2nd signal: force-exit 130, leave alt-screen, print stranded paths
-//
-// 2nd-signal goroutine writes alt-screen-leave directly b/c monitor's
-// frame.close wont run between os.Exit and process death.
-// SIGTERM is Unix-only, Windows no-op (covered by os.Interrupt anyway)
-func signalContext() (context.Context, context.CancelFunc, func() bool) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var sigFlag atomic.Bool
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		defer signal.Stop(ch)
-		// 1st signal OR natural cancel ends graceful phase
-		select {
-		case <-ch:
-			sigFlag.Store(true)
-			cancel()
-		case <-ctx.Done():
-			return
-		}
-		// 2nd-signal wait is unconditional. selecting on (ch | ctx.Done)
-		// races b/c ctx is already cancelled, Go picks randomly and
-		// would silently swallow every other 2nd Ctrl-C
-		<-ch
-		if stdoutIsCharDevice() {
-			fmt.Print(ansiShowCursor + altScreenLeave)
-		}
-		printManualCleanupHint(os.Stderr)
-		fmt.Fprintln(os.Stderr, "force-exit (signal received twice).")
-		os.Exit(130)
-	}()
-	return ctx, cancel, sigFlag.Load
+	reg.ExitWithCode(2)
 }
 
 // live status loop. samples metrics every ~300ms, computes per-tick
 // rates, draws an 80-col block. signaled=true swaps to INTERRUPTED
 // frame. wg.Done fires after frame.close so callers sync on clean exit
-func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, signaled func() bool, wg *sync.WaitGroup) {
+func monitor(done <-chan struct{}, started time.Time, m *ulpengine.Metrics, r *ulpengine.Resolved, signaled func() bool, wg *sync.WaitGroup) {
 	if wg != nil {
 		defer wg.Done()
 	}
-	frame := tuiFrame{tty: stdoutIsCharDevice()}
+	frame := tuiFrame{tty: stderrIsCharDevice()}
+	// Route teardown through the frame's mutex-guarded close so the force-exit
+	// goroutine never races the monitor's draw on stderr.
+	reg.Set(frame.close)
+	defer reg.Clear()
 	defer frame.close()
 
 	winch := make(chan os.Signal, 1)
@@ -467,26 +505,22 @@ func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, s
 	// rate row ticks every redraw regardless of main frame state
 	var prevRegenAt time.Time
 	var prevRegenBytes int64
-	// track which odMetrics the snapshot came from. phase 0 reads
-	// r.odMetrics, phaseIndex reads r.outputIdxMetrics. reset prev*
-	// on switch so rate row starts cleanly at 0 in new phase
-	var prevRegenSrc *odMetrics
 
 	draw := func() {
 		now := time.Now()
 		elapsed := now.Sub(started)
-		phase := m.phase.Load()
+		phase := m.Phase.Load()
 		// phaseInit + phaseShard render the same PARSING panel, treat
 		// as one phase for delta math. phasePhase0 keeps own bucket
 		// (OD-specific rates shouldnt bleed into shard panel)
 		normPhase := phase
-		if phase == phaseInit {
-			normPhase = phaseShard
+		if phase == ulpengine.PhaseInit {
+			normPhase = ulpengine.PhaseShard
 		}
 
-		read := m.bytesRead.Load()
-		sh := m.bytesShard.Load()
-		wr := m.bytesWritten.Load()
+		read := m.BytesRead.Load()
+		sh := m.BytesShard.Load()
+		wr := m.BytesWritten.Load()
 
 		var readBPS, shardBPS, writeBPS float64
 		if !prevAt.IsZero() && normPhase == prevNormPhase {
@@ -501,18 +535,9 @@ func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, s
 		// OD-frame throughput. computed unconditionally so phase 1/2
 		// see a 0-rate snapshot of the (frozen) phase-0 counter
 		var regenBPS float64
-		// phaseIndex byte counter lives on outputIdxMetrics, phase 0
-		// on odMetrics. pick the right source so the rate row stays
-		// live across both regen phases
-		var regenMetricsForRate *odMetrics
-		if phase == phaseIndex && r.outputIdxMetrics != nil {
-			regenMetricsForRate = r.outputIdxMetrics
-		} else if r.odMetrics != nil {
-			regenMetricsForRate = r.odMetrics
-		}
-		if regenMetricsForRate != nil {
-			cur := regenMetricsForRate.regenBytesRead.Load()
-			if !prevRegenAt.IsZero() && prevRegenSrc == regenMetricsForRate {
+		if r.OdMetrics != nil {
+			cur := r.OdMetrics.RegenBytesRead.Load()
+			if !prevRegenAt.IsZero() {
 				dt := now.Sub(prevRegenAt).Seconds()
 				if dt >= 0.05 {
 					regenBPS = float64(cur-prevRegenBytes) / dt
@@ -520,7 +545,6 @@ func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, s
 			}
 			prevRegenAt = now
 			prevRegenBytes = cur
-			prevRegenSrc = regenMetricsForRate
 		}
 
 		ramMB := float64(currentRSSBytes()) / (1024 * 1024)
@@ -530,26 +554,22 @@ func monitor(done <-chan struct{}, started time.Time, m *metrics, r *resolved, s
 		// interrupt overrides phase layout for the rest of process
 		// lifetime. prev* not updated, rates meaningless in shutdown
 		if signaled != nil && signaled() {
-			frame.draw(renderInterruptLines(elapsed, w))
+			frame.draw(renderInterruptLines(elapsed, w, ulpengine.SnapshotCleanupLog()))
 			return
 		}
 
 		var lines []string
 		switch phase {
-		case phasePhase0:
+		case ulpengine.PhasePhase0:
 			// phase 0 has all shard counters at zero. surface just
 			// the OD frame as primary so user sees discovery/regen
 			// progress instead of a frozen 0% bar
 			lines = renderPhase0Lines(elapsed, m, r, ramMB, cpuPct, regenBPS, w)
-		case phaseInit, phaseShard:
+		case ulpengine.PhaseInit, ulpengine.PhaseShard:
 			lines = renderShardLines(now, elapsed, m, r, ramMB, cpuPct, readBPS, shardBPS, regenBPS, w)
-		case phaseDedup:
+		case ulpengine.PhaseDedup:
 			lines = renderDedupLines(now, elapsed, m, r, ramMB, cpuPct, writeBPS, regenBPS, w)
-		case phaseIndex:
-			// post-dedup own-output indexing. dedicated frame so
-			// dedup bar cant sit at 100% while zstd decode runs
-			lines = renderIndexLines(elapsed, m, r, ramMB, cpuPct, regenBPS, w)
-		case phaseDone:
+		case ulpengine.PhaseDone:
 			// DONE is drawn to regular screen in main after alt-screen
 			// leave so it sticks in scrollback. drawing here would
 			// cause a brief flash on exit. return early lets deferred

@@ -7,19 +7,32 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ListTxt walks root recursively, returns sorted *.txt paths. no symlinks. .txt.zst excluded.
 func ListTxt(root string) ([]string, error) {
-	return listFiles(root, ".txt", "no .txt files under %s")
+	return listFiles(root, ".txt", time.Time{})
 }
 
 // ListZst walks root recursively, returns sorted *.zst paths. no symlinks.
 func ListZst(root string) ([]string, error) {
-	return listFiles(root, ".zst", "no .zst files under %s")
+	return listFiles(root, ".zst", time.Time{})
 }
 
-func listFiles(root, ext, emptyMsg string) ([]string, error) {
+// ListTxtSince is ListTxt limited to files whose mtime is on/after modifiedAfter.
+func ListTxtSince(root string, modifiedAfter time.Time) ([]string, error) {
+	return listFiles(root, ".txt", modifiedAfter)
+}
+
+// ListZstSince is ListZst limited to files whose mtime is on/after modifiedAfter.
+func ListZstSince(root string, modifiedAfter time.Time) ([]string, error) {
+	return listFiles(root, ".zst", modifiedAfter)
+}
+
+// listFiles walks root for files with ext. A non-zero modifiedAfter keeps only
+// files whose mtime is on/after it (used by the --since age filter).
+func listFiles(root, ext string, modifiedAfter time.Time) ([]string, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -44,12 +57,21 @@ func listFiles(root, ext, emptyMsg string) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != root && shouldSkipDir(path, d) {
+			if path != root && shouldSkipDir(d) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		if strings.EqualFold(filepath.Ext(d.Name()), ext) {
+			if !modifiedAfter.IsZero() {
+				info, ierr := d.Info()
+				if ierr != nil {
+					return ierr
+				}
+				if info.ModTime().Before(modifiedAfter) {
+					return nil
+				}
+			}
 			paths = append(paths, path)
 		}
 		return nil
@@ -59,7 +81,11 @@ func listFiles(root, ext, emptyMsg string) ([]string, error) {
 	}
 	sort.Strings(paths)
 	if len(paths) == 0 {
-		return nil, fmt.Errorf(emptyMsg, root)
+		if !modifiedAfter.IsZero() {
+			return nil, fmt.Errorf("no %s files under %s modified on/after %s",
+				ext, root, modifiedAfter.Format(time.RFC3339))
+		}
+		return nil, fmt.Errorf("no %s files under %s", ext, root)
 	}
 	return paths, nil
 }

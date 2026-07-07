@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
 
@@ -36,14 +37,14 @@ const promptMaxAttempts = 3
 // runs the check + optional Y/n prompt. interactive=false auto-continues
 // w/ warning still printed (pipe/CI path). ctx aborts the prompt early
 // on ctrl-c so users get 130 exit instead of a stuck read
-func preflightCheck(ctx context.Context, r *resolved, interactive bool, stdin io.Reader, out io.Writer) (bool, error) {
-	if r == nil || r.totalInputs <= 0 {
+func preflightCheck(ctx context.Context, r *ulpengine.Resolved, interactive bool, stdin io.Reader, out io.Writer) (bool, error) {
+	if r == nil || r.TotalInputs <= 0 {
 		return true, nil
 	}
 
 	outNeed, tempNeed := estimateNeeds(r)
-	outDir := filepath.Dir(r.cfg.Output)
-	tempDir := r.tempDir
+	outDir := filepath.Dir(r.Cfg.Output)
+	tempDir := r.TempDir
 
 	warning := buildDiskWarning(outDir, tempDir, outNeed, tempNeed)
 	if warning == "" {
@@ -108,16 +109,16 @@ func promptUserResponse(ctx context.Context, stdin io.Reader, out io.Writer) (bo
 //	fast path:   temp = 0 (no shards)
 //	-od:         temp += ~8 B/dest key + ~8 B/output line. dest term peeks
 //	             sidecar headers, missing/unreadable estimated at size/10
-func estimateNeeds(r *resolved) (outBytes, tempBytes int64) {
-	if r.cfg.Compress {
-		outBytes = int64(float64(r.totalInputs) / diskRatioCompressed)
+func estimateNeeds(r *ulpengine.Resolved) (outBytes, tempBytes int64) {
+	if r.Cfg.Compress {
+		outBytes = int64(float64(r.TotalInputs) / diskRatioCompressed)
 	} else {
-		outBytes = r.totalInputs
+		outBytes = r.TotalInputs
 	}
-	if !r.useFastPath {
-		tempBytes = r.totalInputs
+	if !r.UseFastPath {
+		tempBytes = r.TotalInputs
 	}
-	if r.cfg.DestDedup {
+	if r.Cfg.DestDedup {
 		tempBytes += estimateODOverhead(r)
 	}
 	return
@@ -126,44 +127,14 @@ func estimateNeeds(r *resolved) (outBytes, tempBytes int64) {
 // -od overhead: dest_keys/ bytes + own-output .idx upper bound.
 // 8 B per dest key + totalInputs/50 for our own keys (~50 B avg ULP line × 8).
 // sidecar errors absorbed silently, preflight is a hint not a gate
-func estimateODOverhead(r *resolved) int64 {
-	if r == nil || !r.cfg.DestDedup {
+func estimateODOverhead(r *ulpengine.Resolved) int64 {
+	if r == nil || !r.Cfg.DestDedup {
 		return 0
 	}
-	destKeyBytes := estimateDestKeyBytes(r.cfg.DestDedupDir, r.cfg.RunStamp)
+	destKeyBytes := ulpengine.EstimateDestKeyBytes(r.Cfg.DestDedupDir, r.Cfg.RunStamp)
 	// totalInputs × 8 / 50 = totalInputs × 0.16
-	outputIdxBytes := r.totalInputs * sidecarKeyBytes / 50
+	outputIdxBytes := r.TotalInputs * ulpengine.SidecarKeyBytes / 50
 	return destKeyBytes + outputIdxBytes
-}
-
-// peeks sidecar headers under destDir, sums 8 B × hashes. shared by
-// preflight + adaptive bucket sizer so both see the same footprint.
-// unreadable sidecar = archive_size/10 fallback.
-// excludeStamp filters out the current run's own in-progress archive
-func estimateDestKeyBytes(destDir, excludeStamp string) int64 {
-	if destDir == "" {
-		return 0
-	}
-	matches, err := filepath.Glob(filepath.Join(destDir, "sfu_*.txt.zst"))
-	if err != nil {
-		return 0
-	}
-	var total int64
-	for _, p := range matches {
-		runID, _ := parseArchiveName(p)
-		if runID == "" || runID == excludeStamp {
-			continue
-		}
-		side := sidecarPathForArchive(p)
-		if hdr, err := readSidecarHeader(side); err == nil {
-			total += int64(hdr.keyCount) * sidecarKeyBytes
-			continue
-		}
-		if fi, err := os.Stat(p); err == nil {
-			total += fi.Size() / 10
-		}
-	}
-	return total
 }
 
 // formatted warning, "" when both vols have enough headroom (after slack).

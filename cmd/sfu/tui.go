@@ -5,11 +5,17 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
+	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
 
@@ -29,11 +35,16 @@ const (
 	tuiFooterLine2 = "https://snowx.dev"
 )
 
+// Horizontal layout: the content block is indented leftPad on the LEFT and the
+// same on the RIGHT so it sits balanced in the terminal rather than flush
+// against the right edge.
+//
+//	contentWidth  — outer width of the bordered box / bar region.
+//	boxInnerWidth — usable text width inside gradientBox (2 borders + 4 padding).
+func contentWidth(width int) int  { return width - 2*leftPad }
+func boxInnerWidth(width int) int { return contentWidth(width) - 6 }
+
 const (
-	ansiHideCursor = "\033[?25l"
-	ansiShowCursor = "\033[?25h"
-	altScreenEnter = "\033[?1049h"
-	altScreenLeave = "\033[?1049l"
 	// kept as bare SGR-reset, trimToDisplayWidth needs to emit one
 	// before the ellipsis when truncating mid-styled string. lipgloss
 	// cant help b/c trim runs after lipgloss already rendered the line
@@ -102,9 +113,16 @@ var (
 	doneStart, _ = colorful.Hex("#3CC451") // vivid medium green
 	doneEnd, _   = colorful.Hex("#88FF7B") // bright lime, ~xterm 82
 
-	// live footer taglines, frost blue → icy white
-	footerGradA, _ = colorful.Hex("#3D7EA6")
+	// live footer taglines, ice blue → icy white
+	footerGradA, _ = colorful.Hex("#7DD3E8")
 	footerGradB, _ = colorful.Hex("#F2F8FC")
+
+	// box frames / mini progress bars, frost blue → icy white
+	frostGradA, _ = colorful.Hex("#3D7EA6")
+	frostGradB, _ = colorful.Hex("#F2F8FC")
+
+	// open-source heart in the footer, bright red ❤️
+	heartRed = lipgloss.Color("#FF2B2B")
 
 	// interrupt frame, amber → muted red
 	interruptStart, _ = colorful.Hex("#E0B040")
@@ -126,11 +144,18 @@ func spinnerFrame(now time.Time) string {
 // live terminal width, capped at tuiDisplayWidth. polled per tick so
 // SIGWINCH resizes show up within ~300ms
 func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || w <= 0 {
+	w := termWidthFull()
+	if w > tuiDisplayWidth {
 		return tuiDisplayWidth
 	}
-	if w > tuiDisplayWidth {
+	return w
+}
+
+// termWidthFull is the real terminal width, uncapped. The muted cleanup log
+// above the interrupt box uses this so long paths truncate as late as possible.
+func termWidthFull() int {
+	w, _, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil || w <= 0 {
 		return tuiDisplayWidth
 	}
 	return w
@@ -139,7 +164,7 @@ func termWidth() int {
 // terminal row count. VT100 24-row default on non-TTY / query failure.
 // used by OD frame to budget per-worker rows
 func termHeight() int {
-	_, h, err := term.GetSize(int(os.Stdout.Fd()))
+	_, h, err := term.GetSize(int(os.Stderr.Fd()))
 	if err != nil || h <= 0 {
 		return 24
 	}
@@ -239,7 +264,7 @@ func progressBarLabel(name string) string {
 }
 
 func mainPhaseBarWidth(width int) int {
-	body := width - leftPad - progressBarLabelWidth
+	body := contentWidth(width) - progressBarLabelWidth
 	min := barSuffixWidth + 2
 	if body < min {
 		return min
@@ -264,22 +289,43 @@ func renderMainProgressBars(parsingPct, dedupPct float64, parsingComplete bool, 
 	}
 }
 
+func renderFastPathProgressBars(pct float64, width int) [2]string {
+	body := mainPhaseBarWidth(width)
+	return [2]string{
+		indentSpace + progressBarLabel("Parsing") + gradientBar(pct, body),
+		indentSpace + progressBarLabel("Deduping") + gradientBar(pct, body),
+	}
+}
+
 // width-aware utilities. visible-width math skips SGR escapes so
 // lipgloss-styled strings measure correctly
+
+// skipCSI reports whether b[i:] begins with a CSI SGR escape ("\033[...m").
+// On a complete escape it returns the index just past the terminating 'm'
+// (ok=true). On a malformed escape (no terminating 'm') it returns len(b)
+// (ok=false) so callers drop the trailing bytes. If b[i:] is not a CSI escape
+// it returns i unchanged (ok=false) so the caller advances normally.
+func skipCSI(b []byte, i int) (newI int, ok bool) {
+	if i+1 >= len(b) || b[i] != '\033' || b[i+1] != '[' {
+		return i, false
+	}
+	j := i + 2
+	for j < len(b) && b[j] != 'm' {
+		j++
+	}
+	if j >= len(b) {
+		return len(b), false
+	}
+	return j + 1, true
+}
 
 func tuiVisibleWidth(s string) int {
 	b := []byte(s)
 	i := 0
 	n := 0
 	for i < len(b) {
-		if b[i] == '\033' && i+1 < len(b) && b[i+1] == '[' {
-			i += 2
-			for i < len(b) && b[i] != 'm' {
-				i++
-			}
-			if i < len(b) {
-				i++
-			}
+		if ni, _ := skipCSI(b, i); ni != i {
+			i = ni
 			continue
 		}
 		_, sz := utf8.DecodeRune(b[i:])
@@ -293,72 +339,78 @@ func tuiVisibleWidth(s string) int {
 	return n
 }
 
-func stdoutIsCharDevice() bool {
-	fi, err := os.Stdout.Stat()
+// stderrIsCharDevice gates the live TUI: the alt-screen and per-tick frames
+// render to stderr (keeping stdout clean for `sfu -o ./out | grep`), so the
+// gate must follow stderr's TTY status, not stdout's.
+func stderrIsCharDevice() bool {
+	fi, err := os.Stderr.Stat()
 	if err != nil {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// fixed multi-line status block on the alt-screen. each draw moves cursor
-// home, overwrites every line, clears any leftover lines from prior draw
+// applyStderrColorProfile downgrades lipgloss to plain ASCII when stderr is not
+// a terminal. Both the live TUI and the DONE summary render to stderr, so when
+// stderr is redirected (e.g. `sfu ... 2> run.log`, even with stdout a TTY) the
+// log must stay free of ANSI escapes. Mirrors sfl/sfs.
+func applyStderrColorProfile() {
+	if !stderrIsCharDevice() {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
+}
+
+// fixed multi-line status block on the alt-screen. each draw homes the cursor,
+// rewrites every line, then erases below to wipe a taller prior frame. Draw and
+// close are serialized so a teardown from the signal/force-exit goroutine can
+// never interleave between line writes and spill onto the primary screen. close
+// is idempotent.
 type tuiFrame struct {
+	mu    sync.Mutex
 	tty   bool
 	altOn bool
-	prevN int
 }
 
 func (f *tuiFrame) close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.tty || !f.altOn {
 		return
 	}
-	fmt.Print(ansiShowCursor + altScreenLeave)
+	// reset any scroll region defensively before leaving the alt-screen.
+	fmt.Fprint(os.Stderr, termctl.ANSIResetScroll+termctl.ANSIShowCursor+termctl.AltScreenLeave)
 	f.altOn = false
-}
-
-func (f *tuiFrame) enterAlt() {
-	if !f.tty || f.altOn {
-		return
-	}
-	fmt.Print(altScreenEnter + ansiHideCursor)
-	f.altOn = true
 }
 
 // wipes viewport on SIGWINCH so next draw lays out from a clean state
 func (f *tuiFrame) redrawOnResize() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.tty || !f.altOn {
 		return
 	}
-	fmt.Print("\033[2J\033[H")
+	fmt.Fprint(os.Stderr, "\033[2J\033[H")
 }
 
 func (f *tuiFrame) draw(lines []string) {
-	if len(lines) == 0 {
+	if !f.tty || len(lines) == 0 {
 		return
 	}
-	if !f.tty {
-		fmt.Print(strings.Join(trimLinesToWidth(lines, tuiDisplayWidth), "\n"), "\n")
-		return
-	}
-	f.enterAlt()
-	fmt.Print("\033[H")
-	for _, ln := range lines {
-		ln = trimToDisplayWidth(ln, tuiDisplayWidth)
-		fmt.Print("\033[2K\r", ln, "\n")
-	}
-	for i := len(lines); i < f.prevN; i++ {
-		fmt.Print("\033[2K\r\n")
-	}
-	f.prevN = len(lines)
-}
-
-func trimLinesToWidth(lines []string, max int) []string {
-	out := make([]string, len(lines))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rows := make([]string, len(lines))
 	for i, ln := range lines {
-		out[i] = trimToDisplayWidth(ln, max)
+		rows[i] = trimToDisplayWidth(ln, tuiDisplayWidth)
 	}
-	return out
+	var b strings.Builder
+	if !f.altOn {
+		b.WriteString(termctl.AltScreenEnter + termctl.ANSIHideCursor)
+		f.altOn = true
+	}
+	// Clamp to one row shy of the terminal height so the bottom line can't
+	// scroll the buffer; Compose erases any stale rows below.
+	b.WriteString(tuiframe.Compose(rows, termHeight()-1))
+	fmt.Fprint(os.Stderr, b.String())
 }
 
 func trimToDisplayWidth(s string, max int) string {
@@ -370,17 +422,11 @@ func trimToDisplayWidth(s string, max int) string {
 	i := 0
 	bytes := []byte(s)
 	for i < len(bytes) {
-		if bytes[i] == '\033' && i+1 < len(bytes) && bytes[i+1] == '[' {
-			j := i + 2
-			for j < len(bytes) && bytes[j] != 'm' {
-				j++
+		if ni, ok := skipCSI(bytes, i); ni != i {
+			if ok {
+				b.Write(bytes[i:ni])
 			}
-			if j < len(bytes) {
-				b.Write(bytes[i : j+1])
-				i = j + 1
-			} else {
-				i = j
-			}
+			i = ni
 			continue
 		}
 		if v >= max-1 {
@@ -437,6 +483,40 @@ func formatCount(n int64) string {
 	return b.String()
 }
 
+// compact K/M/B/T for header badges and library rows at billion scale.
+// sub-million values keep formatCount commas for precision.
+func formatCompactCount(n int64) string {
+	if n < 0 {
+		return "0"
+	}
+	if n < compactCountThreshold {
+		return formatCount(n)
+	}
+	units := []string{"", "K", "M", "B", "T"}
+	v := float64(n)
+	u := 0
+	for v >= 1000 && u < len(units)-1 {
+		v /= 1000
+		u++
+	}
+	if v >= 100 {
+		return fmt.Sprintf("%.0f%s", v, units[u])
+	}
+	if v >= 10 {
+		return fmt.Sprintf("%.1f%s", v, units[u])
+	}
+	return fmt.Sprintf("%.2f%s", v, units[u])
+}
+
+const compactCountThreshold = 1_000_000
+
+func formatLibraryCount(n int64) string {
+	if n >= compactCountThreshold {
+		return formatCompactCount(n)
+	}
+	return formatCount(n)
+}
+
 func humanBytes(n int64) string {
 	if n < 0 {
 		return "0 B"
@@ -470,17 +550,71 @@ func formatRate(bps float64) string {
 // layout helpers
 
 // labeled pipeline step count. -od = 3 (parse, dedup, output index),
-// else 2 (parse, dedup)
-func tuiPhaseTotal(r *resolved) int {
-	if r != nil && r.cfg.DestDedup {
-		return 3
-	}
+// step total in the phase tag. -od and plain runs both have 2 labeled steps
+// (parse, dedup); library prep is a step-1 sub-label, not a 3rd step.
+func tuiPhaseTotal(r *ulpengine.Resolved) int {
 	return 2
 }
 
-// 1-based step label, eg "[2/3 DEDUPING]"
-func renderPhaseTag(r *resolved, step int, label string) string {
+// 1-based step label, eg "[2/2 DEDUPING]"
+func renderPhaseTag(r *ulpengine.Resolved, step int, label string) string {
 	return renderPhaseTagWithTotal(tuiPhaseTotal(r), step, label)
+}
+
+// step-1 tag while -od library prep runs. parsing still active → PARSING;
+// inputs fully read but sidecar work continues → LIBRARY PREP.
+func renderStep1PhaseTag(r *ulpengine.Resolved, m *ulpengine.Metrics) string {
+	if r != nil && r.Cfg.DestDedup && ulpengine.ODPhaseInFlight(r.OdMetrics) && shardInputsFullyRead(m, r) {
+		return renderPhaseTag(r, 1, "LIBRARY PREP")
+	}
+	return renderPhaseTag(r, 1, "PARSING")
+}
+
+// muted header badges after the phase tag during dedup.
+func renderDedupHeaderBadges(r *ulpengine.Resolved) string {
+	if r == nil {
+		return ""
+	}
+	var badges []string
+	if r.Cfg.DryRun {
+		// lead with the dry-run flag so it's the first thing the eye catches
+		badges = append(badges, warnStyle.Render("DRY RUN"))
+	}
+	if r.Cfg.DestDedup && r.OdMetrics != nil {
+		if total := r.OdMetrics.KeysTotalEstimate.Load(); total > 0 {
+			badges = append(badges, "vs "+formatLibraryCount(total)+" library")
+		}
+	}
+	if r.Cfg.Compress {
+		badges = append(badges, "compressing")
+	}
+	if len(badges) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	for i, b := range badges {
+		out.WriteString(" ")
+		// first badge (DRY RUN) is already styled; the rest get the muted dot
+		if i == 0 && r.Cfg.DryRun {
+			out.WriteString("· " + b)
+			continue
+		}
+		out.WriteString(mutedStyle.Render("· " + b))
+	}
+	return out.String()
+}
+
+func shardInputsFullyRead(m *ulpengine.Metrics, r *ulpengine.Resolved) bool {
+	if m == nil || r == nil {
+		return false
+	}
+	if ct := m.ChunksTotal.Load(); ct > 0 && m.ChunksDone.Load() >= ct {
+		return true
+	}
+	if r.TotalInputs > 0 && m.BytesRead.Load() >= r.TotalInputs {
+		return true
+	}
+	return false
 }
 
 // for -od-only panels where total is always 3 even if test omits DestDedup
@@ -489,19 +623,26 @@ func renderPhaseTagWithTotal(total, step int, label string) string {
 }
 
 // indented spinner + phase tag, elapsed pushed flush right
-func renderHeader(icon, phase string, elapsed time.Duration, width int) string {
-	left := indentSpace + icon + "  " + phaseStyle.Render(phase)
-	right := timeStyle.Render(formatDuration(elapsed))
-	pad := width - tuiVisibleWidth(left) - tuiVisibleWidth(right)
+// renderHeader lays out a phase header line: left text flush-left (after the
+// shared indent), right text flush-right at width-leftPad, padded between.
+// Generic on purpose so the dedup header — which composes its own left from a
+// spinner + phase tag + badges — reuses the exact same pad math as every other
+// phase, instead of re-deriving it inline.
+func renderHeader(left, right string, width int) string {
+	pad := (width - leftPad) - tuiVisibleWidth(left) - tuiVisibleWidth(right)
 	if pad < 1 {
 		pad = 1
 	}
 	return left + strings.Repeat(" ", pad) + right
 }
 
-// prepends left pad and clamps to width
-func indentLine(s string, width int) string {
-	return trimToDisplayWidth(indentSpace+s, width)
+// renderPhaseHeader is the common phase-header shape: a spinner/icon, a styled
+// phase tag, and the elapsed clock flush-right. It builds left/right and
+// delegates the pad math to renderHeader.
+func renderPhaseHeader(icon, phase string, elapsed time.Duration, width int) string {
+	left := indentSpace + icon + "  " + phaseStyle.Render(phase)
+	right := timeStyle.Render(formatDuration(elapsed))
+	return renderHeader(left, right, width)
 }
 
 // prepends n spaces to every line. used to inset DONE box
@@ -544,10 +685,12 @@ type lineStat struct {
 	style    lipgloss.Style
 }
 
-// returns rows for Lines metric, inline if it fits else 3-row stacked.
-// stacks only when inline would be ellipsised, so typical runs keep
-// compact look. on stack we ignore inline and rebuild from stats
-func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
+// renderStatRow returns a labeled stat row inline when it fits innerW,
+// else stacks one stat per line under the label. Mirrors the Lines row's
+// compact-or-stack behavior so the Progress row (bytes/chunks/workers,
+// or buckets/workers) stops getting trimmed by gradientBox on narrow
+// terminals — the workers segment was the part being cut off.
+func renderStatRow(label, inline string, stats []lineStat, innerW int) []string {
 	if innerW <= 0 || tuiVisibleWidth(inline) <= innerW {
 		return []string{inline}
 	}
@@ -561,7 +704,7 @@ func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
 			maxSubW = w
 		}
 	}
-	header := statLabel("Lines")
+	header := statLabel(label)
 	blank := strings.Repeat(" ", statLabelColWidth)
 
 	out := make([]string, 0, len(stats))
@@ -575,6 +718,13 @@ func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
 		out = append(out, prefix+sub+"  "+val)
 	}
 	return out
+}
+
+// returns rows for Lines metric, inline if it fits else 3-row stacked.
+// stacks only when inline would be ellipsised, so typical runs keep
+// compact look. on stack we ignore inline and rebuild from stats
+func renderLinesRow(inline string, stats []lineStat, innerW int) []string {
+	return renderStatRow("Lines", inline, stats, innerW)
 }
 
 // pads plain ASCII s w/ trailing spaces to visible width w
@@ -677,7 +827,6 @@ func renderRemovedRows(bullets []string, maxInnerWidth int) []string {
 	}
 	const label = "Removed  " // 9 cells, matches Input/Output/Unique
 	sep := mutedStyle.Render(" · ")
-	sepWidth := tuiVisibleWidth(sep)
 
 	// try single-line first. tuiVisibleWidth strips ANSI styling
 	singleLineRest := strings.Join(bullets, sep)
@@ -694,8 +843,27 @@ func renderRemovedRows(bullets []string, maxInnerWidth int) []string {
 	for _, b := range bullets[1:] {
 		rows = append(rows, indent+b)
 	}
-	_ = sepWidth // kept for future widening logic
 	return rows
+}
+
+// live -od dedup row: full comma-separated key counts, single line when
+// innerW allows else label on row 1 and counts on row 2 (no ellipsis).
+func renderLibraryMatchingRows(done, total int64, innerW int) []string {
+	const label = "Library      " // 13 cells, matches Progress/System rows
+	doneStr := countStyle.Render(formatCount(done))
+	totalStr := countStyle.Render(formatCount(total))
+	countsPart := doneStr + mutedStyle.Render(" / ") + totalStr + mutedStyle.Render(" loaded")
+	singleLineRest := mutedStyle.Render("matching · ") + countsPart
+	labelRendered := labelStyle.Render(label)
+	totalWidth := tuiVisibleWidth(label) + tuiVisibleWidth(singleLineRest)
+	if innerW <= 0 || totalWidth <= innerW {
+		return []string{labelRendered + singleLineRest}
+	}
+	indent := strings.Repeat(" ", tuiVisibleWidth(label))
+	return []string{
+		labelRendered + mutedStyle.Render("matching"),
+		indent + countsPart,
+	}
 }
 
 // chars fmt would use for n in base 10
@@ -715,18 +883,19 @@ func numDigits(n int64) int {
 	return d
 }
 
-// per-rune frost gradient, left-padded to width cells, right-aligned.
-// Faint for discreet footer
-func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+// per-rune frost gradient without width padding.
+func renderFrostTagline(text string, spanStart, spanEnd float64) string {
 	run := []rune(text)
-	if len(run) == 0 || width <= 0 {
-		if width < 0 {
-			width = 0
-		}
-		return strings.Repeat(" ", width)
+	if len(run) == 0 {
+		return ""
 	}
 	var b strings.Builder
 	for i, r := range run {
+		// the open-source heart keeps its own bright red, not the frost ramp
+		if r == '❤' || r == '\uFE0F' {
+			b.WriteString(lipgloss.NewStyle().Foreground(heartRed).Render(string(r)))
+			continue
+		}
 		t := spanStart
 		if len(run) > 1 {
 			t = spanStart + (spanEnd-spanStart)*float64(i)/float64(len(run)-1)
@@ -739,7 +908,19 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 			Faint(true)
 		b.WriteString(st.Render(string(r)))
 	}
-	styled := b.String()
+	return b.String()
+}
+
+// per-rune frost gradient, left-padded to width cells, right-aligned.
+// Faint for discreet footer
+func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+	styled := renderFrostTagline(text, spanStart, spanEnd)
+	if width <= 0 {
+		if width < 0 {
+			width = 0
+		}
+		return strings.Repeat(" ", width)
+	}
 	vw := tuiVisibleWidth(styled)
 	if vw > width {
 		return trimToDisplayWidth(styled, width)
@@ -750,16 +931,57 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 	return styled
 }
 
+func renderUpdateNoticeLine(notice *selfupdate.Notice) string {
+	return warnStyle.Render("Update available: v"+notice.Latest) +
+		mutedStyle.Render(" · run: ") +
+		phaseStyle.Render(notice.Command)
+}
+
+func renderFooterRow(left, right string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	rw := tuiVisibleWidth(right)
+	maxLeft := width - rw - 1
+	if maxLeft < 0 {
+		maxLeft = 0
+	}
+	if lw := tuiVisibleWidth(left); lw > maxLeft {
+		left = trimToDisplayWidth(left, maxLeft)
+	}
+	lw := tuiVisibleWidth(left)
+	gap := width - lw - rw
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func renderSummaryFooter(width int, notice *selfupdate.Notice) []string {
+	if notice == nil {
+		return renderLiveScreenFooter(width)
+	}
+	if width < 1 {
+		width = tuiDisplayWidth
+	}
+	rowW := width - leftPad
+	right1 := renderFrostTagline(tuiFooterLine1, 0.0, 0.5)
+	line1 := renderFooterRow(renderUpdateNoticeLine(notice), right1, rowW)
+	line2 := renderFrostTaglineRight(tuiFooterLine2, rowW, 0.2, 0.7)
+	return []string{"", line1, line2}
+}
+
 // blank + two right-aligned taglines for bottom of live TUI + DONE.
 // URL biased blue so it reads colder than the full ramp
 func renderLiveScreenFooter(width int) []string {
 	if width < 1 {
 		width = tuiDisplayWidth
 	}
+	right := width - leftPad
 	return []string{
 		"",
-		renderFrostTaglineRight(tuiFooterLine1, width, 0.0, 0.5),
-		renderFrostTaglineRight(tuiFooterLine2, width, 0.2, 0.7),
+		renderFrostTaglineRight(tuiFooterLine1, right, 0.0, 0.5),
+		renderFrostTaglineRight(tuiFooterLine2, right, 0.2, 0.7),
 	}
 }
 
@@ -767,74 +989,121 @@ func renderLiveScreenFooter(width int) []string {
 // layout: blank, header, blank, 4 stat rows, blank, parsing bar,
 // blank, dedup bar, blank, frost tagline footer
 
-func renderShardLines(now time.Time, elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, readBPS, shardBPS, regenBPS float64, width int) []string {
+func shardWorkerStatus(m *ulpengine.Metrics, r *ulpengine.Resolved) (int64, int64) {
+	if r != nil && r.UseFastPath {
+		if m.ChunksTotal.Load() == 0 || m.ChunksDone.Load() < m.ChunksTotal.Load() {
+			return 1, 1
+		}
+		return 0, 1
+	}
+	return int64(m.BusyWorkers.Load()), int64(r.Workers)
+}
+
+func shardChunkProgress(m *ulpengine.Metrics, r *ulpengine.Resolved) (float64, int64) {
+	total := m.ChunksTotal.Load()
+	if total <= 0 {
+		return 0, 0
+	}
+	progress := float64(m.ChunksDone.Load())
+	if r != nil && r.TotalInputs > 0 {
+		byteProgress := float64(m.BytesRead.Load()) / float64(r.TotalInputs) * float64(total)
+		if byteProgress > progress {
+			progress = byteProgress
+		}
+	}
+	if progress > float64(total) {
+		progress = float64(total)
+	}
+	return progress, total
+}
+
+// renderSystemRow renders the "System   RAM …  CPU …" stat row shared by the
+// shard, dedup, and phase0 panels. The shard panel appends a "buckets" suffix
+// (its denominator is the static BucketCount; dedup/phase0 carry buckets on a
+// separate progress line).
+func renderSystemRow(ramMB float64, cpuPct float64) string {
+	return labelStyle.Render("System") + "       " +
+		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
+		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
+}
+
+func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, readBPS, shardBPS, regenBPS float64, width int) []string {
 	pct := 0.0
-	if r.totalInputs > 0 {
-		pct = float64(m.bytesRead.Load()) / float64(r.totalInputs)
+	if r.TotalInputs > 0 {
+		pct = float64(m.BytesRead.Load()) / float64(r.TotalInputs)
 		if pct > 1 {
 			pct = 1
 		}
 	}
 
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "PARSING"), elapsed, width)
+	header := renderPhaseHeader(spinnerStyle.Render(spinnerFrame(now)), renderStep1PhaseTag(r, m), elapsed, width)
 
-	chunksDigits := numDigits(m.chunksTotal.Load())
-	workersDigits := numDigits(int64(r.workers))
+	chunksDigits := numDigits(m.ChunksTotal.Load())
+	chunkProgress, chunksTotal := shardChunkProgress(m, r)
+	busyWorkers, workerTotal := shardWorkerStatus(m, r)
+	workersDigits := numDigits(workerTotal)
 
-	// stat rows w/o per-row indentLine, gradientBox owns framing+indent
+	// stat rows w/o per-row indent, gradientBox owns framing+indent
 	throughput := labelStyle.Render("Throughput") + "   " +
 		"read " + byteStyle.Render(padRight(formatRate(readBPS), rateColWidth)) + "    " +
 		"shard " + byteStyle.Render(padRight(formatRate(shardBPS), rateColWidth))
 	linesInline := labelStyle.Render("Lines") + "        " +
-		countStyle.Render(formatCount(m.linesRead.Load())) + " total " + mutedStyle.Render("·") + " " +
-		acceptStyle.Render(formatCount(m.linesAccepted.Load())) + " accepted " + mutedStyle.Render("·") + " " +
-		renderRejected(m.linesRejected.Load())
+		countStyle.Render(formatCount(m.LinesRead.Load())) + " total " + mutedStyle.Render("·") + " " +
+		acceptStyle.Render(formatCount(m.LinesAccepted.Load())) + " accepted " + mutedStyle.Render("·") + " " +
+		renderRejected(m.LinesRejected.Load())
 	linesStats := []lineStat{
-		{"total", formatCount(m.linesRead.Load()), countStyle},
-		{"accepted", formatCount(m.linesAccepted.Load()), acceptStyle},
-		{"rejected", formatCount(m.linesRejected.Load()), mutedStyle},
+		{"total", formatCount(m.LinesRead.Load()), countStyle},
+		{"accepted", formatCount(m.LinesAccepted.Load()), acceptStyle},
+		{"rejected", formatCount(m.LinesRejected.Load()), mutedStyle},
 	}
-	totalBytesStr := humanBytes(r.totalInputs)
-	readBytesStr := padLeft(humanBytes(m.bytesRead.Load()), len(totalBytesStr))
-	progressRow := labelStyle.Render("Progress") + "     " +
+	totalBytesStr := humanBytes(r.TotalInputs)
+	readBytesStr := padLeft(humanBytes(m.BytesRead.Load()), len(totalBytesStr))
+	progressInline := statLabel("Progress") +
 		byteStyle.Render(readBytesStr) + " / " + byteStyle.Render(totalBytesStr) + "    " +
-		"chunks " + countStyle.Render(fmt.Sprintf("%*d / %d", chunksDigits, m.chunksDone.Load(), m.chunksTotal.Load())) + "    " +
-		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.busyWorkers.Load(), r.workers))
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct)) + "    " +
-		"buckets " + countStyle.Render(fmt.Sprintf("%d", r.bucketCount))
+		"chunks " + countStyle.Render(fmt.Sprintf("%*.1f / %d", chunksDigits+2, chunkProgress, chunksTotal)) + "    " +
+		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, busyWorkers, workerTotal))
+	progressStats := []lineStat{
+		{"read", readBytesStr + " / " + totalBytesStr, byteStyle},
+		{"chunks", fmt.Sprintf("%*.1f / %d", chunksDigits+2, chunkProgress, chunksTotal), countStyle},
+		{"workers", fmt.Sprintf("%*d / %d busy", workersDigits, busyWorkers, workerTotal), countStyle},
+	}
+	systemRow := renderSystemRow(ramMB, cpuPct) + "    " +
+		"buckets " + countStyle.Render(fmt.Sprintf("%d", r.BucketCount))
 
 	// gradientBox reserves 2 borders + 4 padding, remaining = inner
-	innerW := (width - leftPad) - 6
+	innerW := boxInnerWidth(width)
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
-	innerLines = append(innerLines, progressRow, systemRow)
-	box := gradientBox(innerLines, width-leftPad, gradStart, gradEnd)
+	innerLines = append(innerLines, renderStatRow("Progress", progressInline, progressStats, innerW)...)
+	innerLines = append(innerLines, systemRow)
+	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	bars := renderMainProgressBars(pct, 0, false, width)
+	if r != nil && r.UseFastPath {
+		bars = renderFastPathProgressBars(pct, width)
+	}
 
 	out := []string{"", header, ""}
 	out = append(out, boxLines...)
 	out = append(out, "", bars[0], "", bars[1])
 	// optional -od phase 0 frame, nil when no dest-dedup work
 	if r != nil {
-		out = append(out, renderODFrame(r.odMetrics, regenBPS, width)...)
+		out = append(out, renderODFrame(r.OdMetrics, regenBPS, width)...)
 	}
 	out = append(out, renderLiveScreenFooter(width)...)
 	return out
 }
 
-func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, writeBPS, regenBPS float64, width int) []string {
-	bd := m.bucketsDone.Load()
-	bt := m.bucketsTotal.Load()
+func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, writeBPS, regenBPS float64, width int) []string {
+	bd := m.BucketsDone.Load()
+	bt := m.BucketsTotal.Load()
 	pct2 := 0.0
 	// prefer byte-level progress so bar moves smoothly within a bucket
 	// (whole-bucket completions are chunky when N workers start
 	// together). falls back to bucket-count ratio when bytes unknown
-	if bbT := m.bucketsBytesTotal.Load(); bbT > 0 {
-		pct2 = float64(m.bucketsBytesRead.Load()) / float64(bbT)
+	if bbT := m.BucketsBytesTotal.Load(); bbT > 0 {
+		pct2 = float64(m.BucketsBytesRead.Load()) / float64(bbT)
 	} else if bt > 0 {
 		pct2 = float64(bd) / float64(bt)
 	}
@@ -842,43 +1111,52 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 		pct2 = 1
 	}
 
-	// inline header build so optional "· compressing" badge can sit
-	// between phase tag and elapsed clock w/o changing renderHeader sig
+	// header: phase tag + optional -od/compress badges on the left, elapsed
+	// clock on the right. Routed through renderHeader so the pad math is
+	// shared with every other phase header (the badges just get folded into
+	// headerLeft before the call).
 	headerLeft := indentSpace + spinnerStyle.Render(spinnerFrame(now)) + "  " + phaseStyle.Render(renderPhaseTag(r, 2, "DEDUPING"))
-	if r.cfg.Compress {
-		headerLeft += " " + mutedStyle.Render("· compressing")
-	}
+	headerLeft += renderDedupHeaderBadges(r)
 	headerRight := timeStyle.Render(formatDuration(elapsed))
-	headerPad := width - tuiVisibleWidth(headerLeft) - tuiVisibleWidth(headerRight)
-	if headerPad < 1 {
-		headerPad = 1
-	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + headerRight
+	header := renderHeader(headerLeft, headerRight, width)
 
 	bucketsDigits := numDigits(bt)
-	workersDigits := numDigits(int64(r.dedupWorkers))
+	workersDigits := numDigits(int64(r.DedupWorkers))
 
 	throughput := labelStyle.Render("Throughput") + "   " +
 		"write " + byteStyle.Render(padRight(formatRate(writeBPS), rateColWidth))
 	linesInline := labelStyle.Render("Lines") + "        " +
-		uniqueStyle.Render(formatCount(m.linesUnique.Load())) + " unique so far " + mutedStyle.Render("·") + " " +
-		renderRejected(m.linesRejected.Load()) + " " + mutedStyle.Render("(final)")
+		uniqueStyle.Render(formatCount(m.LinesUnique.Load())) + " unique so far " + mutedStyle.Render("·") + " " +
+		renderRejected(m.LinesRejected.Load()) + " " + mutedStyle.Render("(final)")
 	linesStats := []lineStat{
-		{"unique so far", formatCount(m.linesUnique.Load()), uniqueStyle},
-		{"rejected (final)", formatCount(m.linesRejected.Load()), mutedStyle},
+		{"unique so far", formatCount(m.LinesUnique.Load()), uniqueStyle},
+		{"rejected (final)", formatCount(m.LinesRejected.Load()), mutedStyle},
 	}
-	progressRow := labelStyle.Render("Progress") + "     " +
+	progressInline := statLabel("Progress") +
 		"buckets " + countStyle.Render(fmt.Sprintf("%*d / %d", bucketsDigits, bd, bt)) + "    " +
-		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.busyWorkers.Load(), r.dedupWorkers))
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
+		"workers " + countStyle.Render(fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.DedupWorkers))
+	progressStats := []lineStat{
+		{"buckets", fmt.Sprintf("%*d / %d", bucketsDigits, bd, bt), countStyle},
+		{"workers", fmt.Sprintf("%*d / %d busy", workersDigits, m.BusyWorkers.Load(), r.DedupWorkers), countStyle},
+	}
+	systemRow := renderSystemRow(ramMB, cpuPct)
 
-	innerW := (width - leftPad) - 6
+	innerW := boxInnerWidth(width)
 	innerLines := []string{throughput}
 	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
-	innerLines = append(innerLines, progressRow, systemRow)
-	box := gradientBox(innerLines, width-leftPad, gradStart, gradEnd)
+	innerLines = append(innerLines, renderStatRow("Progress", progressInline, progressStats, innerW)...)
+	innerLines = append(innerLines, systemRow)
+	// -od: live library index scan while each bucket's dest set is loaded
+	if r != nil && r.Cfg.DestDedup && r.OdMetrics != nil {
+		if total := r.OdMetrics.KeysTotalEstimate.Load(); total > 0 {
+			done := r.OdMetrics.KeysLoaded.Load()
+			if done > total {
+				done = total
+			}
+			innerLines = append(innerLines, renderLibraryMatchingRows(done, total, innerW)...)
+		}
+	}
+	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	bars := renderMainProgressBars(1.0, pct2, true, width)
@@ -887,21 +1165,26 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *metrics, r *resol
 	out = append(out, boxLines...)
 	out = append(out, "", bars[0], "", bars[1])
 	if r != nil {
-		out = append(out, renderODFrame(r.odMetrics, regenBPS, width)...)
+		out = append(out, renderODFrame(r.OdMetrics, regenBPS, width)...)
 	}
 	out = append(out, renderLiveScreenFooter(width)...)
 	return out
 }
 
-func outputPathsForUI(r *resolved) []string {
+func outputPathsForUI(r *ulpengine.Resolved) []string {
 	if r == nil {
+		return nil
+	}
+	// dry-run writes to a per-run temp dir that's already been cleaned by the
+	// time the summary renders; never surface those scratch paths.
+	if r.Cfg.DryRun {
 		return nil
 	}
 	if len(r.OutputPaths) > 0 {
 		return r.OutputPaths
 	}
-	if strings.TrimSpace(r.cfg.Output) != "" {
-		return []string{r.cfg.Output}
+	if strings.TrimSpace(r.Cfg.Output) != "" {
+		return []string{r.Cfg.Output}
 	}
 	return nil
 }
@@ -909,42 +1192,52 @@ func outputPathsForUI(r *resolved) []string {
 // final summary bordered block. box sized to (width-leftPad-2) so right
 // edge stays inside the grid after 4-col indent.
 // for full post-success stdout use renderFinalStdoutSummary
-func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) []string {
-	uniq := m.linesUnique.Load()
-	rej := m.linesRejected.Load()
-	skippedByDest := m.linesSkippedByDest.Load()
+func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, width int) []string {
+	uniq := m.LinesUnique.Load()
+	rej := m.LinesRejected.Load()
+	skippedByDest := m.LinesSkippedByDest.Load()
 	// genuine within-run dups = parsed cleanly - unique - library hits.
 	// w/o dest subtraction a -od run double-counts library hits
-	dup := m.linesAccepted.Load() - uniq - skippedByDest
+	dup := m.LinesAccepted.Load() - uniq - skippedByDest
 	if dup < 0 {
 		dup = 0
 	}
 
-	header := renderHeader(okStyle.Render("✓"), "COMPLETE", elapsed, width)
+	phaseLabel := "COMPLETE"
+	if r.Cfg.DryRun {
+		phaseLabel = "COMPLETE · DRY RUN"
+	}
+	header := renderPhaseHeader(okStyle.Render("✓"), phaseLabel, elapsed, width)
 
 	// "Output" reports on-disk size. -zst appends "(N.NNx compressed)"
 	// against the byte counter (uncompressed input to encoder). stat
-	// failure falls back to counter
-	outBytes := m.bytesWritten.Load()
-	outDisplay := humanBytes(outBytes)
-	var ratioNote string
-	if r.cfg.Compress {
-		paths := outputPathsForUI(r)
-		if len(paths) > 0 {
-			var diskSize int64
-			for _, p := range paths {
-				if fi, err := os.Stat(p); err == nil {
-					diskSize += fi.Size()
+	// failure falls back to counter. Skipped entirely in dry-run: nothing
+	// was written, so a size row would be misleading; the DRY RUN banner +
+	// "(dry run — nothing written)" footer carry that signal instead.
+	var outputRow string
+	if !r.Cfg.DryRun {
+		outBytes := m.BytesWritten.Load()
+		outDisplay := humanBytes(outBytes)
+		var ratioNote string
+		if r.Cfg.Compress {
+			paths := outputPathsForUI(r)
+			if len(paths) > 0 {
+				var diskSize int64
+				for _, p := range paths {
+					if fi, err := os.Stat(p); err == nil {
+						diskSize += fi.Size()
+					}
 				}
-			}
-			if diskSize > 0 {
-				outDisplay = humanBytes(diskSize)
-				if diskSize > 0 && outBytes > 0 {
-					ratio := float64(outBytes) / float64(diskSize)
-					ratioNote = fmt.Sprintf("  (%.2fx compressed)", ratio)
+				if diskSize > 0 {
+					outDisplay = humanBytes(diskSize)
+					if diskSize > 0 && outBytes > 0 {
+						ratio := float64(outBytes) / float64(diskSize)
+						ratioNote = fmt.Sprintf("  (%.2fx compressed)", ratio)
+					}
 				}
 			}
 		}
+		outputRow = labelStyle.Render("Output   ") + byteStyle.Render(outDisplay) + mutedStyle.Render(ratioNote)
 	}
 
 	// path rendered below the frame via renderDoneOutputFooter so long
@@ -967,22 +1260,30 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 		removedBullets = append(removedBullets,
 			countStyle.Render(formatCount(skippedByDest))+" "+mutedStyle.Render("already in library"))
 	}
-	removedRows := renderRemovedRows(removedBullets, width-leftPad-6 /* gradientBox inner */)
+	removedRows := renderRemovedRows(removedBullets, boxInnerWidth(width))
 
 	innerLines := []string{
-		labelStyle.Render("Input    ") + byteStyle.Render(humanBytes(r.totalInputs)) +
+		labelStyle.Render("Input    ") + byteStyle.Render(humanBytes(r.TotalInputs)) +
 			"  " + mutedStyle.Render("across") + "  " +
-			countStyle.Render(fmt.Sprintf("%d", r.inputFileCount)) + " " + mutedStyle.Render("files"),
-		labelStyle.Render("Lines    ") + countStyle.Render(formatCount(m.linesRead.Load())) +
+			countStyle.Render(fmt.Sprintf("%d", r.InputFileCount)) + " " + mutedStyle.Render("files"),
+		labelStyle.Render("Lines    ") + countStyle.Render(formatCount(m.LinesRead.Load())) +
 			" " + mutedStyle.Render("read"),
-		labelStyle.Render("Output   ") + byteStyle.Render(outDisplay) + mutedStyle.Render(ratioNote),
-		labelStyle.Render("Unique   ") + uniqueStyle.Render(formatCount(uniq)) + " " + mutedStyle.Render("entries"),
+	}
+	if outputRow != "" {
+		innerLines = append(innerLines, outputRow)
+	}
+	innerLines = append(innerLines,
+		labelStyle.Render("Unique   ")+uniqueStyle.Render(formatCount(uniq))+" "+mutedStyle.Render("entries"))
+	if r.Cfg.DryRun {
+		// the DRY RUN banner + COMPLETE · DRY RUN header frame the run; "Unique"
+		// is the would-be-added count. No Output row (nothing was written).
+		innerLines = append([]string{warnStyle.Render("DRY RUN — nothing written to the library")}, innerLines...)
 	}
 	// rejected uses warnStyle on final recap (vs muted in live) b/c
 	// number IS the actionable outcome here. label stays muted
 	innerLines = append(innerLines, removedRows...)
 
-	box := gradientBox(innerLines, width-leftPad, doneStart, doneEnd)
+	box := gradientBox(innerLines, contentWidth(width), doneStart, doneEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	out := []string{"", header, ""}
@@ -992,17 +1293,17 @@ func renderDoneLines(elapsed time.Duration, m *metrics, r *resolved, width int) 
 
 // everything printed post-success on main screen: COMPLETE frame, optional
 // -od library recap, output path row, frost tagline footer
-func renderFinalStdoutSummary(elapsed time.Duration, m *metrics, r *resolved, width int) []string {
+func renderFinalStdoutSummary(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, width int, notice *selfupdate.Notice) []string {
 	var out []string
 	// -del paths before DONE summary so long delete lists dont
 	// push stats off-screen
 	out = append(out, renderDoneDeletedFooter(r)...)
 	out = append(out, renderDoneLines(elapsed, m, r, width)...)
-	if odLines := renderODSummary(r, width); len(odLines) > 0 {
+	if odLines := renderODSummary(r, m, width); len(odLines) > 0 {
 		out = append(out, odLines...)
 	}
 	out = append(out, renderDoneOutputFooter(r)...)
-	out = append(out, renderLiveScreenFooter(width)...)
+	out = append(out, renderSummaryFooter(width, notice)...)
 	if skipLines := renderODSkippedPaths(r, width); len(skipLines) > 0 {
 		out = append(out, skipLines...)
 	}
@@ -1017,24 +1318,46 @@ func pluralizeArchives(n int) string {
 	return fmt.Sprintf("%d archives", n)
 }
 
+// libraryLineCountTotal is the indexed line count across the whole library
+// after this run: prior archives (phase 0) plus unique lines just written.
+// In dry-run nothing is written, so it reports the unchanged pre-run total.
+func libraryLineCountTotal(r *ulpengine.Resolved, m *ulpengine.Metrics) int64 {
+	if r == nil || r.OdResult == nil {
+		if m != nil {
+			return m.LinesUnique.Load()
+		}
+		return 0
+	}
+	total := int64(r.OdResult.TotalKeysLoaded)
+	if m != nil && !r.Cfg.DryRun {
+		total += m.LinesUnique.Load()
+	}
+	return total
+}
+
 // post-run library recap shown below COMPLETE frame when -od used.
 // nil when no odResult or empty library (first -od run).
 // intentionally minimal so multi-billion entry libraries never ellipsise
-func renderODSummary(r *resolved, width int) []string {
-	if r == nil || r.odResult == nil {
+func renderODSummary(r *ulpengine.Resolved, m *ulpengine.Metrics, width int) []string {
+	if r == nil || r.OdResult == nil {
 		return nil
 	}
-	res := r.odResult
+	res := r.OdResult
 	if res.ArchivesTotal == 0 {
 		return nil
 	}
 
 	innerLines := []string{
-		uniqueStyle.Render(formatCount(int64(res.TotalKeysLoaded))),
+		uniqueStyle.Render(formatCount(libraryLineCountTotal(r, m))),
 		mutedStyle.Render("lines in library"),
 	}
+	if res.ArchivesUpgraded > 0 {
+		innerLines = append(innerLines,
+			warnStyle.Render(fmt.Sprintf("Index format upgraded (one-time, %d parts)", res.ArchivesUpgraded)),
+		)
+	}
 
-	box := gradientBox(innerLines, width-leftPad, gradStart, gradEnd)
+	box := gradientBox(innerLines, contentWidth(width), gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	out := []string{"", ""}
@@ -1045,11 +1368,11 @@ func renderODSummary(r *resolved, width int) []string {
 // per-archive skipped paths AFTER alt-screen teardown. stderr writes
 // during phase 0 get wiped, so user has no way to find skipped files
 // w/o -debug. capped at 5, "and N more" trailer
-func renderODSkippedPaths(r *resolved, width int) []string {
-	if r == nil || r.odResult == nil {
+func renderODSkippedPaths(r *ulpengine.Resolved, width int) []string {
+	if r == nil || r.OdResult == nil {
 		return nil
 	}
-	paths := r.odResult.SkippedArchivePaths
+	paths := r.OdResult.SkippedArchivePaths
 	if len(paths) == 0 {
 		return nil
 	}
@@ -1074,25 +1397,21 @@ func renderODSkippedPaths(r *resolved, width int) []string {
 // one row per output file below DONE frame. same label width/colors as
 // inside the box. additional archives align under the first path.
 // paths NOT padOrTrim'd, can span full terminal width
-func renderDoneOutputFooter(r *resolved) []string {
-	if r == nil {
-		return nil
-	}
-	paths := outputPathsForUI(r)
-	if len(paths) == 0 {
-		return nil
-	}
-	const doneOutputFooterLabel = "Output   "
+// renderDonePathFooter lays out a labelled, gradient-bordered list of paths
+// under the DONE frame: the first row carries label, subsequent rows align
+// beneath it. pathStyle colours each path cell. The caller owns the empty
+// case (Output's "(nothing new)") since that wording is footer-specific.
+func renderDonePathFooter(label string, paths []string, pathStyle lipgloss.Style) []string {
 	mid := doneStart.BlendLuv(doneEnd, 0.5)
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
-	labelCell := labelStyle.Render(doneOutputFooterLabel)
+	labelCell := labelStyle.Render(label)
 	labelW := lipgloss.Width(labelCell)
 	prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
 	blankLabel := strings.Repeat(" ", labelW)
 
 	out := []string{""}
 	for i, p := range paths {
-		pathCell := phaseStyle.Render(p)
+		pathCell := pathStyle.Render(p)
 		var line string
 		if i == 0 {
 			line = prefix + labelCell + pathCell
@@ -1104,31 +1423,41 @@ func renderDoneOutputFooter(r *resolved) []string {
 	return out
 }
 
+func renderDoneOutputFooter(r *ulpengine.Resolved) []string {
+	if r == nil {
+		return nil
+	}
+	const doneOutputFooterLabel = "Output   "
+	// dry-run wrote to a per-run temp dir, already cleaned; surface an explicit
+	// note instead of a path to a removed scratch file.
+	if r.Cfg.DryRun {
+		mid := doneStart.BlendLuv(doneEnd, 0.5)
+		border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
+		labelCell := labelStyle.Render(doneOutputFooterLabel)
+		prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
+		return []string{"", prefix + labelCell + mutedStyle.Render("(dry run — nothing written)")}
+	}
+	// Post-run r.OutputPaths is authoritative (this footer only renders on
+	// success): empty means every line was rejected or already in the library
+	// and the engine discarded the generated shard. Show an explicit note rather
+	// than a path to a removed file -- and don't use outputPathsForUI here, whose
+	// live fallback to Cfg.Output would resurrect that path.
+	if len(r.OutputPaths) == 0 {
+		mid := doneStart.BlendLuv(doneEnd, 0.5)
+		border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
+		labelCell := labelStyle.Render(doneOutputFooterLabel)
+		prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
+		return []string{"", prefix + labelCell + mutedStyle.Render("(nothing new)")}
+	}
+	return renderDonePathFooter(doneOutputFooterLabel, r.OutputPaths, phaseStyle)
+}
+
 // one row per -del'd input. same gutter/label column as output footer
-func renderDoneDeletedFooter(r *resolved) []string {
+func renderDoneDeletedFooter(r *ulpengine.Resolved) []string {
 	if r == nil || len(r.DeletedInputPaths) == 0 {
 		return nil
 	}
-	const doneDeletedFooterLabel = "Deleted  "
-	mid := doneStart.BlendLuv(doneEnd, 0.5)
-	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
-	labelCell := labelStyle.Render(doneDeletedFooterLabel)
-	labelW := lipgloss.Width(labelCell)
-	prefix := strings.Repeat(" ", leftPad) + border.Render("┃") + "  "
-	blankLabel := strings.Repeat(" ", labelW)
-
-	out := []string{""}
-	for i, p := range r.DeletedInputPaths {
-		pathCell := warnStyle.Render(p)
-		var line string
-		if i == 0 {
-			line = prefix + labelCell + pathCell
-		} else {
-			line = prefix + blankLabel + pathCell
-		}
-		out = append(out, line)
-	}
-	return out
+	return renderDonePathFooter("Deleted  ", r.DeletedInputPaths, warnStyle)
 }
 
 // "[!]" badge on interrupt frame header
@@ -1141,13 +1470,12 @@ var interruptWarnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Adap
 // purple-pink "active phase"
 //
 // renderPhase0Lines is the primary panel when phase 0 is in flight.
-// reuses [1/3 PARSING] tag so library prep reads as opener of step 1.
-// regular shard frame would show 0% w/ all counters at zero, useless
-func renderPhase0Lines(elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
+// shown after parsing finishes while library sidecar work continues.
+func renderPhase0Lines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
 	now := time.Now()
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "PARSING"), elapsed, width)
+	header := renderPhaseHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTag(r, 1, "LIBRARY PREP"), elapsed, width)
 
-	odLines := renderODFrame(r.odMetrics, regenBPS, width)
+	odLines := renderODFrame(r.OdMetrics, regenBPS, width)
 	// renderODFrame leads w/ blank for spacing under main frame.
 	// in phase-0-primary mode the header above already provides it
 	if len(odLines) > 0 && odLines[0] == "" {
@@ -1158,35 +1486,7 @@ func renderPhase0Lines(elapsed time.Duration, m *metrics, r *resolved, ramMB flo
 	out = append(out, odLines...)
 
 	// system row matches other phase frames so RAM/CPU stay visible
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
-	out = append(out, "", indentSpace+systemRow)
-	out = append(out, renderLiveScreenFooter(width)...)
-	return out
-}
-
-// primary panel during phaseIndex (post-dedup own-output sidecar pass).
-// mirrors renderPhase0Lines so user sees a coherent regen frame across phases
-func renderIndexLines(elapsed time.Duration, m *metrics, r *resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
-	now := time.Now()
-	header := renderHeader(spinnerStyle.Render(spinnerFrame(now)), renderPhaseTagWithTotal(3, 3, "INDEXING OUTPUT"), elapsed, width)
-
-	var odMetricsForFrame *odMetrics
-	if r != nil {
-		odMetricsForFrame = r.outputIdxMetrics
-	}
-	odLines := renderODFrame(odMetricsForFrame, regenBPS, width)
-	if len(odLines) > 0 && odLines[0] == "" {
-		odLines = odLines[1:]
-	}
-
-	out := []string{"", header, ""}
-	out = append(out, odLines...)
-
-	systemRow := labelStyle.Render("System") + "       " +
-		"RAM " + ramStyle.Render(padRight(humanBytes(int64(ramMB*1024*1024)), bytesColWidth)) + "    " +
-		"CPU " + cpuStyle.Render(fmt.Sprintf("%4.0f%%", cpuPct))
+	systemRow := renderSystemRow(ramMB, cpuPct)
 	out = append(out, "", indentSpace+systemRow)
 	out = append(out, renderLiveScreenFooter(width)...)
 	return out
@@ -1219,51 +1519,41 @@ func workerRowCap(termHeight, totalWorkers int) int {
 	return available
 }
 
-func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
+func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string {
 	if m == nil {
 		return nil
 	}
-	phase := odPhase(m.phase.Load())
-	if phase == odPhaseIdle || phase == odPhaseDone {
+	phase := ulpengine.ODPhase(m.Phase.Load())
+	if phase == ulpengine.ODPhaseIdle || phase == ulpengine.ODPhaseDone {
 		return nil
 	}
 
-	archivesTotal := m.archivesTotal.Load()
-	filesTotal := m.filesTotal.Load()
-	archivesNeedRegen := m.archivesNeedRegen.Load()
-	archivesRegenedDone := m.archivesRegenedDone.Load()
-	archivesSkipped := m.archivesSkipped.Load()
-	partsRegenTotal := m.partsRegenTotal.Load()
-	partsRegenDone := m.partsRegenDone.Load()
-	regenBytesTotal := m.regenBytesTotal.Load()
-	regenBytesRead := m.regenBytesRead.Load()
-	keysLoaded := m.keysLoaded.Load()
-	keysEstimate := m.keysTotalEstimate.Load()
-
+	archivesTotal := m.ArchivesTotal.Load()
+	filesTotal := m.FilesTotal.Load()
+	archivesNeedRegen := m.ArchivesNeedRegen.Load()
+	archivesRegenedDone := m.ArchivesRegenedDone.Load()
+	archivesSkipped := m.ArchivesSkipped.Load()
+	partsRegenTotal := m.PartsRegenTotal.Load()
+	partsRegenDone := m.PartsRegenDone.Load()
+	regenBytesTotal := m.RegenBytesTotal.Load()
+	regenBytesRead := m.RegenBytesRead.Load()
 	// per-part sidecars finalize inline at end of each task, so no
 	// "streaming done, finalizing sidecars" sub-phase. 100% bytes = done
 
 	var phaseDesc string
 	switch phase {
-	case odPhaseDiscover:
+	case ulpengine.ODPhaseDiscover:
 		phaseDesc = "scanning library"
-	case odPhaseRegen:
+		if m.PartsUpgradeTotal.Load() > 0 {
+			phaseDesc = "scanning library · legacy index detected"
+		}
+	case ulpengine.ODPhaseRegen:
 		phaseDesc = "indexing archives + writing .idx"
-	case odPhaseLoad:
-		phaseDesc = "routing library entries"
-	case odPhaseIndexOwn:
-		phaseDesc = "indexing this run's output"
-	case odPhaseCommitBuckets:
-		phaseDesc = "committing lookup buckets"
+	case ulpengine.ODPhaseUpgrade:
+		phaseDesc = "upgrading index format (v2→v3)"
 	}
 
-	// header label flips for post-dedup output-index pass so frame
-	// doesnt claim to be doing dest-dedup work (library long closed)
-	frameTitle := "Destination dedup"
-	if phase == odPhaseIndexOwn {
-		frameTitle = "Output index"
-	}
-	headerLine := labelStyle.Render(frameTitle)
+	headerLine := labelStyle.Render("Destination dedup")
 	if phaseDesc != "" {
 		headerLine += " " + mutedStyle.Render("· "+phaseDesc)
 	}
@@ -1291,12 +1581,21 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		libRow += " " + mutedStyle.Render("·") + " " +
 			warnStyle.Render(fmt.Sprintf("%d skipped", archivesSkipped))
 	}
+	if phase == ulpengine.ODPhaseDiscover && m.PartsUpgradeTotal.Load() > 0 {
+		libRow += " " + mutedStyle.Render("·") + " " +
+			warnStyle.Render("one-time upgrade next")
+	}
 
 	innerLines := []string{headerLine, libRow}
 
 	// phase-specific second row
 	switch phase {
-	case odPhaseRegen, odPhaseIndexOwn:
+	case ulpengine.ODPhaseDiscover:
+		if m.PartsUpgradeTotal.Load() > 0 {
+			innerLines = append(innerLines, labelStyle.Render("Note        ")+
+				warnStyle.Render("Legacy index format · in-place upgrade runs once, then skipped"))
+		}
+	case ulpengine.ODPhaseRegen:
 		if regenBytesTotal > 0 {
 			innerLines = append(innerLines, labelStyle.Render("Bytes       ")+
 				byteStyle.Render(humanBytes(regenBytesRead))+
@@ -1315,25 +1614,33 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 			innerLines = append(innerLines, labelStyle.Render("Throughput  ")+
 				byteStyle.Render(formatRate(regenBPS))+eta)
 		}
-	case odPhaseLoad, odPhaseCommitBuckets:
-		entriesRow := labelStyle.Render("Entries     ") + countStyle.Render(formatCount(keysLoaded))
-		if keysEstimate > 0 {
-			entriesRow += " " + mutedStyle.Render("/ ~") + countStyle.Render(formatCount(keysEstimate))
-		}
-		innerLines = append(innerLines, entriesRow)
+	case ulpengine.ODPhaseUpgrade:
+		innerLines = append(innerLines,
+			labelStyle.Render("Important   ")+
+				warnStyle.Render("One-time library upgrade — please wait, do not interrupt (Ctrl+C)"),
+			labelStyle.Render("Mode        ")+
+				mutedStyle.Render("in-place re-sort · archives not read"),
+			labelStyle.Render("Safety      ")+
+				mutedStyle.Render("your .zst archives are safe · only index files are updated"),
+		)
 	}
 
-	box := gradientBox(innerLines, width-leftPad, footerGradA, footerGradB)
+	box := gradientBox(innerLines, contentWidth(width), frostGradA, frostGradB)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
 	// per-worker rows OUTSIDE the frame, between box and main bar so
 	// phase 0 mirrors phase 1/2 layout (info box on top, stack below).
-	// inside-the-frame mini bars made the box feel cluttered
+	// inside-the-frame mini bars made the box feel cluttered.
+	//
+	// only shown when there's per-worker BYTE progress (archive decompression).
+	// the in-place v2->v3 upgrade (migration) has no byte denominator, so its
+	// rows would sit frozen — there we fall through to a single aggregate bar
+	// below (parts-indexed), like the old routing bar.
 	var workerBars []string
-	if phase == odPhaseRegen || phase == odPhaseIndexOwn {
-		rowWidth := width - leftPad
-		cap := workerRowCap(termHeight(), m.workerCount())
-		active := m.activeWorkers(cap)
+	if phase == ulpengine.ODPhaseRegen && regenBytesTotal > 0 {
+		rowWidth := contentWidth(width)
+		cap := workerRowCap(termHeight(), m.WorkerCount())
+		active := m.ActiveWorkers(cap)
 		// idx marker width must fit the WIDEST displayed index ("[16]"
 		// is 5, "[8]" is 4). otherwise rows 10+ shift right by 1
 		idxW := workerIdxMarkerWidth(len(active))
@@ -1342,23 +1649,25 @@ func renderODFrame(m *odMetrics, regenBPS float64, width int) []string {
 		}
 	}
 
-	// progress bar below frame, tracks current sub-task. per-part
-	// sidecars finalize inline so 100% bytes = regen genuinely done
+	// single progress bar below the frame. byte-based during archive regen;
+	// falls back to parts-indexed for the upgrade/migration pass (no bytes).
 	var pct float64
 	switch phase {
-	case odPhaseRegen, odPhaseIndexOwn:
+	case ulpengine.ODPhaseRegen:
 		if regenBytesTotal > 0 {
 			pct = float64(regenBytesRead) / float64(regenBytesTotal)
+		} else if partsRegenTotal > 0 {
+			pct = float64(partsRegenDone) / float64(partsRegenTotal)
 		}
-	case odPhaseLoad, odPhaseCommitBuckets:
-		if keysEstimate > 0 {
-			pct = float64(keysLoaded) / float64(keysEstimate)
+	case ulpengine.ODPhaseUpgrade:
+		if partsRegenTotal > 0 {
+			pct = float64(partsRegenDone) / float64(partsRegenTotal)
 		}
 	}
 	if pct > 1 {
 		pct = 1
 	}
-	bar := indentSpace + gradientBar(pct, width-leftPad)
+	bar := indentSpace + gradientBar(pct, contentWidth(width))
 
 	// blank gap above OD frame separates it from main frame's bottom bar
 	out := []string{""}
@@ -1398,16 +1707,16 @@ func workerIdxMarkerWidth(count int) int {
 //
 // name + part padded to fixed left-width so bars start at same column.
 // atomic loads taken once at entry, worst case is stale-by-one-tick "97%"
-func renderWorkerRow(idx int, ws *workerStatus, innerWidth, idxMarkerW int) string {
-	namePtr := ws.archivePath.Load()
+func renderWorkerRow(idx int, ws *ulpengine.WorkerStatus, innerWidth, idxMarkerW int) string {
+	namePtr := ws.ArchivePath.Load()
 	if namePtr == nil {
 		return ""
 	}
 	name := *namePtr
-	partIdx := ws.partIdx.Load()
-	partsTotal := ws.partsTotal.Load()
-	bytesDone := ws.bytesDone.Load()
-	bytesTotal := ws.bytesTotal.Load()
+	partIdx := ws.PartIdx.Load()
+	partsTotal := ws.PartsTotal.Load()
+	bytesDone := ws.BytesDone.Load()
+	bytesTotal := ws.BytesTotal.Load()
 
 	// trim sfu prefix + .txt.zst suffix so part id reads tightly.
 	// falls back to raw name on non-matching convention
@@ -1420,7 +1729,7 @@ func renderWorkerRow(idx int, ws *workerStatus, innerWidth, idxMarkerW int) stri
 			pct = 1
 		}
 	}
-	bar := miniGradientBar(pct, workerBarBodyW, footerGradA, footerGradB)
+	bar := miniGradientBar(pct, workerBarBodyW, frostGradA, frostGradB)
 	var pctText string
 	if bytesTotal > 0 {
 		pctText = fmt.Sprintf("%3d%%", int(pct*100))
@@ -1546,9 +1855,16 @@ func compactArchiveName(name string) string {
 }
 
 // "cleaning up after Ctrl-C" notice in place of active phase frame.
-// same indent/box width as live phases so eye doesnt relocate the frame
-func renderInterruptLines(elapsed time.Duration, width int) []string {
-	header := renderHeader(interruptWarnStyle.Render("[!]"), "INTERRUPTED — cleaning up", elapsed, width)
+// cleanupLog lines render full-width above the box (muted grey), matching sfl's
+// issue block above the summary frame.
+func renderInterruptLines(elapsed time.Duration, width int, cleanupLog []string) []string {
+	header := renderPhaseHeader(interruptWarnStyle.Render("[!]"), "INTERRUPTED — cleaning up", elapsed, width)
+
+	out := []string{"", header}
+	if block := renderCleanupLogAbove(cleanupLog, termWidthFull()); len(block) > 0 {
+		out = append(out, "")
+		out = append(out, block...)
+	}
 
 	innerLines := []string{
 		"Flushing output and removing temp shards.",
@@ -1557,11 +1873,29 @@ func renderInterruptLines(elapsed time.Duration, width int) []string {
 		mutedStyle.Render("A second Ctrl+C will force-exit without cleanup."),
 	}
 
-	box := gradientBox(innerLines, width-leftPad, interruptStart, interruptEnd)
+	box := gradientBox(innerLines, contentWidth(width), interruptStart, interruptEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 
-	out := []string{"", header, ""}
+	out = append(out, "")
 	out = append(out, boxLines...)
 	out = append(out, renderLiveScreenFooter(width)...)
+	return out
+}
+
+// renderCleanupLogAbove is grey, full-terminal-width cleanup narration printed
+// above the interrupt box. Uses leftPad so the block aligns with the header.
+func renderCleanupLogAbove(lines []string, width int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	pad := strings.Repeat(" ", leftPad)
+	budget := width - leftPad
+	if budget < 8 {
+		budget = 8
+	}
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, pad+trimToDisplayWidth(mutedStyle.Render(ln), budget))
+	}
 	return out
 }

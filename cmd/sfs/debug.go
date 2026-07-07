@@ -106,7 +106,7 @@ type debugRunInfo struct {
 	patternLen      int
 	workers         int
 	outFile         string
-	silent          bool
+	stream          bool
 	clean           bool
 	cwd             string
 	gomaxprocs      int
@@ -121,37 +121,41 @@ func (d *debugLog) writeHeader(bin string, started time.Time, argv []string, inf
 	if d == nil {
 		return
 	}
-	d.Printf("=== SnowFastSearch debug log ===\n")
-	d.Printf("version: %s\n", version.String)
-	d.Printf("GOOS/GOARCH: %s/%s\n", runtime.GOOS, runtime.GOARCH)
-	d.Printf("GOMAXPROCS: %d\n", info.gomaxprocs)
-	d.Printf("cwd: %s\n", info.cwd)
-	d.Printf("start UTC: %s\n", started.UTC().Format(time.RFC3339Nano))
-	d.Printf("start local: %s\n", started.Format(time.RFC3339Nano))
-	d.Printf("argv: %s\n", formatArgv(argv))
-	d.Printf("--- Resolved search ---\n")
-	d.Printf("root: %s\n", info.root)
-	d.Printf("pattern: %q\n", info.pattern)
-	d.Printf("patternLen: %d\n", info.patternLen)
-	d.Printf("workers: %d\n", info.workers)
-	d.Printf("output: %s\n", debugOutputDesc(info.outFile))
-	d.Printf("silent: %v\n", info.silent)
-	d.Printf("clean: %v\n", info.clean)
-	d.Printf("uiMode: %s\n", info.uiMode)
-	d.Printf("stderrTTY: %v\n", info.stderrTTY)
-	d.Printf("txtMode: %v\n", info.txtMode)
-	d.Printf("archives: %d\n", len(info.archives))
-	d.Printf("indexBytesTotal: %d\n", info.indexBytesTotal)
-	d.Printf("--- Archives ---\n")
+	// Hold d.mu once for the whole header instead of taking it per line via
+	// Printf; the header is emitted atomically at run start.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.writef("=== SnowFastSearch debug log ===\n")
+	d.writef("version: %s\n", version.String)
+	d.writef("GOOS/GOARCH: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	d.writef("GOMAXPROCS: %d\n", info.gomaxprocs)
+	d.writef("cwd: %s\n", info.cwd)
+	d.writef("start UTC: %s\n", started.UTC().Format(time.RFC3339Nano))
+	d.writef("start local: %s\n", started.Format(time.RFC3339Nano))
+	d.writef("argv: %s\n", formatArgv(argv))
+	d.writef("--- Resolved search ---\n")
+	d.writef("root: %s\n", info.root)
+	d.writef("pattern: %q\n", info.pattern)
+	d.writef("patternLen: %d\n", info.patternLen)
+	d.writef("workers: %d\n", info.workers)
+	d.writef("output: %s\n", debugOutputDesc(info.outFile))
+	d.writef("stream: %v\n", info.stream)
+	d.writef("clean: %v\n", info.clean)
+	d.writef("uiMode: %s\n", info.uiMode)
+	d.writef("stderrTTY: %v\n", info.stderrTTY)
+	d.writef("txtMode: %v\n", info.txtMode)
+	d.writef("archives: %d\n", len(info.archives))
+	d.writef("indexBytesTotal: %d\n", info.indexBytesTotal)
+	d.writef("--- Archives ---\n")
 	for _, p := range info.archives {
 		if st, err := os.Stat(p); err == nil {
-			d.Printf("  %s size=%d mtime=%s\n", p, st.Size(), st.ModTime().UTC().Format(time.RFC3339))
+			d.writef("  %s size=%d mtime=%s\n", p, st.Size(), st.ModTime().UTC().Format(time.RFC3339))
 		} else {
-			d.Printf("  %s stat_err=%v\n", p, err)
+			d.writef("  %s stat_err=%v\n", p, err)
 		}
 	}
-	d.Printf("binary: %s\n", bin)
-	d.Flush()
+	d.writef("binary: %s\n", bin)
+	_ = d.w.Flush()
 }
 
 func debugOutputDesc(outFile string) string {

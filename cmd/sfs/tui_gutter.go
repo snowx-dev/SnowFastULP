@@ -12,6 +12,11 @@ func outputPathForSummary(path string) string {
 	if path == "" {
 		return ""
 	}
+	// A parenthesized note (e.g. "(no matches)" when a zero-hit generated file
+	// was removed) is shown verbatim, not absolutized as a filesystem path.
+	if strings.HasPrefix(path, "(") {
+		return path
+	}
 	if abs, err := filepath.Abs(path); err == nil {
 		return abs
 	}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestRegistryConcurrentRegisterAndCloseAll(t *testing.T) {
 			unregs := make([]func(), 0, filesPerG)
 			files := make([]*os.File, 0, filesPerG)
 			for i := 0; i < filesPerG; i++ {
-				path := filepath.Join(dir, "g"+itoa(g)+"_"+itoa(i)+".dat")
+				path := filepath.Join(dir, "g"+strconv.Itoa(g)+"_"+strconv.Itoa(i)+".dat")
 				f, err := os.Create(path)
 				if err != nil {
 					t.Errorf("open: %v", err)
@@ -73,19 +74,4 @@ func TestRegistryConcurrentRegisterAndCloseAll(t *testing.T) {
 			t.Errorf("FD count grew from %d → %d (suspected leak)", baseFD, now)
 		}
 	}
-}
-
-// avoids strconv import for a label
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := [20]byte{}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }

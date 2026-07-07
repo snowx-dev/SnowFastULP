@@ -8,6 +8,6 @@ import (
 )
 
 // skip dot-prefixed dirs (XDG/VCS metadata)
-func shouldSkipDir(path string, d fs.DirEntry) bool {
+func shouldSkipDir(d fs.DirEntry) bool {
 	return strings.HasPrefix(d.Name(), ".")
 }

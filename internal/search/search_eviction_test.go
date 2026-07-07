@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -24,7 +25,7 @@ func TestSearchEvictsFileCacheOnArchiveTransition(t *testing.T) {
 	ord := map[string]int{}
 	for i := 0; i < N; i++ {
 		p := filepath.Join(dir, "a"+itoaPad(i)+".zst")
-		writeSingleFrameZST(t, p, []byte("alpha\nbeta\nneedle\n"))
+		writeBytesZST(t, p, []byte("alpha\nbeta\nneedle\n"))
 		sc, err := index.Build(context.Background(), p, nil, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -86,9 +87,9 @@ func TestSearchEvictsFileCacheOnArchiveTransition(t *testing.T) {
 
 func itoaPad(i int) string {
 	if i < 10 {
-		return "0" + itoa(i)
+		return "0" + strconv.Itoa(i)
 	}
-	return itoa(i)
+	return strconv.Itoa(i)
 }
 
 func countProcArchiveFDs(dir string) int { return procArchiveFDCount(dir) }

@@ -84,5 +84,8 @@ jobs:
             dist/SnowFastSearch-${{ steps.ver.outputs.version }}-linux-amd64
             dist/SnowFastSearch-${{ steps.ver.outputs.version }}-macos-arm64
             dist/SnowFastSearch-${{ steps.ver.outputs.version }}-windows-amd64.exe
+            dist/SnowFastLog-${{ steps.ver.outputs.version }}-linux-amd64
+            dist/SnowFastLog-${{ steps.ver.outputs.version }}-macos-arm64
+            dist/SnowFastLog-${{ steps.ver.outputs.version }}-windows-amd64.exe
             dist/SnowFastULP-${{ steps.ver.outputs.version }}-binaries.zip
             dist/SHA256SUMS

@@ -9,9 +9,14 @@ import (
 	"time"
 
 	"github.com/snowx-dev/SnowFastULP/internal/search"
+	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
+	"github.com/snowx-dev/SnowFastULP/internal/termctl"
+	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
+	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/muesli/termenv"
 )
 
 const (
@@ -23,12 +28,14 @@ const (
 	tuiFooterLine2 = "https://snowx.dev"
 )
 
-const (
-	ansiHideCursor = "\033[?25l"
-	ansiShowCursor = "\033[?25h"
-	altScreenEnter = "\033[?1049h"
-	altScreenLeave = "\033[?1049l"
-)
+// Horizontal layout: the content block is indented leftPad on the LEFT and the
+// same on the RIGHT so it sits balanced in the terminal rather than flush
+// against the right edge.
+//
+//	contentWidth  — outer width of the bordered box / bar region.
+//	boxInnerWidth — usable text width inside gradientBox (2 borders + 4 padding).
+func contentWidth(width int) int  { return width - 2*leftPad }
+func boxInnerWidth(width int) int { return contentWidth(width) - 6 }
 
 var (
 	phaseStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "51"})
@@ -43,10 +50,20 @@ var (
 )
 
 var (
-	gradStart, _      = colorful.Hex("#5A56E0")
-	gradEnd, _        = colorful.Hex("#EE6FF8")
-	footerGradA, _    = colorful.Hex("#3D7EA6")
-	footerGradB, _    = colorful.Hex("#F2F8FC")
+	gradStart, _ = colorful.Hex("#5A56E0")
+	gradEnd, _   = colorful.Hex("#EE6FF8")
+
+	// footer taglines, ice blue → icy white
+	footerGradA, _ = colorful.Hex("#7DD3E8")
+	footerGradB, _ = colorful.Hex("#F2F8FC")
+
+	// box frames / progress bars, frost blue → icy white
+	frostGradA, _ = colorful.Hex("#3D7EA6")
+	frostGradB, _ = colorful.Hex("#F2F8FC")
+
+	// open-source heart in the footer, bright red ❤️
+	heartRed = lipgloss.Color("#FF2B2B")
+
 	interruptStart, _ = colorful.Hex("#E0B040")
 	interruptEnd, _   = colorful.Hex("#C04030")
 )
@@ -68,10 +85,27 @@ const (
 type uiConfig struct {
 	Mode     uiMode
 	Metrics  *search.Metrics
+	Pattern  string
 	Start    time.Time
 	Done     <-chan struct{}
 	Signaled func() bool
-	Layout   *terminalLayout
+}
+
+// renderQueryLine formats the "Query" panel row, truncating the pattern to fit.
+// Returns "" for an empty pattern so callers can omit the row entirely.
+func renderQueryLine(pattern string, innerW int) string {
+	if pattern == "" {
+		return ""
+	}
+	display := pattern
+	if pattern == "*" {
+		display = "* (all lines)"
+	}
+	max := innerW - 16
+	if max < 8 {
+		max = 8
+	}
+	return labelStyle.Render("Query     ") + byteStyle.Render("\""+trimToDisplayWidth(display, max)+"\"")
 }
 
 func stderrIsTTY() bool {
@@ -80,6 +114,16 @@ func stderrIsTTY() bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// applyStderrColorProfile downgrades lipgloss to plain ASCII when stderr is not
+// a terminal. The live screen and any styled status render to stderr, so a
+// redirected stderr (even with stdout a TTY) must stay free of ANSI escapes.
+// Mirrors sfl/sfu.
+func applyStderrColorProfile() {
+	if !stderrIsTTY() {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
 }
 
 func uiModeString(m uiMode) string {
@@ -93,8 +137,7 @@ func uiModeString(m uiMode) string {
 	}
 }
 
-func resolveUIMode(silent bool, outputFile string) uiMode {
-	_ = outputFile
+func resolveUIMode(silent bool) uiMode {
 	if silent || !stderrIsTTY() {
 		return uiSilent
 	}
@@ -110,9 +153,9 @@ func runUI(cfg uiConfig, done *sync.WaitGroup) {
 		return
 	}
 
-	frame := stderrFrame{tty: stderrIsTTY(), layout: cfg.Layout}
-	setTerminalRestore(frame.close)
-	defer clearTerminalRestore()
+	frame := stderrFrame{tty: stderrIsTTY()}
+	reg.Set(frame.close)
+	defer reg.Clear()
 	defer frame.close()
 
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -126,110 +169,127 @@ func runUI(cfg uiConfig, done *sync.WaitGroup) {
 			return
 		case now := <-ticker.C:
 			if cfg.Signaled != nil && cfg.Signaled() {
-				frame.draw(renderInterrupt(now.Sub(cfg.Start), termWidth()))
+				frame.draw(renderInterrupt(now.Sub(cfg.Start), termWidth(), ulpengine.SnapshotCleanupLog()))
 				continue
 			}
 			curRates := rates.sample(now, cfg.Metrics)
 			switch cfg.Mode {
 			case uiFull:
-				frame.draw(renderFull(now, cfg.Start, cfg.Metrics, curRates))
+				frame.draw(renderFull(now, cfg.Start, cfg.Metrics, curRates, cfg.Pattern))
 			}
 		}
 	}
 }
 
+// stderrFrame is a fixed alt-screen status block redrawn in place each tick.
+// Draw and close are serialized so a teardown (signal/fatal goroutine) can
+// never interleave between line writes and spill the frame onto the primary
+// screen. close is idempotent.
 type stderrFrame struct {
-	tty    bool
-	altOn  bool
-	prevN  int
-	layout *terminalLayout
+	mu    sync.Mutex
+	tty   bool
+	altOn bool
 }
 
 func (f *stderrFrame) close() {
-	if !f.tty {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.tty || !f.altOn {
 		return
 	}
-	if f.layout != nil {
-		f.layout.Reset()
-	}
-	if f.altOn {
-		fmt.Fprint(os.Stderr, ansiResetScroll+ansiShowCursor+altScreenLeave)
-		f.altOn = false
-	}
+	fmt.Fprint(os.Stderr, termctl.ANSIResetScroll+termctl.ANSIShowCursor+termctl.AltScreenLeave)
+	f.altOn = false
 }
 
 func (f *stderrFrame) draw(lines []string) {
-	if len(lines) == 0 {
+	if !f.tty || len(lines) == 0 {
 		return
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	width := termWidth()
-	if !f.tty {
-		fmt.Fprintln(os.Stderr, strings.Join(trimLinesToWidth(lines, width), "\n"))
-		return
+	rows := make([]string, len(lines))
+	for i, ln := range lines {
+		rows[i] = trimToDisplayWidth(ln, width)
 	}
+	var b strings.Builder
 	if !f.altOn {
-		fmt.Fprint(os.Stderr, altScreenEnter+ansiHideCursor)
+		b.WriteString(termctl.AltScreenEnter + termctl.ANSIHideCursor)
 		f.altOn = true
 	}
-	if f.layout != nil {
-		f.layout.SetReservedTop(len(lines))
-	}
-	drawLines := func() {
-		for i, ln := range lines {
-			if f.layout != nil && f.layout.enabled {
-				fmt.Fprintf(os.Stderr, "\033[%d;1H", i+1)
-			} else if i == 0 {
-				fmt.Fprint(os.Stderr, "\033[H")
-			}
-			fmt.Fprintf(os.Stderr, "\033[2K\r%s\n", trimToDisplayWidth(ln, width))
-		}
-		for i := len(lines); i < f.prevN; i++ {
-			if f.layout != nil && f.layout.enabled {
-				fmt.Fprintf(os.Stderr, "\033[%d;1H", i+1)
-			} else {
-				fmt.Fprint(os.Stderr, "\033[2K\r\n")
-				continue
-			}
-			fmt.Fprint(os.Stderr, "\033[2K\r\n")
-		}
-		f.prevN = len(lines)
-	}
-	if f.layout != nil {
-		f.layout.DrawHeader(drawLines)
-		return
-	}
-	drawLines()
+	// Clamp to one row shy of the terminal height so the bottom line can't
+	// scroll the buffer; Compose erases any rows a taller previous frame left.
+	b.WriteString(tuiframe.Compose(rows, termHeight()-1))
+	fmt.Fprint(os.Stderr, b.String())
 }
 
-func renderInterrupt(elapsed time.Duration, width int) []string {
-	header := fmt.Sprintf("%s %s %s",
-		interruptWarnStyle.Render("[!]"),
-		phaseStyle.Render("INTERRUPTED — cleaning up"),
-		timeStyle.Render(elapsed.Truncate(time.Second).String()))
+func renderHeader(left, right string, width int) string {
+	pad := (width - leftPad) - tuiVisibleWidth(left) - tuiVisibleWidth(right)
+	if pad < 1 {
+		pad = 1
+	}
+	return left + strings.Repeat(" ", pad) + right
+}
+
+func renderInterrupt(elapsed time.Duration, width int, cleanupLog []string) []string {
+	header := renderHeader(
+		interruptWarnStyle.Render("[!]")+"  "+phaseStyle.Render("INTERRUPTED — cleaning up"),
+		timeStyle.Render(elapsed.Truncate(time.Second).String()),
+		width,
+	)
+	out := []string{"", header}
+	if block := renderCleanupLogAbove(cleanupLog, termWidthFull()); len(block) > 0 {
+		out = append(out, "")
+		out = append(out, block...)
+	}
 	inner := []string{
 		"Stopping index and search workers.",
 		"This usually takes a few seconds; please wait.",
 		"",
 		mutedStyle.Render("A second Ctrl+C will force-exit immediately."),
 	}
-	box := gradientBox(inner, width-leftPad, interruptStart, interruptEnd)
+	box := gradientBox(inner, contentWidth(width), interruptStart, interruptEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
-	out := append([]string{"", header, ""}, boxLines...)
+	out = append(out, "")
+	out = append(out, boxLines...)
 	return append(out, renderLiveScreenFooter(width)...)
 }
 
-func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string {
-	width := termWidth()
-	innerW := width - leftPad
+// renderCleanupLogAbove is grey, full-terminal-width cleanup narration printed
+// above the interrupt box.
+func renderCleanupLogAbove(lines []string, width int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	pad := strings.Repeat(" ", leftPad)
+	budget := width - leftPad
+	if budget < 8 {
+		budget = 8
+	}
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		out = append(out, pad+trimToDisplayWidth(mutedStyle.Render(ln), budget))
+	}
+	return out
+}
+
+func renderFull(now, start time.Time, m *search.Metrics, rates uiRates, pattern string) []string {
+	return renderFullAt(now, start, m, rates, pattern, termWidth())
+}
+
+func renderFullAt(now, start time.Time, m *search.Metrics, rates uiRates, pattern string, width int) []string {
+	contentW := contentWidth(width)
+	boxInner := boxInnerWidth(width)
 	phase := m.Phase.Load()
 	_, phaseLabel, boxStart, boxEnd, barStart, barEnd := phaseVisuals(phase, m)
 
 	elapsed := now.Sub(start)
 	spinner := spinnerStyle.Render(spinnerFrames[(now.UnixMilli()/100)%int64(len(spinnerFrames))])
-	header := fmt.Sprintf("%s %s %s",
-		spinner,
-		phaseStyle.Render("[sfs] "+phaseLabel),
-		timeStyle.Render(elapsed.Truncate(time.Second).String()))
+	header := renderHeader(
+		indentStr+spinner+"  "+phaseStyle.Render("[sfs] "+phaseLabel),
+		timeStyle.Render(elapsed.Truncate(time.Second).String()),
+		width,
+	)
 
 	archDone := m.ArchivesIndexed.Load()
 	archActive := m.IndexArchivesActive.Load()
@@ -240,6 +300,9 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string
 	hits := m.Hits.Load()
 
 	inner := []string{renderThroughputRow(phase, rates), renderETARow(phase, rates)}
+	if q := renderQueryLine(pattern, boxInner); q != "" {
+		inner = append(inner, q)
+	}
 	inner = append(inner,
 		labelStyle.Render("Archives  ")+countStyle.Render(fmt.Sprintf("%d", archDone))+
 			mutedStyle.Render(" / ")+countStyle.Render(fmt.Sprintf("%d", archTotal)),
@@ -252,19 +315,22 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string
 		inner = append(inner, labelStyle.Render("Index     ")+byteStyle.Render(formatBytes(done))+
 			mutedStyle.Render(" / ")+byteStyle.Render(formatBytes(total)))
 	} else {
+		chunkProgress, chunkTotal := searchChunkProgress(m)
+		chunkDigits := numDigits(chunkTotal)
 		inner = append(inner,
-			labelStyle.Render("Chunks    ")+countStyle.Render(fmt.Sprintf("%d", m.ChunksDone.Load()))+
-				mutedStyle.Render(" / ")+countStyle.Render(fmt.Sprintf("%d", m.ChunksTotal.Load())),
+			labelStyle.Render("Chunks    ")+countStyle.Render(fmt.Sprintf("%*.1f", chunkDigits+2, chunkProgress))+
+				mutedStyle.Render(" / ")+countStyle.Render(fmt.Sprintf("%d", chunkTotal)),
 			labelStyle.Render("Hits      ")+hitStyle.Render(fmt.Sprintf("%d", hits)),
 		)
 		scannedDone, scannedTotal := searchBytes(m)
 		inner = append(inner, labelStyle.Render("Scanned   ")+byteStyle.Render(formatBytes(scannedDone))+
 			mutedStyle.Render(" / ")+byteStyle.Render(formatBytes(scannedTotal)))
+		inner = append(inner, renderLibrarySizeRow(m))
 	}
 
-	box := gradientBox(inner, innerW, boxStart, boxEnd)
+	box := gradientBox(inner, contentW, boxStart, boxEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
-	barLines := renderLabeledProgressBars(phase, m, innerW, barStart, barEnd)
+	barLines := renderLabeledProgressBars(phase, m, contentW, barStart, barEnd)
 
 	// header, box, bar1, bar2, frost tagline footer (blanks between)
 	out := []string{header, ""}
@@ -274,28 +340,35 @@ func renderFull(now, start time.Time, m *search.Metrics, rates uiRates) []string
 	return out
 }
 
-func renderFinalSummary(start time.Time, m *search.Metrics, outFile string) []string {
-	innerW := termWidth() - leftPad
+func renderFinalSummary(start time.Time, m *search.Metrics, outFile, pattern string, notice *selfupdate.Notice) []string {
+	width := termWidth()
+	contentW := contentWidth(width)
+	boxInner := boxInnerWidth(width)
 	elapsed := time.Since(start)
 	scannedDone, scannedTotal := searchBytes(m)
 
-	inner := []string{
-		labelStyle.Render("Hits      ") + hitStyle.Render(formatCount(m.Hits.Load())),
-		labelStyle.Render("Elapsed   ") + timeStyle.Render(elapsed.Truncate(time.Second).String()),
-		labelStyle.Render("Archives  ") + countStyle.Render(formatCount(m.ArchivesDone.Load())) +
-			mutedStyle.Render(" / ") + countStyle.Render(formatCount(m.ArchivesTotal.Load())),
-		labelStyle.Render("Chunks    ") + countStyle.Render(formatCount(m.ChunksDone.Load())) +
-			mutedStyle.Render(" / ") + countStyle.Render(formatCount(m.ChunksTotal.Load())),
-		labelStyle.Render("Scanned   ") + byteStyle.Render(formatBytes(scannedDone)) +
-			mutedStyle.Render(" / ") + byteStyle.Render(formatBytes(scannedTotal)),
+	inner := []string{}
+	if q := renderQueryLine(pattern, boxInner); q != "" {
+		inner = append(inner, q)
 	}
-	box := gradientBox(inner, innerW, gradStart, gradEnd)
+	inner = append(inner,
+		labelStyle.Render("Hits      ")+hitStyle.Render(formatCount(m.Hits.Load())),
+		labelStyle.Render("Elapsed   ")+timeStyle.Render(elapsed.Truncate(time.Second).String()),
+		labelStyle.Render("Archives  ")+countStyle.Render(formatCount(m.ArchivesDone.Load()))+
+			mutedStyle.Render(" / ")+countStyle.Render(formatCount(m.ArchivesTotal.Load())),
+		labelStyle.Render("Chunks    ")+countStyle.Render(formatCount(m.ChunksDone.Load()))+
+			mutedStyle.Render(" / ")+countStyle.Render(formatCount(m.ChunksTotal.Load())),
+		labelStyle.Render("Scanned   ")+byteStyle.Render(formatBytes(scannedDone))+
+			mutedStyle.Render(" / ")+byteStyle.Render(formatBytes(scannedTotal)),
+		renderLibrarySizeRow(m),
+	)
+	box := gradientBox(inner, contentW, gradStart, gradEnd)
 	boxLines := strings.Split(indentBlock(box, leftPad), "\n")
 	out := append([]string{phaseStyle.Render("✓ COMPLETE"), ""}, boxLines...)
 	if footer := renderOutputFooter(outFile, gradStart, gradEnd); len(footer) > 0 {
 		out = append(out, footer...)
 	}
-	return append(out, renderLiveScreenFooter(termWidth())...)
+	return append(out, renderSummaryFooter(width, notice)...)
 }
 
 func formatCount(n int64) string {
@@ -374,32 +447,6 @@ func gradientBar(percent float64, width int) string {
 	return b.String()
 }
 
-func miniGradientBar(percent float64, width int, start, end colorful.Color) string {
-	if width < 1 {
-		return ""
-	}
-	if percent < 0 {
-		percent = 0
-	}
-	if percent > 1 {
-		percent = 1
-	}
-	fill := int(math.Round(float64(width) * percent))
-	var b strings.Builder
-	for i := 0; i < fill; i++ {
-		t := 0.0
-		if width > 1 {
-			t = float64(i) / float64(width-1)
-		}
-		c := start.BlendLuv(end, t)
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render("▆"))
-	}
-	if rem := width - fill; rem > 0 {
-		b.WriteString(emptyStyle.Render(strings.Repeat("░", rem)))
-	}
-	return b.String()
-}
-
 func gradientBox(innerLines []string, outerWidth int, start, end colorful.Color) string {
 	if outerWidth < 8 {
 		outerWidth = 8
@@ -447,16 +494,18 @@ func indentBlock(s string, pad int) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+func renderFrostTagline(text string, spanStart, spanEnd float64) string {
 	run := []rune(text)
-	if len(run) == 0 || width <= 0 {
-		if width < 0 {
-			width = 0
-		}
-		return strings.Repeat(" ", width)
+	if len(run) == 0 {
+		return ""
 	}
 	var b strings.Builder
 	for i, r := range run {
+		// the open-source heart keeps its own bright red, not the frost ramp
+		if r == '❤' || r == '\uFE0F' {
+			b.WriteString(lipgloss.NewStyle().Foreground(heartRed).Render(string(r)))
+			continue
+		}
 		t := spanStart
 		if len(run) > 1 {
 			t = spanStart + (spanEnd-spanStart)*float64(i)/float64(len(run)-1)
@@ -469,7 +518,14 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 			Faint(true)
 		b.WriteString(st.Render(string(r)))
 	}
-	styled := b.String()
+	return b.String()
+}
+
+func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64) string {
+	styled := renderFrostTagline(text, spanStart, spanEnd)
+	if width <= 0 {
+		return strings.Repeat(" ", width)
+	}
 	vw := tuiVisibleWidth(styled)
 	if vw > width {
 		return trimToDisplayWidth(styled, width)
@@ -480,14 +536,55 @@ func renderFrostTaglineRight(text string, width int, spanStart, spanEnd float64)
 	return styled
 }
 
+func renderUpdateNoticeLine(notice *selfupdate.Notice) string {
+	return interruptWarnStyle.Render("Update available: v"+notice.Latest) +
+		mutedStyle.Render(" · run: ") +
+		phaseStyle.Render(notice.Command)
+}
+
+func renderFooterRow(left, right string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	rw := tuiVisibleWidth(right)
+	maxLeft := width - rw - 1
+	if maxLeft < 0 {
+		maxLeft = 0
+	}
+	if lw := tuiVisibleWidth(left); lw > maxLeft {
+		left = trimToDisplayWidth(left, maxLeft)
+	}
+	lw := tuiVisibleWidth(left)
+	gap := width - lw - rw
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func renderSummaryFooter(width int, notice *selfupdate.Notice) []string {
+	if notice == nil {
+		return renderLiveScreenFooter(width)
+	}
+	if width < 1 {
+		width = tuiDisplayWidth
+	}
+	rowW := width - leftPad
+	right1 := renderFrostTagline(tuiFooterLine1, 0.0, 0.5)
+	line1 := renderFooterRow(renderUpdateNoticeLine(notice), right1, rowW)
+	line2 := renderFrostTaglineRight(tuiFooterLine2, rowW, 0.2, 0.7)
+	return []string{"", line1, line2}
+}
+
 func renderLiveScreenFooter(width int) []string {
 	if width < 1 {
 		width = tuiDisplayWidth
 	}
+	right := width - leftPad
 	return []string{
 		"",
-		renderFrostTaglineRight(tuiFooterLine1, width, 0.0, 0.5),
-		renderFrostTaglineRight(tuiFooterLine2, width, 0.2, 0.7),
+		renderFrostTaglineRight(tuiFooterLine1, right, 0.0, 0.5),
+		renderFrostTaglineRight(tuiFooterLine2, right, 0.2, 0.7),
 	}
 }
 
@@ -506,8 +603,8 @@ func formatBytes(n int64) string {
 
 func phaseVisuals(phase int32, m *search.Metrics) (pct float64, label string, boxStart, boxEnd, barStart, barEnd colorful.Color) {
 	label = indexPhaseLabel(m)
-	boxStart, boxEnd = footerGradA, footerGradB
-	barStart, barEnd = footerGradA, footerGradB
+	boxStart, boxEnd = frostGradA, frostGradB
+	barStart, barEnd = frostGradA, frostGradB
 	switch phase {
 	case search.PhaseSearch:
 		label = "SEARCHING"
@@ -552,6 +649,25 @@ func searchBytes(m *search.Metrics) (done, total int64) {
 	return done, total
 }
 
+// renderLibrarySizeRow shows the on-disk (compressed) library size — the figure
+// that matches `du` — as the headline, with the uncompressed total and ratio
+// trailing discreetly so it's clear compression is doing the heavy lifting.
+// The ratio suffix is omitted when there's no meaningful compression (e.g. -txt).
+func renderLibrarySizeRow(m *search.Metrics) string {
+	compressed := m.IndexBytesTotal.Load()
+	_, uncompressed := searchBytes(m)
+	row := labelStyle.Render("Library   ") + byteStyle.Render(formatBytes(compressed)) + mutedStyle.Render(" on disk")
+	if compressed > 0 && uncompressed > compressed {
+		ratio := float64(uncompressed) / float64(compressed)
+		ratioStr := fmt.Sprintf("%.0f", ratio)
+		if ratio < 10 {
+			ratioStr = fmt.Sprintf("%.1f", ratio)
+		}
+		row += mutedStyle.Render(fmt.Sprintf("  ·  %s uncompressed (%s×)", formatBytes(uncompressed), ratioStr))
+	}
+	return row
+}
+
 func searchScanPercent(m *search.Metrics) float64 {
 	done, total := searchBytes(m)
 	if total > 0 {
@@ -580,7 +696,7 @@ func renderLabeledProgressBars(phase int32, m *search.Metrics, barWidth int, sta
 		}
 	default:
 		return [2]string{
-			indentStr + progressBarLabel("Index") + gradientBarWithPercent(indexPercent(m), body, footerGradA, footerGradB),
+			indentStr + progressBarLabel("Index") + gradientBarWithPercent(indexPercent(m), body, frostGradA, frostGradB),
 			indentStr + progressBarLabel("Search") + pendingBar(body),
 		}
 	}
@@ -605,18 +721,45 @@ func pendingBar(width int) string {
 }
 
 func searchPercent(m *search.Metrics) float64 {
-	done := m.BytesChunkDone.Load()
-	total := m.BytesScannedTotal.Load()
+	progress, total := searchChunkProgress(m)
 	if total > 0 {
-		if done > total {
-			done = total
-		}
-		return float64(done) / float64(total)
-	}
-	if chunks := m.ChunksTotal.Load(); chunks > 0 {
-		return float64(m.ChunksDone.Load()) / float64(chunks)
+		return progress / float64(total)
 	}
 	return 0
+}
+
+func searchChunkProgress(m *search.Metrics) (float64, int64) {
+	total := m.ChunksTotal.Load()
+	if total <= 0 {
+		return 0, 0
+	}
+	progress := float64(m.ChunksDone.Load())
+	if scannedTotal := m.BytesScannedTotal.Load(); scannedTotal > 0 {
+		scanned := m.BytesScanned.Load()
+		if scanned > scannedTotal {
+			scanned = scannedTotal
+		}
+		byteProgress := float64(scanned) / float64(scannedTotal) * float64(total)
+		if byteProgress > progress {
+			progress = byteProgress
+		}
+	}
+	if progress > float64(total) {
+		progress = float64(total)
+	}
+	return progress, total
+}
+
+func numDigits(n int64) int {
+	if n < 0 {
+		n = -n
+	}
+	digits := 1
+	for n >= 10 {
+		n /= 10
+		digits++
+	}
+	return digits
 }
 
 func indexPercent(m *search.Metrics) float64 {
@@ -647,21 +790,4 @@ func indexPhaseLabel(m *search.Metrics) string {
 		return "INDEXING · decode"
 	}
 	return "INDEXING"
-}
-
-func formatETAForPhase(phase int32, rates uiRates) string {
-	switch phase {
-	case search.PhaseSearch:
-		if rates.SearchETA < 0 {
-			return ""
-		}
-		return formatETA(rates.SearchETA)
-	case search.PhaseIndex:
-		if rates.IndexETA < 0 {
-			return ""
-		}
-		return formatETA(rates.IndexETA)
-	default:
-		return ""
-	}
 }

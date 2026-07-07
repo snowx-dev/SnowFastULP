@@ -14,11 +14,16 @@ const (
 )
 
 func termWidth() int {
-	w, _, err := term.GetSize(os.Stderr.Fd())
-	if err != nil || w <= 0 {
+	w := termWidthFull()
+	if w > tuiDisplayWidth {
 		return tuiDisplayWidth
 	}
-	if w > tuiDisplayWidth {
+	return w
+}
+
+func termWidthFull() int {
+	w, _, err := term.GetSize(os.Stderr.Fd())
+	if err != nil || w <= 0 {
 		return tuiDisplayWidth
 	}
 	return w
@@ -97,14 +102,6 @@ func trimToDisplayWidth(s string, max int) string {
 	b.WriteString(ansiReset)
 	b.WriteString("…")
 	return b.String()
-}
-
-func trimLinesToWidth(lines []string, max int) []string {
-	out := make([]string, len(lines))
-	for i, ln := range lines {
-		out[i] = trimToDisplayWidth(ln, max)
-	}
-	return out
 }
 
 func padOrTrim(s string, w int) string {

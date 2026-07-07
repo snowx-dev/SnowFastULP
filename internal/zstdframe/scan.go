@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	ZstdMagic    uint32 = 0xFD2FB528
-	SkippableMin uint32 = 0x184D2A50
-	SkippableMax uint32 = 0x184D2A5F
+	zstdMagic    uint32 = 0xFD2FB528
+	skippableMin uint32 = 0x184D2A50
+	skippableMax uint32 = 0x184D2A5F
 )
 
 // Frame describes one searchable zstd frame in an archive.
@@ -84,7 +84,7 @@ func ScanFile(ctx context.Context, path string, prog Progress, act *Activity) ([
 			continue
 		}
 
-		if magic != ZstdMagic {
+		if magic != zstdMagic {
 			return nil, fmt.Errorf("unknown magic 0x%08X at offset %d", magic, offset)
 		}
 
@@ -128,7 +128,7 @@ func ScanFile(ctx context.Context, path string, prog Progress, act *Activity) ([
 }
 
 func isSkippable(magic uint32) bool {
-	return magic >= SkippableMin && magic <= SkippableMax
+	return magic >= skippableMin && magic <= skippableMax
 }
 
 func readU32LE(r io.ReaderAt, off int64) (uint32, error) {

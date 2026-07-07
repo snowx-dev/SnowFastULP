@@ -4,4 +4,4 @@
 package version
 
 // String is the version banner. edit only on a real source bump.
-var String = "0.1"
+var String = "0.2-dev"

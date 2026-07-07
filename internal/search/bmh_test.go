@@ -52,10 +52,10 @@ func TestBMHMatchesBytesIndex(t *testing.T) {
 	}
 }
 
-func TestAppendHitsMultipleMatches(t *testing.T) {
+func TestPatternRegionMultipleMatches(t *testing.T) {
 	m := newPatternMatcher([]byte("ab"))
-	text := []byte("xxab yyab zz")
-	hits := appendHits(nil, text, len(text), &m, 0)
+	region := []byte("xxab yyab zz\n")
+	hits := patternRegion(&m)(nil, region, 0)
 	if len(hits) != 2 {
 		t.Fatalf("hits = %d, want 2", len(hits))
 	}
@@ -64,16 +64,16 @@ func TestAppendHitsMultipleMatches(t *testing.T) {
 	}
 }
 
-func TestAppendHitsReusesBackingArray(t *testing.T) {
+func TestPatternRegionReusesBackingArray(t *testing.T) {
 	m := newPatternMatcher([]byte("ab"))
-	text := []byte("ab cd ab")
+	region := []byte("ab cd ab\n")
 	dst := make([]localHit, 0, 8)
 	headAddr := &dst[:cap(dst)][0]
-	dst = appendHits(dst, text, len(text), &m, 0)
+	dst = patternRegion(&m)(dst, region, 0)
 	if len(dst) != 2 {
 		t.Fatalf("len = %d, want 2", len(dst))
 	}
 	if &dst[:cap(dst)][0] != headAddr {
-		t.Fatal("appendHits reallocated within capacity; should reuse caller slice")
+		t.Fatal("patternRegion reallocated within capacity; should reuse caller slice")
 	}
 }

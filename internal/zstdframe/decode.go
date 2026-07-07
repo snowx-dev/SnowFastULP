@@ -9,12 +9,17 @@ import (
 
 const discardReadSize = 32 * 1024
 
+// maxDecoderWindow caps the zstd decompression window for untrusted archives.
+// See internal/search for rationale; 128 MiB covers sfu output and `zstd --long`
+// while bounding the per-decoder allocation a crafted frame can force.
+const maxDecoderWindow = 128 << 20
+
 type discardDecoder struct {
 	dec *zstd.Decoder
 }
 
 func newDecoder() (*discardDecoder, error) {
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxDecoderWindow))
 	if err != nil {
 		return nil, err
 	}

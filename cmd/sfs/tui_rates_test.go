@@ -148,7 +148,7 @@ func TestRenderFullShowsThroughput(t *testing.T) {
 	m.IndexBytesTotal.Store(1 << 30)
 	m.IndexBytesDone.Store(512 << 20)
 
-	lines := renderFull(time.Now(), time.Now().Add(-time.Second), m, uiRates{IndexBPS: 128 << 20, IndexETA: 2 * time.Minute})
+	lines := renderFull(time.Now(), time.Now().Add(-time.Second), m, uiRates{IndexBPS: 128 << 20, IndexETA: 2 * time.Minute}, "")
 	found := false
 	etaFound := false
 	for _, ln := range lines {
@@ -177,7 +177,7 @@ func TestRenderSearchShowsScannedTotal(t *testing.T) {
 	m.BytesScannedTotal.Store(2 << 30)
 	m.Hits.Store(3)
 
-	joined := strings.Join(renderFull(time.Now(), time.Now(), m, uiRates{}), "\n")
+	joined := strings.Join(renderFull(time.Now(), time.Now(), m, uiRates{}, ""), "\n")
 	if !strings.Contains(joined, "Scanned") {
 		t.Fatalf("missing Scanned row:\n%s", joined)
 	}

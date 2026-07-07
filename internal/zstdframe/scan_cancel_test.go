@@ -1,6 +1,7 @@
 package zstdframe_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ func TestScanFileCancelBeforeStart(t *testing.T) {
 func TestScanFileCancelDuringDecode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "large.zst")
-	payload := bytesRepeat('x', 128<<20)
+	payload := bytes.Repeat([]byte{'x'}, 128<<20)
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
@@ -80,12 +81,4 @@ func TestScanFileCancelDuringDecode(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("ScanFile did not stop after cancel")
 	}
-}
-
-func bytesRepeat(b byte, n int) []byte {
-	out := make([]byte, n)
-	for i := range out {
-		out[i] = b
-	}
-	return out
 }
