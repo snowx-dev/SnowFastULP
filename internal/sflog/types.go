@@ -91,6 +91,12 @@ type ExtractStats struct {
 	// FilesScanned so credential accounting is unchanged.
 	SecretFiles int
 
+	// Env copy counters (-env). Populated from EnvCopier.Close().
+	EnvCopied         int
+	EnvContextCopied  int
+	EnvSkippedOverCap int
+	EnvWriteErrors    int
+
 	// capped, ordered list of concrete problems (see issueCap)
 	Issues []Issue
 }

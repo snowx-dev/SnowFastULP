@@ -59,6 +59,10 @@ type Engine struct {
 	// (0 -> defaultSecretMaxLen).
 	SecretSink   SecretSink
 	SecretMaxLen int64
+	// EnvCopier (optional) copies allowlisted env/key files to a side directory.
+	// nil disables -env entirely.
+	EnvCopier *EnvCopier
+	EnvMaxLen int64
 	// FollowedByIngest tells Run to leave the tracker in the extract phase
 	// instead of flipping to Done, so an -od caller can hand straight off to the
 	// ingest phase without a transient "COMPLETE" frame.
@@ -81,6 +85,9 @@ const (
 	// kindSecretScan is a loose non-credential file discovered under -secrets:
 	// it is read (capped) into the secret scanner only, never ULP-parsed.
 	kindSecretScan
+	// kindEnvCopy is a loose env/key file discovered under -env: copied to the
+	// side directory, never ULP-parsed.
+	kindEnvCopy
 )
 
 // assemblyKind tells processArchive how a multi-part archive item's volumes
@@ -200,7 +207,12 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 	if secretCap <= 0 {
 		secretCap = defaultSecretMaxLen
 	}
-	items, err := buildWorklist(input, scanExtra, secretCap, e.Progress)
+	envCap := e.EnvMaxLen
+	if envCap <= 0 {
+		envCap = defaultEnvCopyMaxLen
+	}
+	envExtra := e.EnvCopier != nil
+	items, err := buildWorklist(input, scanExtra, envExtra, secretCap, envCap, e.Progress)
 	if err != nil {
 		return ExtractStats{}, nil, err
 	}
@@ -215,6 +227,8 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 			nArchives++
 		case kindSecretScan:
 			nSecrets++
+		case kindEnvCopy:
+			// counted with secret scan files for debug only; no separate bucket
 		default:
 			nFiles++
 		}
@@ -403,6 +417,8 @@ func (e *Engine) process(ctx context.Context, idx int, it workItem, lines chan<-
 		e.processArchive(ctx, idx, it, lines, acc)
 	case kindSecretScan:
 		e.processSecretFile(ctx, idx, it, acc)
+	case kindEnvCopy:
+		e.processEnvFile(ctx, idx, it, acc)
 	default:
 		e.processFile(ctx, idx, it, lines, acc)
 	}
@@ -509,6 +525,34 @@ func (e *Engine) processSecretFile(ctx context.Context, idx int, it workItem, ac
 	}
 }
 
+// processEnvFile copies a loose env/key file under -env. When -secrets is also
+// wired, the file is scanned after copy is queued. Best-effort throughout.
+func (e *Engine) processEnvFile(ctx context.Context, idx int, it workItem, acc *accum) {
+	if e.EnvCopier == nil {
+		return
+	}
+	cr := newCreditor(e.Progress, it.weight, 1)
+	defer cr.finish()
+
+	e.EnvCopier.EnqueueFile(it.logKey, it.path, false)
+
+	if e.SecretSink != nil {
+		if e.Progress != nil {
+			e.Progress.setStage(idx, StageScanning)
+		}
+		f, err := os.Open(it.path)
+		if err == nil {
+			ec := extractCtx{secrets: e.SecretSink, secretMaxLen: e.SecretMaxLen, p: e.Progress}
+			ec.scanSecrets(ctx, countingReader{r: f, c: cr}, it.path)
+			f.Close()
+		}
+	}
+	acc.addResult(it.path, false, true, false)
+	if e.Debug != nil {
+		e.Debug("env file %s: queued for copy", it.path)
+	}
+}
+
 func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines chan<- string, acc *accum) {
 	acc.archivesScanned.Add(1)
 	if e.Progress != nil {
@@ -578,6 +622,10 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		secrets:           e.SecretSink,
 		secretMaxLen:      e.SecretMaxLen,
 		secretsPrecounted: it.secretsPrecounted,
+		env:               e.EnvCopier,
+		envMaxLen:         e.EnvMaxLen,
+		logKey:            it.logKey,
+		envState:          &archiveEnvState{},
 	}
 	// One heartbeat throttle per top-level item, shared across the whole
 	// recursion. Set here (not just in readArchiveCredentials) so the
@@ -596,6 +644,7 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 	default:
 		scan, err = readArchiveCredentials(ctx, it.path, ec, it.weight)
 	}
+	flushArchiveEnvContext(ec)
 	acc.filesScanned.Add(int64(scan.files))
 	acc.archivesScanned.Add(int64(scan.nestedArchives)) // top-level archive already counted above
 	if e.Progress != nil {
@@ -687,20 +736,22 @@ func runWriter(lines <-chan string, w io.Writer, p *Progress, keyOf func(string)
 // log-group key. Progress is credited per discovered source so the SCANNING
 // phase shows live motion instead of a frozen 0%.
 // scanExtra widens discovery to arbitrary loose files (enqueued as
-// kindSecretScan); secretCap bounds the weight assigned to each such file since
-// only a capped prefix is ever read. Both are inert when scanExtra is false.
-func buildWorklist(input string, scanExtra bool, secretCap int64, prog *Progress) ([]workItem, error) {
+// kindSecretScan); envExtra enqueues kindEnvCopy. secretCap/envCap bound
+// progress weight for capped reads. Both extras are inert when off.
+func buildWorklist(input string, scanExtra, envExtra bool, secretCap, envCap int64, prog *Progress) ([]workItem, error) {
 	absRoot, rootIsDir, err := rootMeta(input)
 	if err != nil {
 		return nil, err
 	}
-	var filesP, archivesP, secretP []string
-	err = walkSources(input, scanExtra, func(path string, kind sourceKind) {
+	var filesP, archivesP, secretP, envP []string
+	err = walkSources(input, scanExtra, envExtra, func(path string, kind sourceKind) {
 		switch kind {
 		case sourceArchive:
 			archivesP = append(archivesP, path)
 		case sourcePassword:
 			filesP = append(filesP, path)
+		case sourceEnv:
+			envP = append(envP, path)
 		default: // sourceOther
 			secretP = append(secretP, path)
 		}
@@ -721,13 +772,17 @@ func buildWorklist(input string, scanExtra bool, secretCap int64, prog *Progress
 	sort.Strings(filesP)
 	sort.Strings(archivesP)
 	sort.Strings(secretP)
+	sort.Strings(envP)
 
-	items := make([]workItem, 0, len(filesP)+len(archivesP)+len(secretP))
+	items := make([]workItem, 0, len(filesP)+len(archivesP)+len(secretP)+len(envP))
 	for _, f := range filesP {
 		items = append(items, workItem{path: f, kind: kindFile, weight: fileWeight(f), logKey: logGroupKey(absRoot, rootIsDir, f)})
 	}
 	for _, f := range secretP {
 		items = append(items, workItem{path: f, kind: kindSecretScan, weight: cappedWeight(f, secretCap), logKey: logGroupKey(absRoot, rootIsDir, f)})
+	}
+	for _, f := range envP {
+		items = append(items, workItem{path: f, kind: kindEnvCopy, weight: cappedWeight(f, envCap), logKey: logGroupKey(absRoot, rootIsDir, f)})
 	}
 	keyOf := func(a string) string { return logGroupKey(absRoot, rootIsDir, a) }
 	items = append(items, groupArchiveVolumes(archivesP, fileWeight, keyOf)...)

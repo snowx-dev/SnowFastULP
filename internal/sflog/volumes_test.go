@@ -218,7 +218,7 @@ func TestBuildWorklistDiscoversSplitParts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := buildWorklist(root, false, 0, NewProgress())
+	items, err := buildWorklist(root, false, false, 0, 0, NewProgress())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestBuildWorklistExpandsSingleFileRarVolumeSet(t *testing.T) {
 		}
 	}
 
-	items, err := buildWorklist(filepath.Join(dir, "set.part1.rar"), false, 0, NewProgress())
+	items, err := buildWorklist(filepath.Join(dir, "set.part1.rar"), false, false, 0, 0, NewProgress())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestRealSplitWorklist(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-data worklist under -short")
 	}
-	items, err := buildWorklist(dir, false, 0, NewProgress())
+	items, err := buildWorklist(dir, false, false, 0, 0, NewProgress())
 	if err != nil {
 		t.Fatal(err)
 	}

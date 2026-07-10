@@ -254,3 +254,21 @@ func TestApplySFLSecretsAllowCLIOverridesConfig(t *testing.T) {
 		t.Fatalf("CLI deny (empty) lost to config: deny = %v", deny)
 	}
 }
+
+func TestApplySFLEnvFromConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[sfl]\nenv = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := false
+	if err := f.ApplySFL(config.Visited{}, config.SFLFlags{Env: &env}); err != nil {
+		t.Fatal(err)
+	}
+	if !env {
+		t.Fatal("expected env=true from config")
+	}
+}

@@ -47,6 +47,11 @@ type Progress struct {
 	// not final, so the TUI renders "Y+" to signal "still growing".
 	secretStreamsOpen atomic.Int64
 
+	// envOn gates the live "Env" counter row; envCopied bumps on each successful
+	// file write under -env.
+	envOn     atomic.Bool
+	envCopied atomic.Int64
+
 	// dryRun (-odr): the live header and completion summary flag the run as a
 	// preview so the user knows nothing will be written to the library.
 	dryRun atomic.Bool
@@ -629,6 +634,30 @@ func (p *Progress) addSecretFileScanned() {
 		p.secretFilesScanned.Add(1)
 	}
 }
+
+// EnableEnv marks the run as copying env/key files so the TUI shows the live
+// Env counter row.
+func (p *Progress) EnableEnv() {
+	if p != nil {
+		p.envOn.Store(true)
+	}
+}
+
+func (p *Progress) EnvEnabled() bool { return p != nil && p.envOn.Load() }
+
+func (p *Progress) EnvCopied() int64 {
+	if p == nil {
+		return 0
+	}
+	return p.envCopied.Load()
+}
+
+func (p *Progress) addEnvCopied(n int64) {
+	if p != nil && n > 0 {
+		p.envCopied.Add(n)
+	}
+}
+
 func (p *Progress) addLogDone() {
 	if p != nil {
 		p.logsDone.Add(1)

@@ -218,6 +218,7 @@ type SFLFlags struct {
 	NoTUI, Zst, Del, NoURI    *bool
 	Debug, NoUpdateCheck      *bool
 	Secrets                   *bool
+	Env                       *bool
 }
 
 // ApplySFL applies unvisited config values to sfl flags. Unlike ApplySFU/
@@ -290,6 +291,9 @@ func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 	}
 	if !v.set("secrets") && f.SFL.Secrets && fl.Secrets != nil {
 		*fl.Secrets = true
+	}
+	if !v.set("env") && f.SFL.Env && fl.Env != nil {
+		*fl.Env = true
 	}
 	if !v.set("secrets-path") && f.SFL.SecretsPath != "" && fl.SecretsPath != nil {
 		p, err := ResolvePath(f.baseDir, f.SFL.SecretsPath)

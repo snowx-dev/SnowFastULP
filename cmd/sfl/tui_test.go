@@ -81,10 +81,25 @@ func TestRenderFinalSummaryShowsSnowFastLogStats(t *testing.T) {
 	}
 }
 
+func TestRenderEnvLiveRow(t *testing.T) {
+	row := renderEnvLiveRow(12)
+	if !strings.Contains(row, "12") || !strings.Contains(row, "copied") {
+		t.Fatalf("unexpected env live row: %q", row)
+	}
+}
+
+func TestRecapCountRowsIncludesEnv(t *testing.T) {
+	rows := recapCountRows(sflog.ExtractStats{EnvCopied: 3, EnvContextCopied: 1})
+	joined := strings.Join(rows, "\n")
+	if !strings.Contains(joined, "Env files") || !strings.Contains(joined, "3") {
+		t.Fatalf("recap missing env row:\n%s", joined)
+	}
+}
+
 func TestRenderFinalSummaryUpdateNoticeFooter(t *testing.T) {
 	lines := renderFinalSummaryWithNotice("out/sfl.txt", sflog.ExtractStats{
 		Emitted: 1,
-	}, &selfupdate.Notice{Latest: "9.9.9", Command: "sfl update"})
+	}, "", &selfupdate.Notice{Latest: "9.9.9", Command: "sfl update"})
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"Update available: v9.9.9", "sfl update", "snowx.dev"} {
 		if !strings.Contains(joined, want) {

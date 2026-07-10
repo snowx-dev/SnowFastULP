@@ -71,6 +71,7 @@ type SFLSection struct {
 	SecretsPath   string   `toml:"secrets_path"`
 	SecretsAllow  []string `toml:"secrets_allow"`
 	SecretsDeny   []string `toml:"secrets_deny"`
+	Env           bool     `toml:"env"`
 }
 
 // Path returns the loaded config file path.

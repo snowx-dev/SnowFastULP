@@ -197,6 +197,18 @@ type extractCtx struct {
 	// never pre-counted (that would mean decompressing at discovery), so they are
 	// credited at open like any streaming source.
 	secretsPrecounted bool
+	// env (may be nil) copies allowlisted members to the -env side directory.
+	env       *EnvCopier
+	envMaxLen int64
+	logKey    string
+	envState  *archiveEnvState
+}
+
+// archiveEnvState accumulates env/context members for one top-level archive walk.
+type archiveEnvState struct {
+	envCopiedMembers    []string // in-archive paths of env files queued
+	pending             []envPending
+	pendingContextBytes int64
 }
 
 // stage publishes s to the worker slot if a stage sink is wired (no-op for
@@ -481,6 +493,7 @@ func recurseNested(ctx context.Context, ec extractCtx, open func() (io.ReadClose
 	child := ec
 	child.depth++
 	child.display = display
+	child.envState = &archiveEnvState{}
 	// Nested members were not pre-counted (that would mean decompressing at
 	// discovery), so let this level credit its scan candidates at open.
 	child.secretsPrecounted = false
@@ -524,7 +537,7 @@ func readZipCredentials(ctx context.Context, diskPath string, ec extractCtx, wei
 // reads/recurses each. It is fed either a path-opened zip (readZipCredentials)
 // or a split set's concatenated reader (readSplitArchive).
 func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weight int64) (archiveScan, error) {
-	var credFiles, nestedFiles, otherFiles []*zipenc.File
+	var credFiles, nestedFiles, otherFiles, envOtherFiles, contextFiles []*zipenc.File
 	var probe *zipenc.File
 	var uncompressed int64
 	for _, f := range files {
@@ -536,6 +549,10 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 			nestedFiles = append(nestedFiles, f)
 		case isPasswordFile(f.Name):
 			credFiles = append(credFiles, f)
+		case isEnvCopyCandidate(f.Name):
+			envOtherFiles = append(envOtherFiles, f)
+			maybeEncryptedProbe(f, &probe)
+			continue
 		case ec.secrets != nil && isSecretScanCandidate(f.Name):
 			// Allowlisted members the credential path skips are where secrets
 			// live. Collect them for a size-capped side scan; let them drive
@@ -543,6 +560,9 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 			// keep them out of the byte scale, since they're read capped, not whole.
 			otherFiles = append(otherFiles, f)
 			maybeEncryptedProbe(f, &probe)
+			continue
+		case ec.env != nil && isLogContextFile(f.Name):
+			contextFiles = append(contextFiles, f)
 			continue
 		default:
 			continue
@@ -553,8 +573,11 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		// the first (possibly huge) member once per candidate password.
 		maybeEncryptedProbe(f, &probe)
 	}
-	if len(credFiles) == 0 && len(nestedFiles) == 0 && len(otherFiles) == 0 {
+	if len(credFiles) == 0 && len(nestedFiles) == 0 && len(otherFiles) == 0 && len(envOtherFiles) == 0 {
 		return archiveScan{}, nil
+	}
+	if ec.env != nil {
+		defer flushArchiveEnvContext(ec)
 	}
 
 	// Resolve a single working password against the smallest encrypted member,
@@ -596,6 +619,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		ec.sem <- struct{}{}
 		if err == nil {
 			scanOtherZipMembers(ctx, otherFiles, ec, pw)
+			copyOtherZipMembers(ctx, envOtherFiles, contextFiles, ec, pw)
 		}
 		return scan, err
 	}
@@ -638,6 +662,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		scan.add(ns)
 	}
 	scanOtherZipMembers(ctx, otherFiles, ec, pw)
+	copyOtherZipMembers(ctx, envOtherFiles, contextFiles, ec, pw)
 	return scan, nil
 }
 
@@ -681,6 +706,58 @@ func scanMembersParallel(ctx context.Context, ec extractCtx, n int, open func(i 
 	<-ec.sem
 	boundedForEach(ctx, ec.sem, n, scanOne)
 	ec.sem <- struct{}{}
+}
+
+// copyOtherZipMembers copies env/key zip members and, when any env file was
+// copied, context metadata members from the same archive.
+func copyOtherZipMembers(ctx context.Context, envFiles, contextFiles []*zipenc.File, ec extractCtx, pw string) {
+	if ec.env == nil {
+		return
+	}
+	for _, f := range envFiles {
+		if ctx.Err() != nil {
+			return
+		}
+		member := f
+		if member.IsEncrypted() {
+			member.SetPassword(pw)
+		}
+		rc, err := member.Open()
+		if err != nil {
+			continue
+		}
+		if ec.env.CopyMember(ctx, ec.logKey, ec.display, member.Name, rc) && ec.envState != nil {
+			ec.envState.envCopiedMembers = append(ec.envState.envCopiedMembers, member.Name)
+		}
+		rc.Close()
+	}
+	for _, f := range contextFiles {
+		if ctx.Err() != nil {
+			return
+		}
+		member := f
+		if member.IsEncrypted() {
+			member.SetPassword(pw)
+		}
+		rc, err := member.Open()
+		if err != nil {
+			continue
+		}
+		max := ec.envMaxLen
+		if max <= 0 {
+			max = defaultEnvCopyMaxLen
+		}
+		data := readContextMember(ctx, rc, max)
+		rc.Close()
+		if len(data) == 0 || ec.envState == nil {
+			continue
+		}
+		appendPendingContext(ec.envState, envPending{
+			relDest:    memberRelDest(ec.display, member.Name),
+			data:       data,
+			memberName: member.Name,
+		}, ec.env)
+	}
 }
 
 // scanOtherZipMembers feeds the archive's non-credential, non-archive members
@@ -928,6 +1005,7 @@ func processSpilled(ctx context.Context, ec extractCtx, slot int, tmp, name stri
 	child := ec
 	child.depth++
 	child.display = display
+	child.envState = &archiveEnvState{}
 	// Nested members are credited at open, never pre-counted (see recurseNested).
 	child.secretsPrecounted = false
 	child.emit = func(c Credential) { o.creds = append(o.creds, c) }
@@ -1157,10 +1235,51 @@ func extractRarOnce(ctx context.Context, ec extractCtx, diskPath, pw string, cr 
 	}
 }
 
-// readRarStream walks a single-file rar's members on one (forward-only) stream
-// goroutine: credential files parse and emit inline (cheap), nested archives
-// spill inline then offload their recursive processing to the pool (or run
-// inline if the pool is saturated), joining before a deterministic merge at EOF.
+// FlushArchiveEnvContext copies buffered archive context files when env members
+// were found. Called at the end of each top-level archive read.
+func flushArchiveEnvContext(ec extractCtx) {
+	if ec.env == nil || ec.envState == nil {
+		return
+	}
+	ec.env.FlushArchiveContext(ec.logKey, ec.envState.envCopiedMembers, ec.envState.pending)
+	ec.envState.pending = nil
+	ec.envState.envCopiedMembers = nil
+	ec.envState.pendingContextBytes = 0
+}
+
+// copyMemberIfCandidate copies or buffers an archive member for -env. Returns
+// true when the member stream was fully consumed.
+func copyMemberIfCandidate(ctx context.Context, ec extractCtx, r io.Reader, name string) bool {
+	if ec.env == nil {
+		return false
+	}
+	if isLogContextFile(name) {
+		max := ec.envMaxLen
+		if max <= 0 {
+			max = defaultEnvCopyMaxLen
+		}
+		if data := readContextMember(ctx, r, max); len(data) > 0 && ec.envState != nil {
+			appendPendingContext(ec.envState, envPending{
+				relDest:    memberRelDest(ec.display, name),
+				data:       data,
+				memberName: name,
+			}, ec.env)
+		}
+		return true
+	}
+	if !isEnvCopyCandidate(name) {
+		return false
+	}
+	if ec.env.CopyMember(ctx, ec.logKey, ec.display, name, r) {
+		if ec.envState != nil {
+			ec.envState.envCopiedMembers = append(ec.envState.envCopiedMembers, name)
+		}
+		return true
+	}
+	io.Copy(io.Discard, r)
+	return true
+}
+
 // scanMemberIfCandidate scans a non-credential archive member for secrets when
 // a secrets sink is configured and the member is an allowlisted candidate; a
 // no-op otherwise. The guard is inverted to an early return so the hot RAR
@@ -1178,6 +1297,9 @@ func scanMemberIfCandidate(ctx context.Context, ec extractCtx, r io.Reader, name
 // boundary -- then they stream to the writer, never before the password proves.
 func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (archiveScan, error) {
 	ec.stage(StageExtracting)
+	if ec.env != nil {
+		defer flushArchiveEnvContext(ec)
+	}
 	var scan archiveScan
 	var wg sync.WaitGroup
 	var outcomes []*memberOutcome
@@ -1215,6 +1337,9 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
+					if copyMemberIfCandidate(ctx, ec, rr, h.Name) {
+						continue
+					}
 					// Scan the first member for secrets (allowlisted only, capped)
 					// before draining the rest, which forces the decoder's CRC so
 					// a wrong password fails cheaply here.
@@ -1246,10 +1371,16 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 					ec.emit(c)
 				}
 			default:
+				if copyMemberIfCandidate(ctx, ec, rr, h.Name) {
+					continue
+				}
 				// Non-credential member: scan allowlisted files for secrets
 				// (no-op without a sink). The read is capped; rr.Next() skips any
 				// unread remainder.
 				scanMemberIfCandidate(ctx, ec, rr, h.Name)
+				if _, derr := io.Copy(io.Discard, rr); derr != nil {
+					return derr
+				}
 			}
 		}
 	}
@@ -1358,6 +1489,9 @@ func extractRarVolumesOnce(ctx context.Context, ec extractCtx, first, pw string,
 // nested-archive processing to the pool the same way.
 func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadCloser, cr *creditor, total int) (archiveScan, error) {
 	ec.stage(StageExtracting)
+	if ec.env != nil {
+		defer flushArchiveEnvContext(ec)
+	}
 	setName := volumeSetName(ec.display)
 	var scan archiveScan
 	var wg sync.WaitGroup
@@ -1401,6 +1535,10 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
+					if copyMemberIfCandidate(ctx, ec, rc, h.Name) {
+						cr.add(h.PackedSize)
+						continue
+					}
 					// See readRarStream: scan allowlisted files (capped) before
 					// draining for CRC.
 					scanMemberIfCandidate(ctx, ec, rc, h.Name)
@@ -1428,9 +1566,16 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 					ec.emit(c)
 				}
 			default:
+				if copyMemberIfCandidate(ctx, ec, rc, h.Name) {
+					cr.add(h.PackedSize)
+					continue
+				}
 				// Non-credential member: scan allowlisted files for secrets
 				// (no-op without a sink).
 				scanMemberIfCandidate(ctx, ec, rc, h.Name)
+				if _, derr := io.Copy(io.Discard, rc); derr != nil {
+					return derr
+				}
 			}
 			cr.add(h.PackedSize)
 		}
@@ -1532,6 +1677,9 @@ passwordLoop:
 
 func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader, cr *creditor) (archiveScan, bool, error) {
 	ec.stage(StageExtracting)
+	if ec.env != nil {
+		defer flushArchiveEnvContext(ec)
+	}
 	var scan archiveScan
 	hadMembers := false
 	members := 0
@@ -1566,14 +1714,18 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 		}
 		isArch := isArchiveFile(f.Name)
 		if !isArch && !isPasswordFile(f.Name) {
-			// Non-credential member: scan allowlisted files for secrets (capped,
-			// best-effort) when a sink is wired, otherwise skip exactly as before.
-			// 7z members are random-access, so open/scan/close without disturbing
-			// the cred flow.
-			if ec.secrets != nil && isSecretScanCandidate(f.Name) {
-				member := f
-				if rc, oerr := member.Open(); oerr == nil {
-					ec.scanSecrets(ctx, rc, ec.display+"!"+member.Name)
+			member := f
+			if isLogContextFile(member.Name) || isEnvCopyCandidate(member.Name) ||
+				(ec.secrets != nil && isSecretScanCandidate(member.Name)) {
+				rc, oerr := member.Open()
+				if oerr == nil {
+					if copyMemberIfCandidate(ctx, ec, rc, member.Name) {
+						rc.Close()
+						continue
+					}
+					if ec.secrets != nil && isSecretScanCandidate(member.Name) {
+						ec.scanSecrets(ctx, rc, ec.display+"!"+member.Name)
+					}
 					rc.Close()
 				}
 			}

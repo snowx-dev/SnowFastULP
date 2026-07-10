@@ -15,18 +15,21 @@ type sourceKind int
 const (
 	sourceArchive  sourceKind = iota // archive or split/volume part
 	sourcePassword                   // credential dump (see isPasswordFile)
+	sourceEnv                        // env/key file for -env copy
 	sourceOther                      // any other file, reported only when scanExtra
 )
 
 // classifySource maps a path to its sourceKind. It returns ok=false for files
-// that should be skipped entirely (the default when scanExtra is off, or a
-// non-allowlisted file when it is on).
-func classifySource(path string, scanExtra bool) (sourceKind, bool) {
+// that should be skipped entirely (the default when scanExtra/envExtra are off,
+// or a non-allowlisted file when they are on).
+func classifySource(path string, scanExtra, envExtra bool) (sourceKind, bool) {
 	switch {
 	case isArchiveFile(path) || isSplitArchivePart(path):
 		return sourceArchive, true
 	case isPasswordFile(path):
 		return sourcePassword, true
+	case envExtra && isEnvCopyCandidate(path):
+		return sourceEnv, true
 	case scanExtra && isSecretScanCandidate(path):
 		return sourceOther, true
 	default:
@@ -90,13 +93,13 @@ func isSecretScanCandidate(path string) bool {
 // root is reported directly without walking. When scanExtra is set, otherwise-
 // skipped files are reported as sourceOther so a -secrets run can scan arbitrary
 // loose files; with it off, discovery is byte-for-byte the credential-only walk.
-func walkSources(root string, scanExtra bool, onFound func(path string, kind sourceKind)) error {
+func walkSources(root string, scanExtra, envExtra bool, onFound func(path string, kind sourceKind)) error {
 	info, err := os.Stat(root)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		if kind, ok := classifySource(root, scanExtra); ok {
+		if kind, ok := classifySource(root, scanExtra, envExtra); ok {
 			onFound(root, kind)
 		}
 		return nil
@@ -108,7 +111,7 @@ func walkSources(root string, scanExtra bool, onFound func(path string, kind sou
 		if d.IsDir() {
 			return nil
 		}
-		if kind, ok := classifySource(path, scanExtra); ok {
+		if kind, ok := classifySource(path, scanExtra, envExtra); ok {
 			onFound(path, kind)
 		}
 		return nil
@@ -117,7 +120,7 @@ func walkSources(root string, scanExtra bool, onFound func(path string, kind sou
 
 func discoverPasswordFiles(root string) ([]SourceFile, error) {
 	var files []SourceFile
-	err := walkSources(root, false, func(path string, kind sourceKind) {
+	err := walkSources(root, false, false, func(path string, kind sourceKind) {
 		if kind == sourcePassword {
 			files = append(files, SourceFile{Path: path})
 		}

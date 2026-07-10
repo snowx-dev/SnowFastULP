@@ -42,6 +42,9 @@ func renderHelp(bin string) string {
 		{"-temp-dir", "PATH", "Store temp files in this folder."},
 		{"-del", "", "Delete source archives/files after a successful run."},
 	}
+	nerds = append(nerds,
+		argDef{"-env", "", "Copy env/key files into <dest>/env/<timestamp>/<log>/<victim>/ (flat files + per-victim index.txt and information.txt); includes gated victim context files."},
+	)
 	// Secret-scanning flags only exist in a `-tags secrets` build; hide them
 	// from -h otherwise so the help never advertises a missing feature.
 	if secretsEnabled {

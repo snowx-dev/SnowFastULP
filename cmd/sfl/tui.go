@@ -682,6 +682,9 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 		prog.Logs(), prog.LogsTotal(), prog.Emitted(), prog.Duplicates(),
 		prog.DoneBytes(), prog.Total(), byteRate,
 	)
+	if prog.EnvEnabled() {
+		statRows = append(statRows, renderEnvLiveRow(prog.EnvCopied()))
+	}
 	if prog.SecretsEnabled() {
 		// -secrets frame: a stats box (with the live found/scanned row), the two
 		// labeled bars below it, then the worker panel in its own box under the
@@ -890,6 +893,13 @@ func renderSecretsLiveRow(found, scanned, total int64, streaming bool) string {
 	return recapRow("Secrets", sflUniqueStyle.Render(formatInt(int(found)))+
 		sflMutedStyle.Render(" found  ·  ")+scannedTxt+
 		sflMutedStyle.Render(" files scanned"))
+}
+
+// renderEnvLiveRow is the live "Env" counter row: how many env/key files have
+// been copied so far under -env.
+func renderEnvLiveRow(copied int64) string {
+	return recapRow("Env", sflCountStyle.Render(formatInt(int(copied)))+
+		sflMutedStyle.Render(" copied"))
 }
 
 // renderExtractStatsRows is the labeled live-stats block during extraction.
@@ -1243,6 +1253,11 @@ func recapCountRows(stats sflog.ExtractStats) []string {
 		rows = append(rows, recapRow("Secret files", sflCountStyle.Render(formatInt(stats.SecretFiles))+
 			sflMutedStyle.Render("  scanned")))
 	}
+	if stats.EnvCopied > 0 || stats.EnvContextCopied > 0 {
+		rows = append(rows, recapRow("Env files", sflCountStyle.Render(formatInt(stats.EnvCopied))+
+			sflMutedStyle.Render(" copied  ·  ")+sflCountStyle.Render(formatInt(stats.EnvContextCopied))+
+			sflMutedStyle.Render(" context")))
+	}
 	return rows
 }
 
@@ -1300,13 +1315,14 @@ func renderIngestLibraryRows(newToLib, alreadyInLib, dropped int64, innerWidth i
 }
 
 func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
-	return renderFinalSummaryWithNotice(outPath, stats, nil)
+	return renderFinalSummaryWithNotice(outPath, stats, "", nil)
 }
 
-func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
+func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, envRoot string, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
 	body := append(recapCountRows(stats), "", sflMutedStyle.Render("Output: ")+outPath)
+	body = appendEnvRootLine(body, envRoot)
 	box := sflGradientBox(body, width, gradStart, gradEnd)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
@@ -1315,10 +1331,10 @@ func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, noti
 // credentials: a calm "done, nothing to do" recap with the library left
 // untouched, rather than an error exit.
 func renderNoIngestSummary(libraryDir string, stats sflog.ExtractStats, dryRun bool) []string {
-	return renderNoIngestSummaryWithNotice(libraryDir, stats, nil, dryRun)
+	return renderNoIngestSummaryWithNotice(libraryDir, stats, "", nil, dryRun)
 }
 
-func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats, notice *selfupdate.Notice, dryRun bool) []string {
+func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats, envRoot string, notice *selfupdate.Notice, dryRun bool) []string {
 	width := termWidth()
 	titleText := "SnowFastLog COMPLETE"
 	if dryRun {
@@ -1330,6 +1346,7 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
 		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
+	body = appendEnvRootLine(body, envRoot)
 	box := sflGradientBox(body, width, gradStart, gradEnd)
 	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
 }
@@ -1339,10 +1356,10 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 // line count and path, so the single icy frame ends the run instead of handing
 // off to sfu's summary.
 func renderIngestSummary(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string, dryRun bool) []string {
-	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, dropped, stats, outputPaths, nil, dryRun)
+	return renderIngestSummaryWithNotice(libraryDir, libraryLines, newToLib, alreadyInLib, dropped, stats, outputPaths, "", nil, dryRun)
 }
 
-func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string, notice *selfupdate.Notice, dryRun bool) []string {
+func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, alreadyInLib, dropped int64, stats sflog.ExtractStats, outputPaths []string, envRoot string, notice *selfupdate.Notice, dryRun bool) []string {
 	width := termWidth()
 	titleText := "SnowFastLog INGESTED"
 	if dryRun {
@@ -1354,6 +1371,7 @@ func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, al
 	// the running library total gets its own box below (mirrors sfu's renderODSummary).
 	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, dropped, boxInner(width), dryRun)...)
 	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
+	body = appendEnvRootLine(body, envRoot)
 	box := sflGradientBox(body, width, gradStart, gradEnd)
 	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
@@ -1362,6 +1380,13 @@ func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, al
 	out = append(out, renderIngestOutputFooter(outputPaths, dryRun)...)
 	out = append(out, summaryFooterLines(width, notice)...)
 	return out
+}
+
+func appendEnvRootLine(body []string, envRoot string) []string {
+	if envRoot == "" {
+		return body
+	}
+	return append(body, sflMutedStyle.Render("Env: ")+envRoot)
 }
 
 // renderIngestOutputFooter lists archive(s) written this run below the ingest
