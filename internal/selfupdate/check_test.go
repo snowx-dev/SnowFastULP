@@ -11,6 +11,39 @@ import (
 	"time"
 )
 
+func TestCheckerFreshCacheRevalidatedWhenAlreadyUpdated(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	// Written while still on 0.1; user updated to 0.2 since.
+	entry := cacheEntry{
+		CheckedAt: time.Now().UTC(),
+		Latest:    "0.2",
+		Newer:     true,
+	}
+	writeCacheFile(t, cacheFile, entry)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "should not be called", http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.2", "sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("network hits = %d, want 0", got)
+	}
+	if c.NoticeForSummary() != nil {
+		t.Fatal("expected nil notice when cache is stale but binary is current")
+	}
+}
+
 func TestCheckerFreshCacheSkipsNetwork(t *testing.T) {
 	dir := t.TempDir()
 	cacheFile := filepath.Join(dir, "cache.json")

@@ -125,7 +125,14 @@ func (c *Checker) waitIfRunning() {
 }
 
 func (c *Checker) applyEntry(entry cacheEntry) {
-	if !entry.Newer || entry.Latest == "" {
+	if entry.Latest == "" {
+		return
+	}
+	// Revalidate against the running binary: a cache entry written before
+	// `sfu update` can still say newer=true for a version we now ship.
+	cur := strings.TrimPrefix(c.currentVersion, "v")
+	latest := strings.TrimPrefix(entry.Latest, "v")
+	if compareVersions(latest, cur) <= 0 {
 		return
 	}
 	c.mu.Lock()
