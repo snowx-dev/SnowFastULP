@@ -50,9 +50,15 @@ func looseExtrasTrimmed(line string) (host, url, login, password string, ok bool
 		// `:` and url group needs a TLD-ish pattern
 		return finishLoose(parts[0], parts[1], parts[2])
 	case 4:
-		// host:port:login:password recognised via digit-only 2nd field
-		if isAllDigits(parts[1]) {
-			return finishLoose(parts[0]+":"+parts[1], parts[2], parts[3])
+		// host:port:login:password recognised via a leading digit run in the
+		// 2nd field, optionally followed by /path (e.g. "8080/auth/login").
+		// Real stealer logs glue the URL path onto the port when the host is a
+		// bare IP, so the all-digits check alone dropped lines like
+		// "103.181.181.122:8897/:admin:admin". The port+path is recombined
+		// into the url so finishParse still strips the path to a host for the
+		// dedup key.
+		if port, rest, ok := splitPortPath(parts[1]); ok {
+			return finishLoose(parts[0]+":"+port+rest, parts[2], parts[3])
 		}
 		return "", "", "", "", false
 	default:
@@ -123,6 +129,28 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// splitPortPath splits a "port" or "port/path..." field (the 2nd colon group of
+// a host:port:login:password line) into a leading digit run (the port) and
+// the remainder (the path, possibly empty, including its leading "/").
+// ok=false when the field doesn't start with at least one digit, or when the
+// digit run is followed by anything other than "/" or end-of-field, so a
+// non-numeric 2nd field like "user" (in host:user:pw:extra) stays rejected
+// exactly as before. A bare digit run returns rest="" (no path).
+func splitPortPath(field string) (port, rest string, ok bool) {
+	i := 0
+	for i < len(field) && field[i] >= '0' && field[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return "", "", false
+	}
+	rest = field[i:]
+	if rest != "" && rest[0] != '/' {
+		return "", "", false
+	}
+	return field[:i], rest, true
 }
 
 // colon-only strings.SplitN, alloc-light at billions-of-lines scale

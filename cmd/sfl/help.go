@@ -41,6 +41,7 @@ func renderHelp(bin string) string {
 		{"-workers", "N", "Set parser/archive worker count."},
 		{"-temp-dir", "PATH", "Store temp files in this folder."},
 		{"-del", "", "Delete source archives/files after a successful run."},
+		{"-loose", "", "High-recall parser: accept host:port:user:pw, bare host:user:pw, LPU; less precise output. Merges credentials that differ only by URL path."},
 	}
 	nerds = append(nerds,
 		argDef{"-env", "", "Copy env/key files into <dest>/env/<timestamp>/<log>/<victim>/ (flat files + per-victim index.txt and information.txt); includes gated victim context files."},

@@ -21,6 +21,7 @@ type IngestOptions struct {
 	Buckets       int       // 0 = adaptive
 	TempDir       string    // shard temp parent, "" = library dir
 	NoURI         bool      // emit host:login:password (drop URL path/query)
+	Loose         bool      // high-recall parser: accept host:port:user:pw, bare host:user:pw, LPU; less precise
 	FastPathOff   bool      // disable the in-RAM fast path
 	ZstChunkLines int64     // split granularity, 0 = DefaultZstChunkLines
 	RunStarted    time.Time // run clock origin, zero = time.Now()
@@ -103,6 +104,7 @@ func Ingest(ctx context.Context, opts IngestOptions, m *Metrics) (*Resolved, err
 		RunStarted:    started,
 		RunStamp:      stamp,
 		NoURI:         opts.NoURI,
+		Loose:         opts.Loose,
 		DestDedup:     true,
 		DestDedupDir:  outDirAbs,
 		DryRun:        opts.DryRun,

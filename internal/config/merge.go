@@ -216,6 +216,7 @@ type SFLFlags struct {
 	SecretsAllow, SecretsDeny *[]string
 	Workers                   *int
 	NoTUI, Zst, Del, NoURI    *bool
+	Loose                     *bool
 	Debug, NoUpdateCheck      *bool
 	Secrets                   *bool
 	Env                       *bool
@@ -282,6 +283,9 @@ func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 	}
 	if !v.set("no-uri") && f.SFL.NoURI && fl.NoURI != nil {
 		*fl.NoURI = true
+	}
+	if !v.set("loose") && f.SFL.Loose && fl.Loose != nil {
+		*fl.Loose = true
 	}
 	if !v.set("debug") && f.SFL.Debug && fl.Debug != nil {
 		*fl.Debug = true

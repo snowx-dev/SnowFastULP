@@ -42,6 +42,7 @@ type runConfig struct {
 	Compress      bool
 	DeleteSources bool
 	NoURI         bool
+	Loose         bool
 	NoTUI         bool
 	Debug         bool
 	ErrFile       bool
@@ -101,6 +102,7 @@ func main() {
 	zst := flag.Bool("zst", false, "compress classic output with zstd")
 	delSrc := flag.Bool("del", false, "delete source files after success")
 	noURI := flag.Bool("no-uri", false, "emit host:login:password")
+	loose := flag.Bool("loose", false, "high-recall parser: accept host:port:user:pw, bare host:user:pw, LPU; less precise output; merges creds that differ only by URL path")
 	debug := flag.Bool("debug", false, "write structured debug log")
 	errFile := flag.Bool("err", false, "write the full, untruncated issue list to a file")
 	secretsOn := flag.Bool("secrets", false, "scan non-credential files for secrets (API keys, tokens) into a sqlite store")
@@ -128,6 +130,7 @@ func main() {
 		Workers:     workers,
 		NoTUI:       noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
 		Debug: debug, NoUpdateCheck: noUpdateCheck,
+		Loose:  loose,
 		Secrets:      secretsOn,
 		SecretsAllow: &secretsAllow,
 		SecretsDeny:  &secretsDeny,
@@ -193,7 +196,7 @@ func main() {
 	cfg := runConfig{
 		Input: inputArg, OutputDir: *out, LibraryDir: libraryDir, Password: *password,
 		TempDir: *tempDir, Workers: w, Compress: *zst, DeleteSources: *delSrc,
-		NoURI: *noURI, NoTUI: *noTUI, Debug: *debug, ErrFile: *errFile, NoUpdateCheck: *noUpdateCheck,
+		NoURI: *noURI, Loose: *loose, NoTUI: *noTUI, Debug: *debug, ErrFile: *errFile, NoUpdateCheck: *noUpdateCheck,
 		Secrets: *secretsOn, SecretsPath: *secretsPath,
 		SecretsAllow: secretsAllow, SecretsDeny: secretsDeny,
 		Env: *envOn,
@@ -667,10 +670,13 @@ func buildEngine(cfg runConfig, passwords []string, prog *sflog.Progress, dbg *d
 		TempDir:          spillDir,
 		FollowedByIngest: cfg.LibraryDir != "",
 		// Dedup extraction on the library's canonical host:login:password key
-		// (strict parse, matching the ingest) so "unique" collapses path-only
+		// (matching the ingest parse mode) so "unique" collapses path-only
 		// variants exactly as sfu/the library do — whether or not -od follows.
+		// Strict by default; -loose widens both the dedup key and the ingest
+		// parser so the two stay reconciled (the unique count matches what
+		// ingest accepts).
 		DedupKey: func(line string) (uint64, bool) {
-			return ulpengine.DedupKeyForLine(line, false)
+			return ulpengine.DedupKeyForLine(line, cfg.Loose)
 		},
 	}
 	if dbg != nil {
@@ -726,6 +732,7 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 		Workers:    cfg.Workers,
 		TempDir:    cfg.TempDir,
 		NoURI:      cfg.NoURI,
+		Loose:      cfg.Loose,
 		RunStarted: startedOrNow(cfg),
 		Debug:      elog,
 		DryRun:     cfg.DryRun,

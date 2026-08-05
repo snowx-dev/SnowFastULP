@@ -65,6 +65,7 @@ type SFLSection struct {
 	Zst           bool     `toml:"zst"`
 	Del           bool     `toml:"del"`
 	NoURI         bool     `toml:"no_uri"`
+	Loose         bool     `toml:"loose"`
 	Debug         bool     `toml:"debug"`
 	NoUpdateCheck bool     `toml:"no_update_check"`
 	Secrets       bool     `toml:"secrets"`

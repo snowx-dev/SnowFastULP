@@ -164,6 +164,31 @@ func TestIsAllDigits(t *testing.T) {
 	}
 }
 
+func TestSplitPortPath(t *testing.T) {
+	cases := []struct {
+		in     string
+		port   string
+		rest   string
+		ok     bool
+	}{
+		{"8080", "8080", "", true},
+		{"8080/auth/login", "8080", "/auth/login", true},
+		{"8897/", "8897", "/", true},
+		{"443", "443", "", true},
+		{"", "", "", false},
+		{"admin", "", "", false},
+		{"12a", "", "", false},
+		{"0", "0", "", true},
+	}
+	for _, c := range cases {
+		port, rest, ok := splitPortPath(c.in)
+		if ok != c.ok || port != c.port || rest != c.rest {
+			t.Errorf("splitPortPath(%q) = (%q,%q,%v), want (%q,%q,%v)",
+				c.in, port, rest, ok, c.port, c.rest, c.ok)
+		}
+	}
+}
+
 func TestSplitNColon(t *testing.T) {
 	cases := []struct {
 		in   string

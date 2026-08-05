@@ -180,6 +180,17 @@ func DedupKeyForLine(line string, loose bool) (uint64, bool) {
 	return xxhash.Sum64String(dedupKey(host, login, password)), true
 }
 
+// ParseLine is the exported entry point for parsing a single ULP/LPU line into
+// its (host, url, login, password) fields. It mirrors parseFor exactly and is
+// the reuse seam for callers outside ulpengine (e.g. sflog's label-less
+// colon-line fallback) so they never duplicate the ULP regex. loose=false uses
+// the strict parser (the library default); loose=true admits the extra
+// host:port:user:pw / bare host:user:pw / LPU shapes. ok=false when the line
+// is not a credential.
+func ParseLine(line string, loose bool) (host, url, login, password string, ok bool) {
+	return parseFor(line, loose)
+}
+
 // host:login:password dedup key. hot path uses lineFormatter.HashKey instead
 // to skip the alloc, this one stays for tests
 func dedupKey(host, login, password string) string {
