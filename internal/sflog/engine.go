@@ -534,7 +534,7 @@ func (e *Engine) processEnvFile(ctx context.Context, idx int, it workItem, acc *
 	cr := newCreditor(e.Progress, it.weight, 1)
 	defer cr.finish()
 
-	e.EnvCopier.EnqueueFile(it.logKey, it.path, false)
+	e.EnvCopier.EnqueueFile(it.path)
 
 	if e.SecretSink != nil {
 		if e.Progress != nil {
@@ -624,8 +624,6 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		secretsPrecounted: it.secretsPrecounted,
 		env:               e.EnvCopier,
 		envMaxLen:         e.EnvMaxLen,
-		logKey:            it.logKey,
-		envState:          &archiveEnvState{},
 	}
 	// One heartbeat throttle per top-level item, shared across the whole
 	// recursion. Set here (not just in readArchiveCredentials) so the
@@ -644,7 +642,6 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 	default:
 		scan, err = readArchiveCredentials(ctx, it.path, ec, it.weight)
 	}
-	flushArchiveEnvContext(ec)
 	acc.filesScanned.Add(int64(scan.files))
 	acc.archivesScanned.Add(int64(scan.nestedArchives)) // top-level archive already counted above
 	if e.Progress != nil {

@@ -3,20 +3,14 @@ package sflog
 import (
 	"context"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 )
 
-const (
-	defaultEnvCopyMaxLen    = 16 << 20 // 16 MiB
-	maxPendingContextFiles  = 2048
-	maxPendingContextBytes  = 64 << 20 // 64 MiB
-)
+const defaultEnvCopyMaxLen = 16 << 20 // 16 MiB
 
 // envCopyBasenames is the high-confidence allowlist for -env file copy.
 var envCopyBasenames = map[string]bool{
@@ -47,14 +41,6 @@ var envCopyBasenameTokens = []string{
 	"serviceaccount", "firebase", "appsettings",
 }
 
-// logContextBasenames are victim metadata files copied once per log when env
-// files are found, to give context to the extracted secrets.
-var logContextBasenames = map[string]bool{
-	"information.txt": true, "userinformation.txt": true, "user information.txt": true,
-	"info.txt": true, "system.txt": true, "system info.txt": true,
-	"machineinfo.txt": true, "userinfo.txt": true, "pc_info.txt": true, "specs.txt": true,
-}
-
 // isEnvCopyCandidate reports whether path should be copied under -env.
 func isEnvCopyCandidate(path string) bool {
 	name := strings.ToLower(filepath.Base(path))
@@ -82,34 +68,7 @@ func isEnvCopyCandidate(path string) bool {
 	return false
 }
 
-// isLogContextFile reports whether a basename is victim metadata worth copying
-// alongside env files for context.
-func isLogContextFile(name string) bool {
-	return logContextBasenames[strings.ToLower(filepath.Base(name))]
-}
-
-// memberRelDest maps archive provenance to a path inside the log slug folder.
-// The slug already identifies the log/archive, so top-level members use only
-// their in-archive path. Nested archives prefix the inner archive basename.
-func memberRelDest(display, memberName string) string {
-	member := safeRelPath(filepath.ToSlash(memberName))
-	if !strings.Contains(display, "!") {
-		return member
-	}
-	var parts []string
-	for _, seg := range strings.Split(display, "!") {
-		parts = append(parts, sanitizePathElem(filepath.Base(seg)))
-	}
-	if len(parts) > 0 {
-		parts = parts[1:] // drop outer archive; slug already names the log unit
-	}
-	if len(parts) == 0 {
-		return member
-	}
-	return safeRelPath(filepath.Join(append(parts, member)...))
-}
-
-// safeRelPath sanitizes a relative path for writing under a log folder.
+// safeRelPath sanitizes a relative path for writing under the secrets folder.
 func safeRelPath(rel string) string {
 	rel = filepath.Clean(filepath.FromSlash(strings.ReplaceAll(rel, "\\", "/")))
 	parts := strings.Split(rel, string(filepath.Separator))
@@ -144,182 +103,19 @@ func sanitizePathElem(s string) string {
 	return b.String()
 }
 
-func logSlug(logKey string) string {
-	return sanitizePathElem(filepath.Base(logKey))
-}
-
 // EnvCopyStats holds final -env copy counters.
 type EnvCopyStats struct {
-	Copied, ContextCopied, SkippedOverCap, WriteErrors int
+	Copied, SkippedOverCap, WriteErrors int
 }
 
 type envJob struct {
-	logKey     string
-	relDest    string
-	data       []byte
-	srcPath    string
-	memberName string // in-archive path for archive env files
-	isContext  bool
+	srcPath    string // loose on-disk file (empty for archive members)
+	data       []byte // in-memory bytes (archive members)
+	memberName string // in-archive path (archive members)
 }
 
-type envPending struct {
-	relDest    string
-	data       []byte
-	memberName string // in-archive path for anchor lookup at flush
-}
-
-type deferredContextFlush struct {
-	logKey           string
-	envCopiedMembers []string
-	pending          []envPending
-}
-
-type envIndexEntry struct {
-	dest, source string
-}
-
-// envBucketKey identifies one victim folder under a log slug for index grouping.
-func envBucketKey(slug, victim string) string {
-	if victim == "" {
-		return slug
-	}
-	return filepath.Join(slug, victim)
-}
-
-// envVictimPrefix maps an in-log member path to the victim subfolder name under
-// the archive slug. Empty means the log unit is already one victim (loose dir).
-func envVictimPrefix(memberPath string) string {
-	p := normalizeMemberPath(memberPath)
-	if !strings.Contains(p, "/") {
-		return ""
-	}
-	parts := strings.Split(p, "/")
-	if parts[0] == "Batch" && len(parts) >= 3 {
-		return safeRelPath(filepath.Join(parts[0], parts[1], parts[2]))
-	}
-	if strings.Contains(parts[0], "Logs") && len(parts) >= 2 {
-		return safeRelPath(filepath.Join(parts[0], parts[1]))
-	}
-	return sanitizePathElem(parts[0])
-}
-
-func memberPathForVictim(job envJob) string {
-	if job.memberName != "" {
-		return job.memberName
-	}
-	return job.relDest
-}
-
-func envDestBasename(job envJob) string {
-	if job.isContext && strings.ToLower(filepath.Base(job.relDest)) == "information.txt" {
-		return "information.txt"
-	}
-	return flatBasename(job.relDest)
-}
-
-func normalizeMemberPath(name string) string {
-	return filepath.ToSlash(filepath.Clean(name))
-}
-
-func contextAnchorDir(memberName string) string {
-	return filepath.Dir(normalizeMemberPath(memberName))
-}
-
-func contextAnchorsFromMembers(members []string) []string {
-	seen := make(map[string]bool)
-	var anchors []string
-	for _, m := range members {
-		a := contextAnchorDir(m)
-		if seen[a] {
-			continue
-		}
-		seen[a] = true
-		anchors = append(anchors, a)
-	}
-	return anchors
-}
-
-// pathUnderAnchor reports whether path is at or under anchor within the archive.
-func pathUnderAnchor(path, anchor string) bool {
-	path = normalizeMemberPath(path)
-	anchor = normalizeMemberPath(anchor)
-	if anchor == "" || anchor == "." {
-		return !strings.Contains(path, "/")
-	}
-	return path == anchor || strings.HasPrefix(path, anchor+"/")
-}
-
-// markedContextAnchors returns context anchor dirs that had at least one env file
-// copied under them in the same archive.
-func markedContextAnchors(envMembers, contextMembers []string) map[string]bool {
-	anchors := contextAnchorsFromMembers(contextMembers)
-	marked := make(map[string]bool)
-	for _, envPath := range envMembers {
-		envPath = normalizeMemberPath(envPath)
-		best := ""
-		for _, a := range anchors {
-			if !pathUnderAnchor(envPath, a) {
-				continue
-			}
-			if len(a) > len(best) {
-				best = a
-			}
-		}
-		if best != "" {
-			marked[best] = true
-		}
-		parent := contextAnchorDir(envPath)
-		if parent != "" {
-			marked[parent] = true
-		}
-	}
-	return marked
-}
-
-// contextCopyAllowed reports whether a buffered context member should be copied
-// given the anchors marked by env files in the same archive.
-func contextCopyAllowed(contextMember string, marked map[string]bool) bool {
-	if len(marked) == 0 {
-		return false
-	}
-	dir := contextAnchorDir(contextMember)
-	for m := range marked {
-		if m == "." || m == "" {
-			if dir == "." {
-				return true
-			}
-			continue
-		}
-		if dir == m || pathUnderAnchor(dir, m) {
-			return true
-		}
-	}
-	return false
-}
-
-// appendPendingContext buffers a context member when under per-archive caps.
-func appendPendingContext(state *archiveEnvState, p envPending, copier *EnvCopier) bool {
-	if state == nil {
-		return false
-	}
-	if len(state.pending) >= maxPendingContextFiles {
-		if copier != nil {
-			copier.bumpSkippedOverCap()
-		}
-		return false
-	}
-	if state.pendingContextBytes+int64(len(p.data)) > maxPendingContextBytes {
-		if copier != nil {
-			copier.bumpSkippedOverCap()
-		}
-		return false
-	}
-	state.pending = append(state.pending, p)
-	state.pendingContextBytes += int64(len(p.data))
-	return true
-}
-
-// EnvCopier asynchronously copies env/key files to root/<logSlug>/.
+// EnvCopier asynchronously copies env/key files flat into root
+// (<out>/sfl_<stamp>_secrets/).
 type EnvCopier struct {
 	root    string
 	prog    *Progress
@@ -328,29 +124,22 @@ type EnvCopier struct {
 	wg      sync.WaitGroup
 	started atomic.Bool
 
-	mu                 sync.Mutex
-	stats              EnvCopyStats
-	looseContextDone   map[string]bool
-	looseEnvMembers    map[string][]string
-	writtenArchiveEnv  map[string][]string
-	deferred           []deferredContextFlush
-	index              map[string][]envIndexEntry
+	mu    sync.Mutex
+	stats EnvCopyStats
 }
 
-// NewEnvCopier creates a copier writing under root (…/env/<stamp>/).
+// NewEnvCopier creates a copier writing flat into root. The directory is
+// created lazily on the first successful write so an empty run leaves nothing
+// behind.
 func NewEnvCopier(root string, prog *Progress, maxLen int64) *EnvCopier {
 	if maxLen <= 0 {
 		maxLen = defaultEnvCopyMaxLen
 	}
 	return &EnvCopier{
-		root:              root,
-		prog:              prog,
-		maxLen:            maxLen,
-		queue:             make(chan envJob, 256),
-		looseContextDone:  make(map[string]bool),
-		looseEnvMembers:   make(map[string][]string),
-		writtenArchiveEnv: make(map[string][]string),
-		index:             make(map[string][]envIndexEntry),
+		root:   root,
+		prog:   prog,
+		maxLen: maxLen,
+		queue:  make(chan envJob, 256),
 	}
 }
 
@@ -363,42 +152,8 @@ func (c *EnvCopier) Start() {
 	go c.worker()
 }
 
-// Root returns the timestamped env output directory.
-func (c *EnvCopier) Root() string {
-	if c == nil {
-		return ""
-	}
-	return c.root
-}
-
-// EnqueueBytes queues in-memory member bytes for async copy.
-func (c *EnvCopier) EnqueueBytes(logKey, relDest string, data []byte, isContext bool) {
-	if c == nil || len(data) == 0 {
-		return
-	}
-	if int64(len(data)) > c.maxLen {
-		c.bumpSkippedOverCap()
-		return
-	}
-	c.queue <- envJob{logKey: logKey, relDest: relDest, data: data, isContext: isContext}
-}
-
-func (c *EnvCopier) enqueueEnvBytes(logKey, relDest string, data []byte, memberName string) {
-	if c == nil || len(data) == 0 {
-		return
-	}
-	if int64(len(data)) > c.maxLen {
-		c.bumpSkippedOverCap()
-		return
-	}
-	c.queue <- envJob{
-		logKey: logKey, relDest: relDest, data: data,
-		memberName: memberName, isContext: false,
-	}
-}
-
 // EnqueueFile queues a loose on-disk file for async copy.
-func (c *EnvCopier) EnqueueFile(logKey, srcPath string, isContext bool) {
+func (c *EnvCopier) EnqueueFile(srcPath string) {
 	if c == nil {
 		return
 	}
@@ -411,82 +166,27 @@ func (c *EnvCopier) EnqueueFile(logKey, srcPath string, isContext bool) {
 		c.bumpWriteError()
 		return
 	}
-	if !isContext && info.Size() > c.maxLen {
+	if info.Size() > c.maxLen {
 		c.bumpSkippedOverCap()
 		return
 	}
-	rel, err := filepath.Rel(logKey, srcPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		rel = filepath.Base(srcPath)
-	}
-	c.queue <- envJob{logKey: logKey, relDest: rel, srcPath: srcPath, isContext: isContext}
+	c.queue <- envJob{srcPath: srcPath}
 }
 
-func (c *EnvCopier) recordLooseEnv(logKey, relDest string) {
-	c.mu.Lock()
-	rel := normalizeMemberPath(relDest)
-	c.looseEnvMembers[logKey] = append(c.looseEnvMembers[logKey], rel)
-	c.mu.Unlock()
-}
-
-func (c *EnvCopier) recordWrittenArchiveEnv(logKey, memberName string) {
-	c.mu.Lock()
-	c.writtenArchiveEnv[logKey] = append(c.writtenArchiveEnv[logKey], normalizeMemberPath(memberName))
-	c.mu.Unlock()
-}
-
-func (c *EnvCopier) enqueueLooseContext(logKey string) {
-	c.mu.Lock()
-	if c.looseContextDone[logKey] {
-		c.mu.Unlock()
+func (c *EnvCopier) enqueueEnvBytes(memberName string, data []byte) {
+	if c == nil || len(data) == 0 {
 		return
 	}
-	c.looseContextDone[logKey] = true
-	envMembers := append([]string(nil), c.looseEnvMembers[logKey]...)
-	c.mu.Unlock()
-	if len(envMembers) == 0 {
+	if int64(len(data)) > c.maxLen {
+		c.bumpSkippedOverCap()
 		return
 	}
-
-	info, err := os.Stat(logKey)
-	if err != nil || !info.IsDir() {
-		return
-	}
-
-	var contextMembers, contextPaths []string
-	_ = filepath.WalkDir(logKey, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if isArchiveFile(path) || !isLogContextFile(path) {
-			return nil
-		}
-		rel, err := filepath.Rel(logKey, path)
-		if err != nil {
-			return nil
-		}
-		contextMembers = append(contextMembers, normalizeMemberPath(rel))
-		contextPaths = append(contextPaths, path)
-		return nil
-	})
-	if len(contextMembers) == 0 {
-		return
-	}
-
-	marked := markedContextAnchors(envMembers, contextMembers)
-	for i, member := range contextMembers {
-		if !contextCopyAllowed(member, marked) {
-			continue
-		}
-		c.writeJob(envJob{
-			logKey: logKey, relDest: member, srcPath: contextPaths[i], isContext: true,
-		})
-	}
+	c.queue <- envJob{memberName: memberName, data: data}
 }
 
 // CopyMember reads up to maxLen from r and enqueues when name is a candidate.
 // Returns true only when bytes were queued for copy.
-func (c *EnvCopier) CopyMember(ctx context.Context, logKey, display, memberName string, r io.Reader) bool {
+func (c *EnvCopier) CopyMember(ctx context.Context, memberName string, r io.Reader) bool {
 	if c == nil || !isEnvCopyCandidate(memberName) {
 		return false
 	}
@@ -503,59 +203,8 @@ func (c *EnvCopier) CopyMember(ctx context.Context, logKey, display, memberName 
 	if err != nil && len(data) == 0 {
 		return false
 	}
-	c.enqueueEnvBytes(logKey, memberRelDest(display, memberName), data, memberName)
+	c.enqueueEnvBytes(memberName, data)
 	return true
-}
-
-// FlushArchiveContext defers buffered context members for gating after env writes complete.
-func (c *EnvCopier) FlushArchiveContext(logKey string, envCopiedMembers []string, pending []envPending) {
-	if c == nil || len(envCopiedMembers) == 0 || len(pending) == 0 {
-		return
-	}
-	c.mu.Lock()
-	c.deferred = append(c.deferred, deferredContextFlush{
-		logKey: logKey, envCopiedMembers: envCopiedMembers, pending: pending,
-	})
-	c.mu.Unlock()
-}
-
-func (c *EnvCopier) processDeferredContext() {
-	c.mu.Lock()
-	deferred := c.deferred
-	c.deferred = nil
-	written := make(map[string][]string, len(c.writtenArchiveEnv))
-	for k, v := range c.writtenArchiveEnv {
-		written[k] = append([]string(nil), v...)
-	}
-	c.mu.Unlock()
-
-	for _, batch := range deferred {
-		w := written[batch.logKey]
-		if len(w) == 0 {
-			continue
-		}
-		contextMembers := make([]string, len(batch.pending))
-		for i, p := range batch.pending {
-			contextMembers[i] = p.memberName
-		}
-		marked := markedContextAnchors(w, contextMembers)
-		for _, p := range batch.pending {
-			if !contextCopyAllowed(p.memberName, marked) {
-				continue
-			}
-			c.writeJob(envJob{
-				logKey: batch.logKey, relDest: p.relDest, data: p.data, isContext: true,
-			})
-		}
-	}
-}
-
-func readUpTo(ctx context.Context, r io.Reader, max int64) ([]byte, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	lr := io.LimitReader(r, max+1)
-	return io.ReadAll(lr)
 }
 
 func (c *EnvCopier) worker() {
@@ -574,17 +223,17 @@ func flatBasename(relDest string) string {
 }
 
 func (c *EnvCopier) writeJob(job envJob) {
-	slug := logSlug(job.logKey)
-	victim := envVictimPrefix(memberPathForVictim(job))
-	destDir := filepath.Join(c.root, slug)
-	if victim != "" {
-		destDir = filepath.Join(destDir, victim)
-	}
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := os.MkdirAll(c.root, 0o755); err != nil {
 		c.bumpWriteError()
 		return
 	}
-	dest := uniquePath(filepath.Join(destDir, envDestBasename(job)))
+	var base string
+	if job.srcPath != "" {
+		base = sanitizePathElem(filepath.Base(job.srcPath))
+	} else {
+		base = flatBasename(job.memberName)
+	}
+	dest := uniquePath(filepath.Join(c.root, base))
 	var err error
 	if job.srcPath != "" {
 		err = copyFile(job.srcPath, dest)
@@ -596,26 +245,10 @@ func (c *EnvCopier) writeJob(job envJob) {
 		return
 	}
 	c.mu.Lock()
-	if job.isContext {
-		c.stats.ContextCopied++
-	} else {
-		c.stats.Copied++
-	}
-	c.index[envBucketKey(slug, victim)] = append(c.index[envBucketKey(slug, victim)], envIndexEntry{
-		dest:   filepath.Base(dest),
-		source: normalizeMemberPath(job.relDest),
-	})
+	c.stats.Copied++
 	c.mu.Unlock()
 	if c.prog != nil {
 		c.prog.addEnvCopied(1)
-	}
-	if !job.isContext {
-		if job.memberName != "" {
-			c.recordWrittenArchiveEnv(job.logKey, job.memberName)
-		} else {
-			c.recordLooseEnv(job.logKey, job.relDest)
-		}
-		c.enqueueLooseContext(job.logKey)
 	}
 }
 
@@ -648,6 +281,13 @@ func uniquePath(path string) string {
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(filepath.Base(path), ext)
 	dir := filepath.Dir(path)
+	if base == "" {
+		// Dotfile like ".env": filepath.Ext consumes the whole name as the
+		// extension, leaving an empty stem. Suffix the full name instead so
+		// ".env" -> ".env_2", not "_2.env".
+		base = filepath.Base(path)
+		ext = ""
+	}
 	for i := 2; i < 1000; i++ {
 		candidate := filepath.Join(dir, base+"_"+itoa(i)+ext)
 		if _, err := os.Stat(candidate); os.IsNotExist(err) {
@@ -683,36 +323,6 @@ func (c *EnvCopier) bumpSkippedOverCap() {
 	c.mu.Unlock()
 }
 
-func (c *EnvCopier) writeIndexFiles() {
-	c.mu.Lock()
-	indexes := make(map[string][]envIndexEntry, len(c.index))
-	for slug, entries := range c.index {
-		cp := append([]envIndexEntry(nil), entries...)
-		indexes[slug] = cp
-	}
-	c.mu.Unlock()
-
-	for bucket, entries := range indexes {
-		if len(entries) == 0 {
-			continue
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].source < entries[j].source
-		})
-		var b strings.Builder
-		for _, e := range entries {
-			b.WriteString(e.dest)
-			b.WriteByte('\t')
-			b.WriteString(e.source)
-			b.WriteByte('\n')
-		}
-		destDir := filepath.Join(c.root, bucket)
-		if err := os.WriteFile(filepath.Join(destDir, "index.txt"), []byte(b.String()), 0o644); err != nil {
-			c.bumpWriteError()
-		}
-	}
-}
-
 // Close drains the queue and returns final stats.
 func (c *EnvCopier) Close() EnvCopyStats {
 	if c == nil {
@@ -722,21 +332,7 @@ func (c *EnvCopier) Close() EnvCopyStats {
 		close(c.queue)
 		c.wg.Wait()
 	}
-	c.processDeferredContext()
-	c.writeIndexFiles()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.stats
-}
-
-// readContextMember reads a small context file from a streaming archive member.
-func readContextMember(ctx context.Context, r io.Reader, max int64) []byte {
-	data, err := readUpTo(ctx, r, max)
-	if err != nil || len(data) == 0 {
-		io.Copy(io.Discard, r)
-		return nil
-	}
-	// Drain remainder so the archive stream advances.
-	io.Copy(io.Discard, r)
-	return data
 }

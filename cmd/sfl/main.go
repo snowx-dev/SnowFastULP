@@ -52,7 +52,6 @@ type runConfig struct {
 	SecretsAllow  []string
 	SecretsDeny   []string
 	Env           bool
-	EnvRoot       string // populated at run start when -env is set
 	UpdateChecker *selfupdate.Checker
 	Started       time.Time
 	// DryRun (-odr): run the full extract+ingest pipeline but write nothing
@@ -112,7 +111,7 @@ func main() {
 	flag.Var(stringAccum{&secretsAllow}, "secrets-allow", "glob of titus rule IDs to keep (e.g. 'np.aws.*'); repeatable. Empty = all rules.")
 	flag.Var(stringAccum{&secretsDeny}, "secrets-deny", "glob of titus rule IDs to drop (e.g. 'np.aws.3'); repeatable. Wins over -secrets-allow.")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update check")
-	envOn := flag.Bool("env", false, "copy env/key files into <dest>/env/<timestamp>/<log>/<victim>/ with per-victim index.txt")
+	envOn := flag.Bool("env", false, "copy env/key files flat into <out>/sfl_<timestamp>_secrets/")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
@@ -130,7 +129,7 @@ func main() {
 		Workers:     workers,
 		NoTUI:       noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
 		Debug: debug, NoUpdateCheck: noUpdateCheck,
-		Loose:  loose,
+		Loose:        loose,
 		Secrets:      secretsOn,
 		SecretsAllow: &secretsAllow,
 		SecretsDeny:  &secretsDeny,
@@ -199,7 +198,7 @@ func main() {
 		NoURI: *noURI, Loose: *loose, NoTUI: *noTUI, Debug: *debug, ErrFile: *errFile, NoUpdateCheck: *noUpdateCheck,
 		Secrets: *secretsOn, SecretsPath: *secretsPath,
 		SecretsAllow: secretsAllow, SecretsDeny: secretsDeny,
-		Env: *envOn,
+		Env:     *envOn,
 		Started: started, ForcePlainTUI: !vtOK,
 		DryRun: dryRun,
 	}
@@ -320,18 +319,11 @@ func run(cfg runConfig) error {
 	eng := buildEngine(cfg, passwords, prog, dbg, iss, spillDir)
 
 	var envCopier *sflog.EnvCopier
-	if cfg.Env {
-		envRoot, err := resolveEnvRoot(cfg)
-		if err != nil {
-			return fmt.Errorf("env: %w", err)
-		}
-		cfg.EnvRoot = envRoot
-		if !cfg.DryRun {
-			envCopier = sflog.NewEnvCopier(envRoot, prog, 0)
-			envCopier.Start()
-			prog.EnableEnv()
-			eng.EnvCopier = envCopier
-		}
+	if cfg.Env && !cfg.DryRun {
+		envCopier = sflog.NewEnvCopier(resolveEnvDir(cfg), prog, 0)
+		envCopier.Start()
+		prog.EnableEnv()
+		eng.EnvCopier = envCopier
 	}
 
 	// Optional secrets scanning runs as a side channel during extraction: the
@@ -366,11 +358,10 @@ func run(cfg runConfig) error {
 	if envCopier != nil {
 		es := envCopier.Close()
 		stats.EnvCopied = es.Copied
-		stats.EnvContextCopied = es.ContextCopied
 		stats.EnvSkippedOverCap = es.SkippedOverCap
 		stats.EnvWriteErrors = es.WriteErrors
-		dbg.Event("env: copied=%d context=%d skipped=%d errors=%d root=%q",
-			es.Copied, es.ContextCopied, es.SkippedOverCap, es.WriteErrors, cfg.EnvRoot)
+		dbg.Event("env: copied=%d skipped=%d errors=%d",
+			es.Copied, es.SkippedOverCap, es.WriteErrors)
 	}
 	if closeSecrets != nil {
 		// Flip the live frame to a dedicated "finalizing secrets" phase while the
@@ -470,7 +461,7 @@ func run(cfg runConfig) error {
 	}
 	switch {
 	case cfg.LibraryDir != "" && libEmpty:
-		summary = renderNoIngestSummaryWithNotice(cfg.LibraryDir, stats, cfg.EnvRoot, updateNotice, cfg.DryRun)
+		summary = renderNoIngestSummaryWithNotice(cfg.LibraryDir, stats, updateNotice, cfg.DryRun)
 	case cfg.LibraryDir != "":
 		var newToLib, alreadyInLib, dropped int64
 		if ingestMet != nil {
@@ -480,9 +471,9 @@ func run(cfg runConfig) error {
 			// arithmetic, Unique == Added + already-in-library + dropped.
 			dropped = ingestMet.LinesRejected.Load()
 		}
-		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, dropped, stats, ingestOutputPaths(ingestRes), cfg.EnvRoot, updateNotice, cfg.DryRun)
+		summary = renderIngestSummaryWithNotice(cfg.LibraryDir, ingestLibraryLines(ingestRes, ingestMet), newToLib, alreadyInLib, dropped, stats, ingestOutputPaths(ingestRes), updateNotice, cfg.DryRun)
 	default:
-		summary = renderFinalSummaryWithNotice(outPath, stats, cfg.EnvRoot, updateNotice)
+		summary = renderFinalSummaryWithNotice(outPath, stats, updateNotice)
 	}
 	if cfg.Secrets {
 		// Slot the secrets recap box just above the frost footer so it reads as
@@ -954,7 +945,21 @@ func printInterruptSummary(cfg runConfig) {
 	}
 }
 
-func resolveEnvRoot(cfg runConfig) (string, error) {
+// runStamp is the shared run timestamp (matching the ULP output filename) so
+// the -env secrets folder name lines up with sfl_<stamp>.txt.
+func runStamp(cfg runConfig) string {
+	started := cfg.Started
+	if started.IsZero() {
+		started = time.Now()
+	}
+	return started.Format("20060102_150405")
+}
+
+// resolveEnvDir returns the flat -env secrets directory path
+// (<dest>/sfl_<stamp>_secrets/). It does NOT create the directory: the copier
+// creates it lazily on the first successful write so an empty run leaves no
+// empty folder behind.
+func resolveEnvDir(cfg runConfig) string {
 	dest := cfg.OutputDir
 	if cfg.LibraryDir != "" {
 		dest = cfg.LibraryDir
@@ -962,16 +967,7 @@ func resolveEnvRoot(cfg runConfig) (string, error) {
 	if dest == "" {
 		dest = "."
 	}
-	started := cfg.Started
-	if started.IsZero() {
-		started = time.Now()
-	}
-	stamp := started.Format("200601021504")
-	root := filepath.Join(dest, "env", stamp)
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return "", err
-	}
-	return root, nil
+	return filepath.Join(dest, "sfl_"+runStamp(cfg)+"_secrets")
 }
 
 func createOutputPath(cfg runConfig) (string, error) {
@@ -981,11 +977,7 @@ func createOutputPath(cfg runConfig) (string, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return "", err
 	}
-	started := cfg.Started
-	if started.IsZero() {
-		started = time.Now()
-	}
-	name := "sfl_" + started.Format("20060102_150405") + ".txt"
+	name := "sfl_" + runStamp(cfg) + ".txt"
 	if cfg.Compress {
 		name += ".zst"
 	}

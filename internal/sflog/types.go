@@ -93,7 +93,6 @@ type ExtractStats struct {
 
 	// Env copy counters (-env). Populated from EnvCopier.Close().
 	EnvCopied         int
-	EnvContextCopied  int
 	EnvSkippedOverCap int
 	EnvWriteErrors    int
 
