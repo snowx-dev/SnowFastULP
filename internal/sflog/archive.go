@@ -1,6 +1,7 @@
 package sflog
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -198,9 +199,8 @@ type extractCtx struct {
 	// credited at open like any streaming source.
 	secretsPrecounted bool
 	// env (may be nil) copies allowlisted members flat into the -env secrets
-	// directory. envMaxLen caps how much of each member is read.
-	env       *EnvCopier
-	envMaxLen int64
+	// directory. The copier applies its own maxLen cap.
+	env *EnvCopier
 }
 
 // stage publishes s to the worker slot if a stage sink is wired (no-op for
@@ -541,7 +541,13 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		case isPasswordFile(f.Name):
 			credFiles = append(credFiles, f)
 		case isEnvCopyCandidate(f.Name):
+			// Env candidates are copied via envOtherFiles. When -secrets is also
+			// on and the name is scan-worthy, put them on otherFiles too so the
+			// Titus path still runs (copy and scan are independent sinks).
 			envOtherFiles = append(envOtherFiles, f)
+			if ec.secrets != nil && isSecretScanCandidate(f.Name) {
+				otherFiles = append(otherFiles, f)
+			}
 			maybeEncryptedProbe(f, &probe)
 			continue
 		case ec.secrets != nil && isSecretScanCandidate(f.Name):
@@ -708,6 +714,7 @@ func copyOtherZipMembers(ctx context.Context, envFiles []*zipenc.File, ec extrac
 		}
 		rc, err := member.Open()
 		if err != nil {
+			ec.env.bumpWriteError()
 			continue
 		}
 		ec.env.CopyMember(ctx, member.Name, rc)
@@ -1190,18 +1197,57 @@ func extractRarOnce(ctx context.Context, ec extractCtx, diskPath, pw string, cr 
 }
 
 // copyMemberIfCandidate copies an env/key archive member flat into the -env
-// secrets dir. Returns true when the member stream was fully consumed.
-func copyMemberIfCandidate(ctx context.Context, ec extractCtx, r io.Reader, name string) bool {
-	if ec.env == nil {
+// secrets dir. When -secrets is also wired and the member is scan-worthy, it
+// reads once and feeds both sinks (streaming formats cannot reopen the member).
+// creditSecretTotal should be true on paths that do not bulk-precount secret
+// candidates (RAR); false when Y was already credited (7z directory precount).
+// Returns true when the member stream was fully consumed.
+func copyMemberIfCandidate(ctx context.Context, ec extractCtx, r io.Reader, name string, creditSecretTotal bool) bool {
+	if ec.env == nil || !isEnvCopyCandidate(name) {
 		return false
 	}
-	if !isEnvCopyCandidate(name) {
-		return false
-	}
-	if ec.env.CopyMember(ctx, name, r) {
+	wantSecret := ec.secrets != nil && isSecretScanCandidate(name)
+	if !wantSecret {
+		if !ec.env.CopyMember(ctx, name, r) {
+			_, _ = io.Copy(io.Discard, r)
+		}
 		return true
 	}
-	io.Copy(io.Discard, r)
+	// Both sinks: one read covering the larger of the two caps.
+	envMax := ec.env.maxLen
+	if envMax <= 0 {
+		envMax = defaultEnvCopyMaxLen
+	}
+	secMax := ec.secretMaxLen
+	if secMax <= 0 {
+		secMax = defaultSecretMaxLen
+	}
+	readMax := envMax
+	if secMax > readMax {
+		readMax = secMax
+	}
+	data, err := io.ReadAll(io.LimitReader(r, readMax+1))
+	_, _ = io.Copy(io.Discard, r)
+	if err != nil {
+		// Match CopyMember: no partial enqueue and no secret scan on read error.
+		ec.env.bumpWriteError()
+		return true
+	}
+	if len(data) > 0 {
+		if int64(len(data)) > envMax {
+			ec.env.bumpSkippedOverCap()
+		} else {
+			ec.env.enqueueEnvBytes(name, data)
+		}
+	}
+	scanBuf := data
+	if int64(len(scanBuf)) > secMax {
+		scanBuf = scanBuf[:secMax]
+	}
+	if creditSecretTotal {
+		ec.p.addSecretFilesTotal(1)
+	}
+	ec.scanSecrets(ctx, bytes.NewReader(scanBuf), ec.display+"!"+name)
 	return true
 }
 
@@ -1259,7 +1305,7 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
-					if copyMemberIfCandidate(ctx, ec, rr, h.Name) {
+					if copyMemberIfCandidate(ctx, ec, rr, h.Name, true) {
 						continue
 					}
 					// Scan the first member for secrets (allowlisted only, capped)
@@ -1293,7 +1339,7 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 					ec.emit(c)
 				}
 			default:
-				if copyMemberIfCandidate(ctx, ec, rr, h.Name) {
+				if copyMemberIfCandidate(ctx, ec, rr, h.Name, true) {
 					continue
 				}
 				// Non-credential member: scan allowlisted files for secrets
@@ -1454,7 +1500,7 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 			if !validated {
 				validated = true
 				if !isArchiveFile(h.Name) && !isPasswordFile(h.Name) {
-					if copyMemberIfCandidate(ctx, ec, rc, h.Name) {
+					if copyMemberIfCandidate(ctx, ec, rc, h.Name, true) {
 						cr.add(h.PackedSize)
 						continue
 					}
@@ -1485,7 +1531,7 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 					ec.emit(c)
 				}
 			default:
-				if copyMemberIfCandidate(ctx, ec, rc, h.Name) {
+				if copyMemberIfCandidate(ctx, ec, rc, h.Name, true) {
 					cr.add(h.PackedSize)
 					continue
 				}
@@ -1635,7 +1681,7 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 				(ec.secrets != nil && isSecretScanCandidate(member.Name)) {
 				rc, oerr := member.Open()
 				if oerr == nil {
-					if copyMemberIfCandidate(ctx, ec, rc, member.Name) {
+					if copyMemberIfCandidate(ctx, ec, rc, member.Name, false) {
 						rc.Close()
 						continue
 					}

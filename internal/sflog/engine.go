@@ -623,7 +623,6 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 		secretMaxLen:      e.SecretMaxLen,
 		secretsPrecounted: it.secretsPrecounted,
 		env:               e.EnvCopier,
-		envMaxLen:         e.EnvMaxLen,
 	}
 	// One heartbeat throttle per top-level item, shared across the whole
 	// recursion. Set here (not just in readArchiveCredentials) so the

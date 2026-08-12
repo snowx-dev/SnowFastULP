@@ -956,15 +956,18 @@ func runStamp(cfg runConfig) string {
 }
 
 // resolveEnvDir returns the flat -env secrets directory path
-// (<dest>/sfl_<stamp>_secrets/). It does NOT create the directory: the copier
-// creates it lazily on the first successful write so an empty run leaves no
-// empty folder behind.
+// (<dest>/sfl_<stamp>_secrets/). Precedence matches resolveSecretsPath:
+// OutputDir, then LibraryDir, then ".". It does NOT create the directory: the
+// copier creates it lazily on the first successful write so an empty run leaves
+// no empty folder behind.
 func resolveEnvDir(cfg runConfig) string {
-	dest := cfg.OutputDir
-	if cfg.LibraryDir != "" {
+	var dest string
+	switch {
+	case cfg.OutputDir != "":
+		dest = cfg.OutputDir
+	case cfg.LibraryDir != "":
 		dest = cfg.LibraryDir
-	}
-	if dest == "" {
+	default:
 		dest = "."
 	}
 	return filepath.Join(dest, "sfl_"+runStamp(cfg)+"_secrets")

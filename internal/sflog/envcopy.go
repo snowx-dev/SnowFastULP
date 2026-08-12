@@ -185,22 +185,24 @@ func (c *EnvCopier) enqueueEnvBytes(memberName string, data []byte) {
 }
 
 // CopyMember reads up to maxLen from r and enqueues when name is a candidate.
-// Returns true only when bytes were queued for copy.
+// Returns true only when bytes were queued for copy. Read errors count as write
+// errors and do not enqueue partial data.
 func (c *EnvCopier) CopyMember(ctx context.Context, memberName string, r io.Reader) bool {
 	if c == nil || !isEnvCopyCandidate(memberName) {
 		return false
 	}
 	max := c.maxLen
 	data, err := io.ReadAll(io.LimitReader(r, max+1))
-	io.Copy(io.Discard, r)
+	_, _ = io.Copy(io.Discard, r)
+	if err != nil {
+		c.bumpWriteError()
+		return false
+	}
 	if len(data) == 0 {
 		return false
 	}
 	if int64(len(data)) > max {
 		c.bumpSkippedOverCap()
-		return false
-	}
-	if err != nil && len(data) == 0 {
 		return false
 	}
 	c.enqueueEnvBytes(memberName, data)
@@ -223,17 +225,25 @@ func flatBasename(relDest string) string {
 }
 
 func (c *EnvCopier) writeJob(job envJob) {
-	if err := os.MkdirAll(c.root, 0o755); err != nil {
-		c.bumpWriteError()
-		return
-	}
 	var base string
 	if job.srcPath != "" {
 		base = sanitizePathElem(filepath.Base(job.srcPath))
 	} else {
 		base = flatBasename(job.memberName)
 	}
-	dest := uniquePath(filepath.Join(c.root, base))
+	// Create the destination dir only when we are about to write. A single
+	// worker serializes jobs, so concurrent mkdir races are not a concern.
+	// filepath.Join keeps this correct on Windows and Unix.
+	if err := os.MkdirAll(c.root, 0o755); err != nil {
+		c.bumpWriteError()
+		return
+	}
+	dest, ok := uniquePath(filepath.Join(c.root, base))
+	if !ok {
+		c.bumpWriteError()
+		c.removeRootIfEmpty()
+		return
+	}
 	var err error
 	if job.srcPath != "" {
 		err = copyFile(job.srcPath, dest)
@@ -242,6 +252,8 @@ func (c *EnvCopier) writeJob(job envJob) {
 	}
 	if err != nil {
 		c.bumpWriteError()
+		_ = os.Remove(dest) // best-effort; ignore if write never created it
+		c.removeRootIfEmpty()
 		return
 	}
 	c.mu.Lock()
@@ -250,6 +262,20 @@ func (c *EnvCopier) writeJob(job envJob) {
 	if c.prog != nil {
 		c.prog.addEnvCopied(1)
 	}
+}
+
+// removeRootIfEmpty deletes c.root when it exists and contains no entries so a
+// failed first write does not leave an empty sfl_*_secrets directory behind.
+// Uses Remove (not RemoveAll) and only when empty — safe on Windows and Unix.
+func (c *EnvCopier) removeRootIfEmpty() {
+	if c == nil || c.root == "" {
+		return
+	}
+	entries, err := os.ReadDir(c.root)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	_ = os.Remove(c.root)
 }
 
 func copyFile(src, dest string) error {
@@ -274,9 +300,13 @@ func copyFile(src, dest string) error {
 	return firstErr(err, closeErr)
 }
 
-func uniquePath(path string) string {
+// uniquePath returns a non-existing path by suffixing _2, _3, … before the
+// extension (and after the full name for dotfiles like ".env" → ".env_2").
+// ok is false when every candidate through _999 already exists — callers must
+// not overwrite.
+func uniquePath(path string) (string, bool) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return path
+		return path, true
 	}
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(filepath.Base(path), ext)
@@ -291,10 +321,10 @@ func uniquePath(path string) string {
 	for i := 2; i < 1000; i++ {
 		candidate := filepath.Join(dir, base+"_"+itoa(i)+ext)
 		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
+			return candidate, true
 		}
 	}
-	return path
+	return "", false
 }
 
 func itoa(i int) string {

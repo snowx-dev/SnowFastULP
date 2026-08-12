@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,8 +38,13 @@ func TestSafeRelPath(t *testing.T) {
 	if got == ".." || got == "" {
 		t.Fatalf("safeRelPath = %q, want sanitized path", got)
 	}
-	if got := safeRelPath("VictimA/deep/.env"); got != filepath.Join("VictimA", "deep", ".env") {
-		t.Fatalf("safeRelPath nested = %q, want VictimA/deep/.env", got)
+	// Flat copy only keeps the basename; safeRelPath still strips ".." so the
+	// basename path cannot escape the secrets root.
+	if flatBasename(safeRelPath("VictimA/deep/.env")) != ".env" {
+		t.Fatalf("flatBasename(safeRelPath(...)) = %q, want .env", flatBasename(safeRelPath("VictimA/deep/.env")))
+	}
+	if flatBasename(safeRelPath(`../evil/.env`)) != ".env" {
+		t.Fatalf("traversal should still yield basename .env, got %q", flatBasename(safeRelPath(`../evil/.env`)))
 	}
 }
 
@@ -162,6 +168,233 @@ func TestCopyFileSkipsSymlink(t *testing.T) {
 	dest := filepath.Join(dir, "out.env")
 	if err := copyFile(link, dest); err == nil {
 		t.Fatal("expected error copying symlink")
+	}
+}
+
+func TestWriteJobRemovesEmptyRootOnFailedCopy(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sfl_stamp_secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	// Missing source: MkdirAll creates root, copyFile fails, empty root must go.
+	copier.writeJob(envJob{srcPath: filepath.Join(t.TempDir(), "missing.env")})
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("empty secrets dir should be removed after failed write; stat err=%v", err)
+	}
+	if copier.stats.WriteErrors != 1 {
+		t.Fatalf("WriteErrors = %d, want 1", copier.stats.WriteErrors)
+	}
+}
+
+func TestRemoveRootIfEmptyKeepsNonEmpty(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "secrets")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "kept.env"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copier := &EnvCopier{root: root}
+	copier.removeRootIfEmpty()
+	if _, err := os.Stat(filepath.Join(root, "kept.env")); err != nil {
+		t.Fatalf("non-empty root should be kept: %v", err)
+	}
+}
+
+func TestUniquePathExhaustion(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "x.env")
+	if err := os.WriteFile(base, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i < 1000; i++ {
+		p := filepath.Join(dir, "x_"+itoa(i)+".env")
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := uniquePath(base); ok {
+		t.Fatal("expected uniquePath exhaustion")
+	}
+}
+
+func TestCopyMemberReadError(t *testing.T) {
+	copier := NewEnvCopier(t.TempDir(), nil, defaultEnvCopyMaxLen)
+	r := &errReader{}
+	if copier.CopyMember(context.Background(), ".env", r) {
+		t.Fatal("expected CopyMember to fail on read error")
+	}
+	if copier.stats.WriteErrors != 1 {
+		t.Fatalf("WriteErrors = %d, want 1", copier.stats.WriteErrors)
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, os.ErrClosed }
+
+func TestArchiveEnvAlsoScannedForSecrets(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "bundle.zip")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("VictimA/.env")
+	_, _ = w.Write([]byte(awsKeyLine + "\n"))
+	_ = zw.Close()
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	sink := &capSink{}
+	e := &Engine{Workers: 1, EnvCopier: copier, SecretSink: sink, SecretMaxLen: defaultSecretMaxLen}
+	var out strings.Builder
+	if _, _, err := e.Run(context.Background(), archivePath, &out); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	es := copier.Close()
+	if es.Copied != 1 {
+		t.Fatalf("copied = %d (skipped=%d errors=%d), want 1; sink=%v", es.Copied, es.SkippedOverCap, es.WriteErrors, sink.got)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".env")); err != nil {
+		t.Fatalf("env file not copied: %v", err)
+	}
+	if !sink.sawSecret(".env", "AKIA") {
+		t.Fatalf("archive env member was copied but not scanned; got %v", sink.got)
+	}
+}
+
+func TestCopyMemberIfCandidateReadErrorSkipsSecretScan(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	sink := &capSink{}
+	prog := NewProgress()
+	ec := extractCtx{
+		env:          copier,
+		secrets:      sink,
+		secretMaxLen: defaultSecretMaxLen,
+		p:            prog,
+		display:      "test.rar",
+	}
+	if !copyMemberIfCandidate(context.Background(), ec, errReader{}, ".env", true) {
+		t.Fatal("expected stream consumed")
+	}
+	es := copier.Close()
+	if es.WriteErrors != 1 {
+		t.Fatalf("WriteErrors = %d, want 1", es.WriteErrors)
+	}
+	if es.Copied != 0 {
+		t.Fatalf("Copied = %d, want 0", es.Copied)
+	}
+	if len(sink.got) != 0 {
+		t.Fatalf("secret sink should be empty on read error; got %v", sink.got)
+	}
+	if prog.SecretFilesTotal() != 0 {
+		t.Fatalf("SecretFilesTotal = %d, want 0 (no credit on read error)", prog.SecretFilesTotal())
+	}
+}
+
+func TestRarEnvAlsoScannedForSecrets(t *testing.T) {
+	rarBin, err := exec.LookPath("rar")
+	if err != nil {
+		t.Skip("no rar packer found")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "config.env", awsKeyLine+"\n")
+	cmd := exec.Command(rarBin, "a", "-m0", "-ep1", "-idq", "log.rar", "config.env")
+	cmd.Dir = dir
+	if out, e := cmd.CombinedOutput(); e != nil {
+		t.Skipf("rar pack failed (%v): %s", e, out)
+	}
+	rarPath := filepath.Join(dir, "log.rar")
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	sink := &capSink{}
+	e := &Engine{Workers: 1, EnvCopier: copier, SecretSink: sink, SecretMaxLen: defaultSecretMaxLen, Passwords: []string{""}}
+	var out strings.Builder
+	if _, _, err := e.Run(context.Background(), rarPath, &out); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	es := copier.Close()
+	if es.Copied != 1 {
+		t.Fatalf("copied = %d (skipped=%d errors=%d), want 1; sink=%v", es.Copied, es.SkippedOverCap, es.WriteErrors, sink.got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "config.env")); err != nil {
+		t.Fatalf("env file not copied: %v", err)
+	}
+	if !sink.sawSecret("config.env", "AKIA") {
+		t.Fatalf("rar env member was copied but not scanned; got %v", sink.got)
+	}
+}
+
+func TestSevenZipEnvAlsoScannedForSecrets(t *testing.T) {
+	bin := first7z()
+	if bin == "" {
+		t.Skip("no 7z packer found")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "config.env", awsKeyLine+"\n")
+	cmd := exec.Command(bin, "a", "-y", "-bso0", "-bsp0", "log.7z", "config.env")
+	cmd.Dir = dir
+	if out, e := cmd.CombinedOutput(); e != nil {
+		t.Skipf("7z create failed: %v\n%s", e, out)
+	}
+	path := filepath.Join(dir, "log.7z")
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	sink := &capSink{}
+	e := &Engine{Workers: 1, EnvCopier: copier, SecretSink: sink, SecretMaxLen: defaultSecretMaxLen, Passwords: []string{""}}
+	var out strings.Builder
+	if _, _, err := e.Run(context.Background(), path, &out); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	es := copier.Close()
+	if es.Copied != 1 {
+		t.Fatalf("copied = %d (skipped=%d errors=%d), want 1; sink=%v", es.Copied, es.SkippedOverCap, es.WriteErrors, sink.got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "config.env")); err != nil {
+		t.Fatalf("env file not copied: %v", err)
+	}
+	if !sink.sawSecret("config.env", "AKIA") {
+		t.Fatalf("7z env member was copied but not scanned; got %v", sink.got)
+	}
+}
+
+func TestSevenZipEnvSecretTotalNotDoubled(t *testing.T) {
+	bin := first7z()
+	if bin == "" {
+		t.Skip("no 7z packer found")
+	}
+	dir := t.TempDir()
+	mustWrite(t, dir, "config.env", awsKeyLine+"\n")
+	cmd := exec.Command(bin, "a", "-y", "-bso0", "-bsp0", "log.7z", "config.env")
+	cmd.Dir = dir
+	if out, e := cmd.CombinedOutput(); e != nil {
+		t.Skipf("7z create failed: %v\n%s", e, out)
+	}
+	path := filepath.Join(dir, "log.7z")
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	sink := &capSink{}
+	prog := NewProgress()
+	e := &Engine{
+		Workers: 1, EnvCopier: copier, SecretSink: sink,
+		SecretMaxLen: defaultSecretMaxLen, Progress: prog, Passwords: []string{""},
+	}
+	var out strings.Builder
+	if _, _, err := e.Run(context.Background(), path, &out); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	_ = copier.Close()
+	if got := prog.SecretFilesTotal(); got != 1 {
+		t.Fatalf("SecretFilesTotal = %d, want 1 (precount once; creditSecretTotal=false must not double)", got)
 	}
 }
 
