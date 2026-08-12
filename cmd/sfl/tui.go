@@ -1277,20 +1277,25 @@ func recapCountRows(stats sflog.ExtractStats) []string {
 	dot := sflMutedStyle.Render("  ·  ")
 	cred := int64(stats.Credentials)
 	uniq := sflUniqueStyle.Render(formatInt(stats.Emitted)) +
-		sflMutedStyle.Render(tuistat.ShareParen(int64(stats.Emitted), cred)) +
-		dot + sflCountStyle.Render(formatInt(stats.Duplicates))
-	if stats.Duplicates > 0 {
-		uniq += sflMutedStyle.Render(tuistat.ShareParen(int64(stats.Duplicates), cred))
-	}
-	uniq += sflMutedStyle.Render(" duplicates")
+		sflMutedStyle.Render(tuistat.ShareParen(int64(stats.Emitted), cred))
 	rows := []string{
 		recapRow("Logs", sflCountStyle.Render(formatInt(stats.Logs))+
 			dot+sflAcceptStyle.Render(formatInt(stats.Credentials))+sflMutedStyle.Render(" parsed")),
 		recapRow("Unique", uniq),
+	}
+	// Duplicates (+share) ride a continuation so two (N.N%) tails never mid-cut
+	// the Unique row inside the default 80-col box (same pattern as Secrets).
+	if stats.Duplicates > 0 {
+		dup := sflCountStyle.Render(formatInt(stats.Duplicates)) +
+			sflMutedStyle.Render(tuistat.ShareParen(int64(stats.Duplicates), cred)) +
+			sflMutedStyle.Render(" duplicates")
+		rows = append(rows, strings.Repeat(" ", sflRecapLabelW)+dup)
+	}
+	rows = append(rows,
 		recapRow("Sources", sflCountStyle.Render(formatInt(stats.FilesScanned))+sflMutedStyle.Render(" files  ·  ")+
 			sflCountStyle.Render(formatInt(stats.ArchivesScanned))+sflMutedStyle.Render(" archives  ·  ")+
 			sflWarnStyle.Render(formatInt(stats.SkippedFiles+stats.SkippedArchives))+sflMutedStyle.Render(" skipped")),
-	}
+	)
 	// Secret files scanned only appears on -secrets runs; on plain extracts
 	// SecretFiles is zero and the row is omitted to keep the recap tight.
 	if stats.SecretFiles > 0 {
@@ -1509,15 +1514,16 @@ func renderSecretsBlock(stats secrets.Stats, dbPath string, width int) []string 
 	denom := stats.New + stats.Existing + stats.DupInRun
 	value := sflUniqueStyle.Render(formatInt(int(stats.New))) +
 		sflMutedStyle.Render(tuistat.ShareParen(stats.New, denom)) +
-		sflMutedStyle.Render(" new") +
-		sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(stats.Existing))) +
-		sflMutedStyle.Render(tuistat.ShareParen(stats.Existing, denom)) +
-		sflMutedStyle.Render(" already stored")
+		sflMutedStyle.Render(" new")
 	body := []string{
 		recapRow("Secrets", value),
 	}
-	// Dupes ride a second row so share-annotated findings still fit the
-	// default 80-col box (one line with three (N.N%) tails mid-cuts).
+	// Existing (+share) and DupInRun ride continuations so share-annotated
+	// findings still fit the default 80-col box (two/three (N.N%) tails mid-cut).
+	exist := sflCountStyle.Render(formatInt(int(stats.Existing))) +
+		sflMutedStyle.Render(tuistat.ShareParen(stats.Existing, denom)) +
+		sflMutedStyle.Render(" already stored")
+	body = append(body, strings.Repeat(" ", sflRecapLabelW)+exist)
 	if stats.DupInRun > 0 {
 		dup := sflCountStyle.Render(formatInt(int(stats.DupInRun))) +
 			sflMutedStyle.Render(tuistat.ShareParen(stats.DupInRun, denom)) +

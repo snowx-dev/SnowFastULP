@@ -100,10 +100,9 @@ func TestODUnionRegenNoStragglers(t *testing.T) {
 }
 
 // End-to-end round-trip guard: a library's own output must re-ingest with zero
-// stragglers. An LPU line whose URL embeds colons has no stored form that
-// re-parses to its key, so the guard drops it at write time (counted). Whatever
-// the library does write must therefore survive a sidecar regen with no
-// leftover uniques.
+// stragglers when those lines are also acceptable to the builtin input parser.
+// Sidecar regen uses parseStored; re-ingest uses strict/loose — both must agree
+// on keys for ordinary stored colon ULP.
 func TestRoundTripGuardSelfReingestNoStragglers(t *testing.T) {
 	libDir := t.TempDir()
 
@@ -111,30 +110,23 @@ func TestRoundTripGuardSelfReingestNoStragglers(t *testing.T) {
 	writeFileContent(t, run1Input, strings.Join([]string{
 		"https://a.example.com:user1:pw1",
 		"https://b.example.com:user2:pw2",
-		`twitter.com:moraxd5:{"uid":"123","token"`, // strict-only but round-trippable -> kept
-		`jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:login.b@example.net:PassWord9:@Nv@g`, // unrepresentable -> dropped
+		`twitter.com:moraxd5:{"uid":"123","token"`, // strict-only JSON tail, still strict-parseable as stored
 	}, "\n")+"\n")
 
 	m1 := runBucketedIngest(t, libDir, run1Input, "one")
-	if got := m1.LinesUnrepresentable.Load(); got != 1 {
-		t.Fatalf("run1 LinesUnrepresentable = %d, want 1 (colon-url LPU line should be dropped)", got)
-	}
-	if got := m1.LinesRejected.Load(); got != 1 {
-		t.Errorf("run1 LinesRejected = %d, want 1 (drop folds into rejected)", got)
+	if got := m1.LinesUnrepresentable.Load(); got != 0 {
+		t.Fatalf("run1 LinesUnrepresentable = %d, want 0", got)
 	}
 
-	// part1's stored lines: the guard already excluded the unrepresentable one.
 	stored := readZstdLines(t, filepath.Join(libDir, "sfu_one.txt.zst"))
 	if len(stored) != 3 {
-		t.Fatalf("part1 stored %d lines, want 3 (unrepresentable line must not be written)", len(stored))
+		t.Fatalf("part1 stored %d lines, want 3", len(stored))
 	}
 
-	// drop the sidecar to force a union regen of part1 on the next run.
 	if err := os.RemoveAll(filepath.Join(libDir, idxSubdirName)); err != nil {
 		t.Fatal(err)
 	}
 
-	// re-ingest part1's own contents -> every stored line must dedup.
 	run2Input := filepath.Join(t.TempDir(), "in2.txt")
 	writeFileContent(t, run2Input, strings.Join(stored, "\n")+"\n")
 	m2 := runBucketedIngest(t, libDir, run2Input, "two")
@@ -143,6 +135,31 @@ func TestRoundTripGuardSelfReingestNoStragglers(t *testing.T) {
 	}
 	if got := m2.LinesSkippedByDest.Load(); got != int64(len(stored)) {
 		t.Errorf("run2 LinesSkippedByDest = %d, want %d", got, len(stored))
+	}
+}
+
+// Custom/messy credentials that only parseStored can re-read must still be
+// indexed on regen so -od dedup sees their keys (even if a later strict
+// re-ingest of the raw stored line would reject them).
+func TestParseStoredIndexesSpacedLoginInLibrary(t *testing.T) {
+	libDir := t.TempDir()
+	past := filepath.Join(libDir, "sfu_old.txt.zst")
+	writeZstdArchive(t, past, []string{
+		"example.com:user with space:pw",
+		"example.com:cleanuser:pw",
+	})
+
+	// force regen by ingesting something else with -od
+	in := filepath.Join(t.TempDir(), "in.txt")
+	writeFileContent(t, in, "other.example.com:a:b\n")
+	_ = runBucketedIngest(t, libDir, in, "new")
+
+	hdr, err := readSidecarHeader(sidecarPathForArchive(past))
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if hdr.keyCount != 2 {
+		t.Fatalf("sidecar keyCount = %d, want 2 (spaced login must be indexed)", hdr.keyCount)
 	}
 }
 

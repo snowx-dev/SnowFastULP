@@ -589,20 +589,41 @@ func renderDedupHeaderBadges(r *ulpengine.Resolved) string {
 	if r.Cfg.Compress {
 		badges = append(badges, "compressing")
 	}
+	return joinHeaderBadges(badges)
+}
+
+// joinHeaderBadges renders " · a · b". Plain badges get mutedStyle; badges that
+// are already lipgloss-styled (DRY RUN, -loose ignored, …) keep their own SGR.
+// Shared by shard + dedup headers.
+func joinHeaderBadges(badges []string) string {
 	if len(badges) == 0 {
 		return ""
 	}
 	var out strings.Builder
-	for i, b := range badges {
+	for _, b := range badges {
 		out.WriteString(" ")
-		// first badge (DRY RUN) is already styled; the rest get the muted dot
-		if i == 0 && r.Cfg.DryRun {
+		// already lipgloss-styled: keep as-is
+		if strings.Contains(b, "\x1b[") {
 			out.WriteString("· " + b)
 			continue
 		}
 		out.WriteString(mutedStyle.Render("· " + b))
 	}
 	return out.String()
+}
+
+// parserBadges describes the active input parser in the shard (PARSING)
+// header: custom mode gets a muted "parser: …" badge; a supplied-but-ignored
+// -loose gets a warn badge so the misconfig is visible without a hard error.
+func parserBadges(r *ulpengine.Resolved) string {
+	if r == nil || r.ParserDesc == "" {
+		return ""
+	}
+	badges := []string{"parser: " + r.ParserDesc}
+	if r.LooseIgnored {
+		badges = append(badges, warnStyle.Render("-loose ignored"))
+	}
+	return joinHeaderBadges(badges)
 }
 
 func shardInputsFullyRead(m *ulpengine.Metrics, r *ulpengine.Resolved) bool {
@@ -1048,7 +1069,11 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 		}
 	}
 
-	header := renderPhaseHeader(spinnerStyle.Render(spinnerFrame(now)), renderStep1PhaseTag(r, m), elapsed, width)
+	phaseTag := renderStep1PhaseTag(r, m)
+	headerLeft := indentSpace + spinnerStyle.Render(spinnerFrame(now)) + "  " + phaseStyle.Render(phaseTag)
+	headerLeft += parserBadges(r)
+	headerRight := timeStyle.Render(formatDuration(elapsed))
+	header := renderHeader(headerLeft, headerRight, width)
 
 	chunksDigits := numDigits(m.ChunksTotal.Load())
 	chunkProgress, chunksTotal := shardChunkProgress(m, r)

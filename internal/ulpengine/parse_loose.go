@@ -66,15 +66,9 @@ func looseExtrasTrimmed(line string) (host, url, login, password string, ok bool
 	}
 }
 
-// parseUnion is the index/regen parser: it admits a key for any line that
-// EITHER strict parse() OR loose parseLoose() would accept. strict runs first
-// WITHOUT the isLikelyJunk gate (the gate is a loose-mode recall/precision
-// heuristic, not an index-fidelity rule), so strict-only creds like
-// host:user:{"uid":...} are indexed; the loose-only colon shapes then run
-// behind the gate. This guarantees a part's sidecar can never miss a line the
-// archive actually stored, regardless of the mode it was written/ingested in.
-// Keys match parse() exactly for any line both accept (strict branch reuses it,
-// and parseLoose itself runs strict-first), so dedup stays consistent.
+// parseUnion is the raw-ingest index helper: strict OR loose (with junk gate on
+// the loose extras path). Sidecar regen and FormatRecordStable verification use
+// parseStored instead — trusted archive lines must not be junk-filtered.
 func parseUnion(line string) (host, url, login, password string, ok bool) {
 	if h, u, l, p, ok := parse(line); ok {
 		return h, u, l, p, true

@@ -54,6 +54,8 @@ func renderHelp(bin string) string {
 		{"-temp-dir", "PATH", "Store temp files in this folder."},
 		{"-split-zst", "N", "Split compressed output every N unique lines."},
 		{"-loose", "", "Accept more input formats, with less strict parsing."},
+		{"-parse-delims", "SEP", "Replace the parser: split lines as url<SEP>login<SEP>password (exactly 3 fields)."},
+		{"-parse-rules", "FILE", "Replace the parser: regexps with named groups url|host/login/password, one per line."},
 		{"-no-encoding-sniff", "", "Skip encoding checks and read files as UTF-8."},
 	}
 	devs := []argDef{

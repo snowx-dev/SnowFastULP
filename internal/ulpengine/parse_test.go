@@ -152,9 +152,9 @@ func TestParseAndroidCredentials(t *testing.T) {
 		if string(out) != c.in {
 			t.Fatalf("android output = %q, want verbatim %q", out, c.in)
 		}
-		h2, _, l2, p2, ok2 := parseUnion(string(out))
+		h2, _, l2, p2, ok2 := parseStored(string(out))
 		if !ok2 || lf.HashKey(h2, l2, p2) != lf.HashKey(host, login, password) {
-			t.Fatalf("android %q does not round-trip via parseUnion", c.in)
+			t.Fatalf("android %q does not round-trip via parseStored", c.in)
 		}
 	}
 }
@@ -179,6 +179,25 @@ func TestParseAcceptsMaxPassword(t *testing.T) {
 	in := "https://a.example.com:user:" + strings.Repeat("z", 64)
 	if _, _, _, _, ok := parse(in); !ok {
 		t.Fatalf("parse with 64-byte password should be valid")
+	}
+}
+
+func TestFinishParseRejectsColonInLogin(t *testing.T) {
+	if _, _, _, _, ok := finishParse("example.com", "user:name", "pw"); ok {
+		t.Fatal("login containing ':' must reject (HashKey field ambiguity)")
+	}
+	p, _ := NewDelimParser("|")
+	if _, _, _, _, ok := p.Parse("example.com|user:name|pw"); ok {
+		t.Fatal("DelimParser must reject colon in login via finishParse")
+	}
+}
+
+func TestFinishParseRejectsEmptyLoginPassword(t *testing.T) {
+	if _, _, _, _, ok := finishParse("example.com", "", "pw"); ok {
+		t.Fatal("empty login must reject")
+	}
+	if _, _, _, _, ok := finishParse("example.com", "user", ""); ok {
+		t.Fatal("empty password must reject")
 	}
 }
 

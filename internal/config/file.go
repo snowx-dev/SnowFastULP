@@ -28,6 +28,8 @@ type SFUSection struct {
 	Del             bool   `toml:"del"`
 	NoURI           bool   `toml:"no_uri"`
 	Loose           bool   `toml:"loose"`
+	ParseDelims     string `toml:"parse_delims"`
+	ParseRules      string `toml:"parse_rules"`
 	NoEncodingSniff bool   `toml:"no_encoding_sniff"`
 	Debug           bool   `toml:"debug"`
 	DebugReject     bool   `toml:"debug_reject"`

@@ -196,7 +196,7 @@ type shardConfig struct {
 	chunkBytes int64
 	bufBytes   int
 	noURI      bool
-	loose      bool
+	parser     LineParser
 	reject     *RejectRecorder
 }
 
@@ -223,6 +223,9 @@ func shard(ctx context.Context, cfg shardConfig, m *Metrics) (*shardResult, erro
 	}
 	if cfg.bufBytes <= 0 {
 		cfg.bufBytes = bucketBufBytes(cfg.buckets)
+	}
+	if cfg.parser == nil {
+		cfg.parser = defaultParser(false)
 	}
 	nameFn := cfg.bucketName
 	if nameFn == nil {
@@ -275,7 +278,7 @@ func shard(ctx context.Context, cfg shardConfig, m *Metrics) (*shardResult, erro
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runShardWorker(ctx, jobCh, writers, cfg.noURI, cfg.loose, cfg.reject, m); err != nil {
+			if err := runShardWorker(ctx, jobCh, writers, cfg.noURI, cfg.parser, cfg.reject, m); err != nil {
 				select {
 				case errCh <- err:
 					cancel()
@@ -340,7 +343,7 @@ func newShardWorkState() *shardWorkState {
 
 // pulls chunks off jobCh, scans + parses + appends. any err returns
 // immediately, caller cancels ctx to drain peers
-func runShardWorker(ctx context.Context, jobCh <-chan chunkJob, writers []*bucketWriter, noURI, loose bool, rr *RejectRecorder, m *Metrics) error {
+func runShardWorker(ctx context.Context, jobCh <-chan chunkJob, writers []*bucketWriter, noURI bool, p LineParser, rr *RejectRecorder, m *Metrics) error {
 	mask := uint64(len(writers) - 1)
 	usePow2 := mask != 0 && (uint64(len(writers))&(uint64(len(writers))-1)) == 0
 	if m != nil {
@@ -361,7 +364,7 @@ func runShardWorker(ctx context.Context, jobCh <-chan chunkJob, writers []*bucke
 			if m != nil {
 				m.BusyWorkers.Add(1)
 			}
-			err := scanChunk(ws, job, writers, usePow2, mask, noURI, loose, rr, m)
+			err := scanChunk(ws, job, writers, usePow2, mask, noURI, p, rr, m)
 			if m != nil {
 				m.BusyWorkers.Add(-1)
 				if err == nil {
@@ -378,7 +381,7 @@ func runShardWorker(ctx context.Context, jobCh <-chan chunkJob, writers []*bucke
 // reads [job.start, job.end) of job.path, parses each complete line.
 // memory-bounded: one bufio.Reader per worker reused via Reset,
 // shared lineFormatter, no per-line allocs on success
-func scanChunk(ws *shardWorkState, job chunkJob, writers []*bucketWriter, usePow2 bool, mask uint64, noURI, loose bool, rr *RejectRecorder, m *Metrics) error {
+func scanChunk(ws *shardWorkState, job chunkJob, writers []*bucketWriter, usePow2 bool, mask uint64, noURI bool, p LineParser, rr *RejectRecorder, m *Metrics) error {
 	f, err := os.Open(job.path)
 	if err != nil {
 		return err
@@ -461,7 +464,7 @@ func scanChunk(ws *shardWorkState, job chunkJob, writers []*bucketWriter, usePow
 					if rr != nil {
 						rr.Record(absPath, strconv.FormatInt(lineStart, 10), "<line too long>")
 					}
-				} else if err := processLine(ws, line, writers, usePow2, mask, noURI, loose, m, absPath, lineStart, rr); err != nil {
+				} else if err := processLine(ws, line, writers, usePow2, mask, noURI, p, m, absPath, lineStart, rr); err != nil {
 					return err
 				}
 			}
@@ -483,7 +486,7 @@ func scanChunk(ws *shardWorkState, job chunkJob, writers []*bucketWriter, usePow
 
 // validates one line, routes record to bucket. all consumed lines bump
 // counters incl rejects. posBytes formatted lazily in reject branch
-func processLine(ws *shardWorkState, line string, writers []*bucketWriter, usePow2 bool, mask uint64, noURI, loose bool, m *Metrics, srcAbs string, posBytes int64, rr *RejectRecorder) error {
+func processLine(ws *shardWorkState, line string, writers []*bucketWriter, usePow2 bool, mask uint64, noURI bool, p LineParser, m *Metrics, srcAbs string, posBytes int64, rr *RejectRecorder) error {
 	trimmed := strings.TrimRight(line, "\r\n")
 	if trimmed == "" {
 		return nil
@@ -491,7 +494,7 @@ func processLine(ws *shardWorkState, line string, writers []*bucketWriter, usePo
 	if m != nil {
 		m.LinesRead.Add(1)
 	}
-	host, url, login, password, ok := parseFor(trimmed, loose)
+	host, url, login, password, ok := p.Parse(trimmed)
 	if !ok {
 		if m != nil {
 			m.LinesRejected.Add(1)

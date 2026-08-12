@@ -147,6 +147,77 @@ func TestRenderStep1PhaseTagSwitchesAfterInputsRead(t *testing.T) {
 	}
 }
 
+// custom parser shows a muted badge in the PARSING header; a supplied-but-
+// ignored -loose surfaces a warn badge. Builtin parser shows neither.
+func TestParserBadges(t *testing.T) {
+	forceTrueColor(t) // need real SGR so muted-vs-warn nesting is observable
+	builtin := &ulpengine.Resolved{}
+	if got := parserBadges(builtin); got != "" {
+		t.Fatalf("builtin parser must not badge, got %q", got)
+	}
+	delim := &ulpengine.Resolved{ParserDesc: "delims '|'"}
+	if got := parserBadges(delim); !strings.Contains(got, "parser: delims '|'") {
+		t.Fatalf("missing parser badge, got %q", got)
+	}
+	rules := &ulpengine.Resolved{ParserDesc: "rules (12)", LooseIgnored: true}
+	got := parserBadges(rules)
+	if !strings.Contains(got, "parser: rules (12)") || !strings.Contains(got, "-loose ignored") {
+		t.Fatalf("want parser + loose-ignored badges, got %q", got)
+	}
+	// parser info stays muted; warn badge must not be nested inside mutedStyle
+	if !strings.Contains(got, mutedStyle.Render("· parser: rules (12)")) {
+		t.Fatalf("parser badge should be muted-wrapped, got %q", got)
+	}
+	warn := warnStyle.Render("-loose ignored")
+	mutedDotWarn := mutedStyle.Render("· " + warn)
+	if strings.Contains(got, mutedDotWarn) {
+		t.Fatalf("-loose ignored was muted-wrapped: %q", got)
+	}
+	if !strings.Contains(got, "· "+warn) && !strings.Contains(got, warn) {
+		t.Fatalf("missing warn badge, got %q", got)
+	}
+	// nil Resolved is a safe no-op
+	if got := parserBadges(nil); got != "" {
+		t.Fatalf("nil Resolved must not badge, got %q", got)
+	}
+}
+
+// parser badges must sit outside phaseStyle (same composition as dedup header
+// badges). Folding them into renderPhaseHeader's phase arg paints them cyan.
+func TestRenderShardLinesParserBadgesOutsidePhaseStyle(t *testing.T) {
+	forceTrueColor(t)
+	m := &ulpengine.Metrics{}
+	m.ChunksTotal.Store(1)
+	r := &ulpengine.Resolved{
+		TotalInputs:  1,
+		Workers:      1,
+		DedupWorkers: 1,
+		BucketCount:  16,
+		ParserDesc:   "rules (12)",
+		LooseIgnored: true,
+	}
+	now := time.Date(2026, 5, 9, 22, 30, 0, 0, time.UTC)
+	lines := renderShardLines(now, time.Second, m, r, 10, 1, 0, 0, 0, 120)
+	if len(lines) < 2 {
+		t.Fatalf("want header line, got %d lines", len(lines))
+	}
+	header := lines[1]
+	tag := renderStep1PhaseTag(r, m)
+	badges := parserBadges(r)
+	if badges == "" {
+		t.Fatal("expected parser badges")
+	}
+	if strings.Contains(header, phaseStyle.Render(tag+badges)) {
+		t.Fatal("parser badges were folded into phaseStyle")
+	}
+	if !strings.Contains(header, phaseStyle.Render(tag)) {
+		t.Fatal("phase tag missing phaseStyle")
+	}
+	if !strings.Contains(header, badges) {
+		t.Fatalf("parser badges missing from header: %q", header)
+	}
+}
+
 func TestRenderShardLinesFitsWidth(t *testing.T) {
 	m := &ulpengine.Metrics{}
 	m.BytesRead.Store(1 << 30)

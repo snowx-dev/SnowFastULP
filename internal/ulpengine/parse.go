@@ -112,6 +112,14 @@ func matchLPU(line string) (url, login, password string, ok bool) {
 
 // shared post-match hygiene for ULP and LPU
 func finishParse(url, login, password string) (host, urlOut, loginOut, passwordOut string, ok bool) {
+	if login == "" || password == "" {
+		return "", "", "", "", false
+	}
+	// login must not contain ':' so FormatRecord / HashKey stay field-unambiguous
+	// (password may contain colons).
+	if strings.ContainsRune(login, ':') {
+		return "", "", "", "", false
+	}
 	host = url
 	if i := strings.Index(host, "://"); i >= 0 {
 		host = host[i+3:]
@@ -224,6 +232,13 @@ func (lf *lineFormatter) FormatRecord(host, url, login, password string, noURI b
 	if noURI {
 		urlPart = host
 	}
+	// Digit login + colon in password collides with host:port:user:pass on the
+	// wire (example.com:12345:a:b:c). Append '/' so the stored form is
+	// example.com/:12345:a:b:c — finishParse still yields host example.com.
+	if allDigits(login) && strings.ContainsRune(password, ':') &&
+		!strings.ContainsAny(urlPart, "/?#") {
+		urlPart += "/"
+	}
 	lf.out.Reset()
 	lf.out.Grow(len(urlPart) + len(login) + len(password) + 2)
 	lf.out.WriteString(urlPart)
@@ -235,32 +250,24 @@ func (lf *lineFormatter) FormatRecord(host, url, login, password string, noURI b
 }
 
 // FormatRecordStable returns the bytes to write for a parsed record, choosing a
-// representation that re-parses (via parseUnion, the regen parser) back to the
-// same dedup key. It prefers the full url form, falls back to
-// host:login:password, and reports ok=false when neither round-trips so the
-// caller can drop the line. Without this, a stored line whose url/host embeds
-// colons (e.g. an LPU line login:pw:scheme://h/:a:b) can fail to re-parse on a
-// sidecar regen, leaving its key out of the index -> re-ingest straggler.
+// representation that re-parses (via parseStored, the regen/archive reader)
+// back to the same fields (host, login, password). It prefers the full url
+// form, falls back to host:login:password, and reports ok=false when neither
+// round-trips so the caller can drop the line. Without this, a stored line can
+// fail to re-parse on sidecar regen, leaving its key out of the index ->
+// re-ingest straggler.
 //
-// The verifying re-parse only runs when the output has more than two colons;
-// a clean host:login:password (<=2 colons) always round-trips (strict matches
-// it, or loose's 3-field path calls the same finishParse), so the common hot
-// path pays nothing beyond a colon scan.
+// Verification is field-faithful (not HashKey-only): HashKey concatenates with
+// ':' and cannot distinguish login "user:name" from login "user" + password
+// "name:…". Every candidate is verified — including clean ≤2-colon lines.
 func (lf *lineFormatter) FormatRecordStable(host, url, login, password string, noURI bool) ([]byte, bool) {
 	out := lf.FormatRecord(host, url, login, password, noURI)
-	if !colonAmbiguous(out) {
-		return out, true
-	}
-	want := lf.HashKey(host, login, password)
-	if k, ok := lf.reparseKey(out); ok && k == want {
+	if lf.roundTrips(out, host, login, password) {
 		return out, true
 	}
 	if !noURI {
 		outHost := lf.FormatRecord(host, url, login, password, true)
-		if !colonAmbiguous(outHost) {
-			return outHost, true
-		}
-		if k, ok := lf.reparseKey(outHost); ok && k == want {
+		if lf.roundTrips(outHost, host, login, password) {
 			return outHost, true
 		}
 	}
@@ -277,11 +284,17 @@ func (lf *lineFormatter) FormatRecordStableLine(host, url, login, password strin
 	return lf.out.Bytes(), true
 }
 
-// reparseKey runs the regen parser over a serialized record and returns its
-// dedup key, so callers can verify a written line will round-trip. The string
-// copy only happens on the rare ambiguous (>2 colon) path.
+// roundTrips reports whether serialized re-parses via parseStored to the same
+// host/login/password fields that were formatted.
+func (lf *lineFormatter) roundTrips(serialized []byte, host, login, password string) bool {
+	h, _, l, p, ok := parseStored(string(serialized))
+	return ok && h == host && l == login && p == password
+}
+
+// reparseKey runs the regen/archive parser over a serialized record and returns
+// its dedup key (used by tests and callers that only need the digest).
 func (lf *lineFormatter) reparseKey(serialized []byte) (uint64, bool) {
-	host, _, login, password, ok := parseUnion(string(serialized))
+	host, _, login, password, ok := parseStored(string(serialized))
 	if !ok {
 		return 0, false
 	}

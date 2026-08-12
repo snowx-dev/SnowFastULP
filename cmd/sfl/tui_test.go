@@ -93,6 +93,34 @@ func TestRecapCountRowsUniqueSharesOmitWhenWhole(t *testing.T) {
 	}
 }
 
+// Unique emitted+duplicates shares on one row mid-cut at default 80-col box
+// (boxInner 66). Duplicates must ride a continuation like Secrets dupes.
+func TestRecapCountRowsUniqueSharesSurviveDefaultBox(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	const width = 80
+	inner := boxInner(width)
+	if inner != 66 {
+		t.Fatalf("boxInner(%d) = %d, want 66 (test assumption)", width, inner)
+	}
+	stats := sflog.ExtractStats{
+		Logs: 1, Credentials: 2_000_000_000,
+		Emitted: 1_000_000_000, Duplicates: 1_000_000_000,
+		FilesScanned: 1, ArchivesScanned: 1,
+	}
+	joined := strings.Join(sflGradientBox(recapCountRows(stats), width, gradStart, gradEnd), "\n")
+	for _, want := range []string{"Unique", "(50.0%)", "duplicates", "1,000,000,000"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("boxed Unique missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("boxed Unique must not be ellipsized by padOrTrim:\n%s", joined)
+	}
+}
+
 func TestRenderIngestLibraryRowsSharesVsEmitted(t *testing.T) {
 	joined := strings.Join(renderIngestLibraryRows(5, 3, 2, 10, 72, false), "\n")
 	for _, want := range []string{"(50.0%)", "(30.0%)", "(20.0%)", "Added", "rejected", "already in library"} {
@@ -108,6 +136,31 @@ func TestRenderSecretsBlockShares(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("secrets block missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+// New+Existing shares on one Secrets row mid-cut at default width; Existing
+// must ride a continuation (DupInRun already did).
+func TestRenderSecretsBlockSharesSurviveDefaultBox(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	const width = 80
+	inner := boxInner(width)
+	if inner != 66 {
+		t.Fatalf("boxInner(%d) = %d, want 66 (test assumption)", width, inner)
+	}
+	joined := strings.Join(renderSecretsBlock(secrets.Stats{
+		New: 1_000_000_000, Existing: 1_000_000_000, DupInRun: 1_000_000_000,
+	}, "", width), "\n")
+	for _, want := range []string{"new", "already stored", "dupes", "(33.3%)"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("boxed Secrets missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("boxed Secrets must not be ellipsized by padOrTrim:\n%s", joined)
 	}
 }
 

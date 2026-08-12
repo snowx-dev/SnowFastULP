@@ -38,6 +38,19 @@
                                # bare host:user:pw, LPU; less precise.
 # no_encoding_sniff = false   # skip BOM detection; treat all inputs as UTF-8.
 
+# Custom input parser (replaces the built-in parser entirely for this run).
+# WARNING: custom rules change which lines are accepted/rejected. -loose is
+# IGNORED while either is set (sfu warns). Output is still canonical
+# colon-separated ULP (url:login:password), so -od libraries, sidecars and
+# sfs keep working. Set at most ONE of these:
+# parse_delims = "|"          # split every line as url<sep>login<sep>password,
+                               # exactly 3 fields (a password containing the
+                               # separator rejects the line).
+# parse_rules  = "./rules.txt"  # one regexp per line; first pattern whose
+                               # named groups url|host + login + password all
+                               # capture non-empty imports the line. Resolved
+                               # relative to this config file.
+
 # Concurrency / tuning (0 = auto for all three)
 # workers  = 0                # phase-1 parser goroutines.
 # dedup    = 0                # phase-2 dedup goroutines.

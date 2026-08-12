@@ -32,10 +32,15 @@ type Config struct {
 	RunStarted    time.Time
 	// shared per-run id, "<YYYYMMDD>_<runID>". empty in tests that
 	// bypass main, chunkedZstdSink then falls back to date-only
-	RunStamp        string
-	DeleteInputs    bool
-	NoURI           bool
-	Loose           bool
+	RunStamp     string
+	DeleteInputs bool
+	NoURI        bool
+	Loose        bool
+	// Parser, when set, replaces the built-in strict/loose parser for input
+	// interpretation (custom delimiters or a rules file). Loose is ignored.
+	// Nil = builtin behavior. Stored output stays canonical colon ULP either
+	// way; sidecar regen uses parseStored (same as FormatRecordStable verify).
+	Parser          LineParser
 	NoEncodingSniff bool // -no-encoding-sniff, forces UTF-8 path
 	DestDedup       bool // -od
 	DestDedupDir    string
@@ -85,6 +90,19 @@ type Resolved struct {
 	OdMetrics *ODMetrics
 	// immutable phase 0 outcome for end-of-run recap, nil w/o -od
 	OdResult *ODResult
+	// custom-parser badge text for the TUI header ("" = builtin parser), e.g.
+	// "delims '|'" or "rules (12)". LooseIgnored flips a discreet warning.
+	ParserDesc   string
+	LooseIgnored bool
+}
+
+// lineParser is the effective input parser: custom when set, else builtin
+// strict/loose. Centralized so shard and fast-path can never disagree.
+func (r *Resolved) lineParser() LineParser {
+	if r.Cfg.Parser != nil {
+		return r.Cfg.Parser
+	}
+	return defaultParser(r.Cfg.Loose)
 }
 
 // fills defaults, decides fast-path eligibility. no I/O beyond stat+meminfo
@@ -344,7 +362,7 @@ func runBucketed(ctx context.Context, r *Resolved, m *Metrics) error {
 		workers:    r.Workers,
 		chunkBytes: r.chunkBytes,
 		noURI:      r.Cfg.NoURI,
-		loose:      r.Cfg.Loose,
+		parser:     r.lineParser(),
 		reject:     r.Cfg.Reject,
 	}, m)
 	if err != nil {
@@ -499,7 +517,7 @@ func runFastPath(ctx context.Context, r *Resolved, m *Metrics) error {
 			return ctx.Err()
 		default:
 		}
-		if err := fastPathFile(p, seen, sink, br, lf, r.Cfg.NoURI, r.Cfg.Loose, r.Cfg.NoEncodingSniff, m, r.Cfg.Reject); err != nil {
+		if err := fastPathFile(p, seen, sink, br, lf, r.Cfg.NoURI, r.lineParser(), r.Cfg.NoEncodingSniff, m, r.Cfg.Reject); err != nil {
 			return err
 		}
 		if m != nil {
@@ -526,7 +544,7 @@ func runFastPath(ctx context.Context, r *Resolved, m *Metrics) error {
 // streams one file, writes first-seen records. shared map/sink/reader/lf
 // across files so hot loop is alloc-free after warmup. BOM sniff routes
 // UTF-16 via transform.Reader so loop sees UTF-8
-func fastPathFile(path string, seen map[uint64]struct{}, sink lineSink, br *bufio.Reader, lf *lineFormatter, noURI, loose, noEncodingSniff bool, m *Metrics, rr *RejectRecorder) error {
+func fastPathFile(path string, seen map[uint64]struct{}, sink lineSink, br *bufio.Reader, lf *lineFormatter, noURI bool, p LineParser, noEncodingSniff bool, m *Metrics, rr *RejectRecorder) error {
 	absPath, aerr := filepath.Abs(path)
 	if aerr != nil {
 		absPath = path
@@ -591,7 +609,7 @@ func fastPathFile(path string, seen map[uint64]struct{}, sink lineSink, br *bufi
 					if m != nil {
 						m.LinesRead.Add(1)
 					}
-					host, url, login, password, ok := parseFor(trimmed, loose)
+					host, url, login, password, ok := p.Parse(trimmed)
 					if !ok {
 						if m != nil {
 							m.LinesRejected.Add(1)

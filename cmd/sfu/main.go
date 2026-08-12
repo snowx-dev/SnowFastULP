@@ -178,6 +178,8 @@ func main() {
 	delSrc := flag.Bool("del", false, "after success, delete all parsed input .txt files (irreversible)")
 	noURI := flag.Bool("no-uri", false, "emit host:login:password (drop URL path/query)")
 	loose := flag.Bool("loose", false, "high-recall parser: accepts host:port:user:pw, bare host:user:pw, LPU; less precise output")
+	parseDelims := flag.String("parse-delims", "", "replace built-in parser: split each line as url<SEP>login<SEP>password (exactly 3 fields; ignores -loose)")
+	parseRules := flag.String("parse-rules", "", "replace built-in parser: file of regexps, one per line, with named groups url|host, login, password (ignores -loose)")
 	noEncodingSniff := flag.Bool("no-encoding-sniff", false, "skip BOM detection; treat all inputs as UTF-8 (debug / A-B benchmark)")
 	debug := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	debugReject := flag.Bool("debug-reject", false, "append parser-rejected lines to a file in CWD")
@@ -202,6 +204,7 @@ func main() {
 		SplitZst: splitZst,
 		NoTUI:    noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
 		Loose: loose, NoEncodingSniff: noEncodingSniff,
+		ParseDelims: parseDelims, ParseRules: parseRules,
 		Debug: debug, DebugReject: debugReject,
 	}); err != nil {
 		fatalf("%v", err)
@@ -286,6 +289,38 @@ func main() {
 		}
 	}
 
+	// custom input parser: -parse-delims XOR -parse-rules fully replaces the
+	// built-in strict/loose parser. Stored output stays canonical colon ULP.
+	var (
+		parser       ulpengine.LineParser
+		parserDesc   string // TUI badge text, e.g. "delims '|'" or "rules (12)"
+		looseIgnored bool
+	)
+	if *parseDelims != "" && *parseRules != "" {
+		fatalf("-parse-delims and -parse-rules are mutually exclusive")
+	}
+	if *parseDelims != "" {
+		p, err := ulpengine.NewDelimParser(*parseDelims)
+		if err != nil {
+			fatalf("parse delimiters: %v", err)
+		}
+		parser = p
+		parserDesc = fmt.Sprintf("delims %q", *parseDelims)
+	} else if *parseRules != "" {
+		p, n, err := ulpengine.NewRegexRulesParser(*parseRules)
+		if err != nil {
+			fatalf("parse rules: %v", err)
+		}
+		parser = p
+		parserDesc = fmt.Sprintf("rules (%d)", n)
+	}
+	if parser != nil && *loose {
+		// custom mode replaces the built-in parser wholesale; -loose has no
+		// effect. Discreet notice (TUI badge + one stderr line), not an error.
+		looseIgnored = true
+		fmt.Fprintf(os.Stderr, "warning: -loose ignored (custom parser: %s)\n", parserDesc)
+	}
+
 	cfg := ulpengine.Config{
 		Inputs:          inputs,
 		Output:          absOut,
@@ -301,6 +336,7 @@ func main() {
 		DeleteInputs:    *delSrc,
 		NoURI:           *noURI,
 		Loose:           *loose,
+		Parser:          parser,
 		NoEncodingSniff: *noEncodingSniff,
 		DestDedup:       destDedup,
 		DestDedupDir:    outDirAbs,
@@ -311,6 +347,9 @@ func main() {
 		fatalf("config: %v", err)
 	}
 	ulpengine.EnsureDestDedupMetrics(r)
+	// custom-parser metadata for the TUI header badges.
+	r.ParserDesc = parserDesc
+	r.LooseIgnored = looseIgnored
 
 	var dbg *ulpengine.DebugLog
 	var rr *ulpengine.RejectRecorder

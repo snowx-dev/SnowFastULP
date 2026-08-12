@@ -54,6 +54,8 @@ type SFUFlags struct {
 	NoTUI, Zst, Del, NoURI  *bool
 	Loose, NoEncodingSniff  *bool
 	Debug, DebugReject      *bool
+	ParseDelims             *string
+	ParseRules              *string
 }
 
 // ApplySFU applies unvisited config values to sfu flags.
@@ -117,6 +119,20 @@ func (f File) ApplySFU(v Visited, fl SFUFlags) error {
 	}
 	if !v.set("loose") && f.SFU.Loose {
 		*fl.Loose = true
+	}
+	// Any CLI custom-parser flag (-parse-delims / -parse-rules) suppresses
+	// both config pulls so CLI wins the XOR pair (mirrors -o/-od/-odr).
+	if !v.set("parse-delims") && !v.set("parse-rules") {
+		if f.SFU.ParseDelims != "" && fl.ParseDelims != nil {
+			*fl.ParseDelims = f.SFU.ParseDelims
+		}
+		if f.SFU.ParseRules != "" && fl.ParseRules != nil {
+			p, err := ResolvePath(f.baseDir, f.SFU.ParseRules)
+			if err != nil {
+				return err
+			}
+			*fl.ParseRules = p
+		}
 	}
 	if !v.set("no-encoding-sniff") && f.SFU.NoEncodingSniff {
 		*fl.NoEncodingSniff = true

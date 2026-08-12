@@ -894,11 +894,10 @@ func processPartTask(ctx context.Context, t archivePart, decoderConcurrency int,
 	}
 
 	streamErr := streamArchiveLines(ctx, t.path, decoderConcurrency, ws, func(line string) error {
-		// union (strict OR loose) so the index covers every line the archive
-		// stored, regardless of the mode it was written/ingested in. loose
-		// alone dropped strict-only creds (e.g. host:user:{"uid":...}) and
-		// caused re-ingest stragglers.
-		host, _, login, password, ok := parseUnion(line)
+		// parseStored is the archive reader: FormatRecord inverse + strict,
+		// without isLikelyJunk. Matches FormatRecordStable's reparseKey so
+		// every written line can be indexed.
+		host, _, login, password, ok := parseStored(line)
 		if !ok {
 			return nil
 		}

@@ -63,7 +63,12 @@ const (
 	// v3: android:// creds are now parsed and keyed on the full line (see
 	// parseAndroid). host derivation changed for that scheme, so every existing
 	// -od index regenerates once to pick up the newly-admitted keys.
-	parserVersion uint64 = 3
+	//
+	// v4: sidecar regen + FormatRecordStable verify use parseStored (FormatRecord
+	// inverse, no isLikelyJunk). finishParse rejects ':' in login and empty
+	// login/password. Always-verify replaces the unsound ≤2-colon skip so
+	// custom-parser lines (spaced/$-logins, etc.) index correctly.
+	parserVersion uint64 = 4
 )
 
 // in-RAM sort budget per sidecar writer before spilling to external-merge runs.
