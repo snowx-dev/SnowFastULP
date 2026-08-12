@@ -15,6 +15,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
+	"github.com/snowx-dev/SnowFastULP/internal/tuistat"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
@@ -831,17 +832,28 @@ func renderRemovedRows(bullets []string, maxInnerWidth int) []string {
 	// try single-line first. tuiVisibleWidth strips ANSI styling
 	singleLineRest := strings.Join(bullets, sep)
 	totalWidth := tuiVisibleWidth(label) + tuiVisibleWidth(singleLineRest)
-	if totalWidth <= maxInnerWidth {
+	if maxInnerWidth <= 0 || totalWidth <= maxInnerWidth {
 		return []string{labelStyle.Render(label) + singleLineRest}
 	}
 
-	// multi-line fallback, one bullet per row. continuation rows
-	// indented to stack vertically under the bullet column
+	// multi-line fallback, one bullet per row. drop indent when indent+bullet
+	// would still overflow (Merge-style), so padOrTrim can't mid-cut shares.
 	indent := strings.Repeat(" ", tuiVisibleWidth(label))
+	fits := func(s string) bool {
+		return tuiVisibleWidth(s) <= maxInnerWidth
+	}
+	first := labelStyle.Render(label) + bullets[0]
+	if !fits(first) {
+		first = bullets[0]
+	}
 	rows := make([]string, 0, len(bullets))
-	rows = append(rows, labelStyle.Render(label)+bullets[0])
+	rows = append(rows, first)
 	for _, b := range bullets[1:] {
-		rows = append(rows, indent+b)
+		cont := indent + b
+		if !fits(cont) {
+			cont = b
+		}
+		rows = append(rows, cont)
 	}
 	return rows
 }
@@ -1196,9 +1208,11 @@ func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.R
 	uniq := m.LinesUnique.Load()
 	rej := m.LinesRejected.Load()
 	skippedByDest := m.LinesSkippedByDest.Load()
+	accepted := m.LinesAccepted.Load()
+	read := m.LinesRead.Load()
 	// genuine within-run dups = parsed cleanly - unique - library hits.
 	// w/o dest subtraction a -od run double-counts library hits
-	dup := m.LinesAccepted.Load() - uniq - skippedByDest
+	dup := accepted - uniq - skippedByDest
 	if dup < 0 {
 		dup = 0
 	}
@@ -1250,15 +1264,21 @@ func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.R
 	var removedBullets []string
 	if rej > 0 {
 		removedBullets = append(removedBullets,
-			warnStyle.Render(formatCount(rej))+" "+mutedStyle.Render("rejected"))
+			warnStyle.Render(formatCount(rej))+
+				mutedStyle.Render(tuistat.ShareParen(rej, read))+
+				" "+mutedStyle.Render("rejected"))
 	}
 	if dup > 0 {
 		removedBullets = append(removedBullets,
-			countStyle.Render(formatCount(dup))+" "+mutedStyle.Render("duplicates"))
+			countStyle.Render(formatCount(dup))+
+				mutedStyle.Render(tuistat.ShareParen(dup, accepted))+
+				" "+mutedStyle.Render("duplicates"))
 	}
 	if skippedByDest > 0 {
 		removedBullets = append(removedBullets,
-			countStyle.Render(formatCount(skippedByDest))+" "+mutedStyle.Render("already in library"))
+			countStyle.Render(formatCount(skippedByDest))+
+				mutedStyle.Render(tuistat.ShareParen(skippedByDest, accepted))+
+				" "+mutedStyle.Render("already in library"))
 	}
 	removedRows := renderRemovedRows(removedBullets, boxInnerWidth(width))
 
@@ -1266,14 +1286,16 @@ func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.R
 		labelStyle.Render("Input    ") + byteStyle.Render(humanBytes(r.TotalInputs)) +
 			"  " + mutedStyle.Render("across") + "  " +
 			countStyle.Render(fmt.Sprintf("%d", r.InputFileCount)) + " " + mutedStyle.Render("files"),
-		labelStyle.Render("Lines    ") + countStyle.Render(formatCount(m.LinesRead.Load())) +
+		labelStyle.Render("Lines    ") + countStyle.Render(formatCount(read)) +
 			" " + mutedStyle.Render("read"),
 	}
 	if outputRow != "" {
 		innerLines = append(innerLines, outputRow)
 	}
 	innerLines = append(innerLines,
-		labelStyle.Render("Unique   ")+uniqueStyle.Render(formatCount(uniq))+" "+mutedStyle.Render("entries"))
+		labelStyle.Render("Unique   ")+uniqueStyle.Render(formatCount(uniq))+
+			mutedStyle.Render(tuistat.ShareParen(uniq, accepted))+
+			" "+mutedStyle.Render("entries"))
 	if r.Cfg.DryRun {
 		// the DRY RUN banner + COMPLETE · DRY RUN header frame the run; "Unique"
 		// is the would-be-added count. No Output row (nothing was written).

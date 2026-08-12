@@ -18,6 +18,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
+	"github.com/snowx-dev/SnowFastULP/internal/tuistat"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"golang.org/x/term"
 )
@@ -1274,11 +1275,18 @@ func recapRow(label, value string) string {
 // skipped — so the two CLIs read the same at a glance.
 func recapCountRows(stats sflog.ExtractStats) []string {
 	dot := sflMutedStyle.Render("  ·  ")
+	cred := int64(stats.Credentials)
+	uniq := sflUniqueStyle.Render(formatInt(stats.Emitted)) +
+		sflMutedStyle.Render(tuistat.ShareParen(int64(stats.Emitted), cred)) +
+		dot + sflCountStyle.Render(formatInt(stats.Duplicates))
+	if stats.Duplicates > 0 {
+		uniq += sflMutedStyle.Render(tuistat.ShareParen(int64(stats.Duplicates), cred))
+	}
+	uniq += sflMutedStyle.Render(" duplicates")
 	rows := []string{
 		recapRow("Logs", sflCountStyle.Render(formatInt(stats.Logs))+
 			dot+sflAcceptStyle.Render(formatInt(stats.Credentials))+sflMutedStyle.Render(" parsed")),
-		recapRow("Unique", sflUniqueStyle.Render(formatInt(stats.Emitted))+
-			dot+sflCountStyle.Render(formatInt(stats.Duplicates))+sflMutedStyle.Render(" duplicates")),
+		recapRow("Unique", uniq),
 		recapRow("Sources", sflCountStyle.Render(formatInt(stats.FilesScanned))+sflMutedStyle.Render(" files  ·  ")+
 			sflCountStyle.Render(formatInt(stats.ArchivesScanned))+sflMutedStyle.Render(" archives  ·  ")+
 			sflWarnStyle.Render(formatInt(stats.SkippedFiles+stats.SkippedArchives))+sflMutedStyle.Render(" skipped")),
@@ -1297,7 +1305,8 @@ func recapCountRows(stats sflog.ExtractStats) []string {
 }
 
 // renderSflRemovedRows mirrors sfu's Removed recap: one line when it fits, else
-// stacked bullets under the label.
+// stacked bullets under the label. Continuations drop the label indent when
+// indent+bullet would still overflow the box (same pattern as Merge).
 func renderSflRemovedRows(bullets []string, maxInnerWidth int) []string {
 	if len(bullets) == 0 {
 		return nil
@@ -1311,13 +1320,24 @@ func renderSflRemovedRows(bullets []string, maxInnerWidth int) []string {
 	sep := sflMutedStyle.Render(" · ")
 	singleLineRest := strings.Join(bullets, sep)
 	totalWidth := lipgloss.Width(label) + lipgloss.Width(singleLineRest)
-	if totalWidth <= maxInnerWidth {
+	if maxInnerWidth <= 0 || totalWidth <= maxInnerWidth {
 		return []string{sflLabelStyle.Render(label) + singleLineRest}
 	}
 	indent := strings.Repeat(" ", lipgloss.Width(label))
-	rows := []string{sflLabelStyle.Render(label) + bullets[0]}
+	fits := func(s string) bool {
+		return lipgloss.Width(s) <= maxInnerWidth
+	}
+	first := sflLabelStyle.Render(label) + bullets[0]
+	if !fits(first) {
+		first = bullets[0]
+	}
+	rows := []string{first}
 	for _, b := range bullets[1:] {
-		rows = append(rows, indent+b)
+		cont := indent + b
+		if !fits(cont) {
+			cont = b
+		}
+		rows = append(rows, cont)
 	}
 	return rows
 }
@@ -1329,19 +1349,24 @@ func renderSflRemovedRows(bullets []string, maxInnerWidth int) []string {
 // Extraction already deduped, so there are no within-run duplicates to show
 // here (sfu's third bullet). Surfacing rejected closes the recap's arithmetic:
 // extraction Unique == Added + rejected + already-in-library.
-func renderIngestLibraryRows(newToLib, alreadyInLib, dropped int64, innerWidth int, dryRun bool) []string {
+func renderIngestLibraryRows(newToLib, alreadyInLib, dropped, emitted int64, innerWidth int, dryRun bool) []string {
 	addedLabel := "Added"
 	if dryRun {
 		addedLabel = "Would add"
 	}
 	rows := []string{recapRow(addedLabel, sflUniqueStyle.Render(formatInt(int(newToLib)))+
+		sflMutedStyle.Render(tuistat.ShareParen(newToLib, emitted))+
 		sflMutedStyle.Render(" entries"))}
 	var bullets []string
 	if dropped > 0 {
-		bullets = append(bullets, sflWarnStyle.Render(formatInt(int(dropped)))+" "+sflMutedStyle.Render("rejected"))
+		bullets = append(bullets, sflWarnStyle.Render(formatInt(int(dropped)))+
+			sflMutedStyle.Render(tuistat.ShareParen(dropped, emitted))+
+			" "+sflMutedStyle.Render("rejected"))
 	}
 	if alreadyInLib > 0 {
-		bullets = append(bullets, sflCountStyle.Render(formatInt(int(alreadyInLib)))+" "+sflMutedStyle.Render("already in library"))
+		bullets = append(bullets, sflCountStyle.Render(formatInt(int(alreadyInLib)))+
+			sflMutedStyle.Render(tuistat.ShareParen(alreadyInLib, emitted))+
+			" "+sflMutedStyle.Render("already in library"))
 	}
 	if len(bullets) > 0 {
 		rows = append(rows, renderSflRemovedRows(bullets, innerWidth)...)
@@ -1409,7 +1434,7 @@ func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, al
 	// Library/Output paths live in outside-box footers (full width, never
 	// padOrTrim'd). Failures/skips go to the -err file; the running library
 	// total gets its own box below (mirrors sfu's renderODSummary).
-	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, dropped, boxInner(width), dryRun)...)
+	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, dropped, int64(stats.Emitted), boxInner(width), dryRun)...)
 	box := sflGradientBox(body, width, gradStart, gradEnd)
 	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
@@ -1481,15 +1506,23 @@ func renderIngestOutputFooter(paths []string, dryRun bool) []string {
 // this run found (new vs. already stored), with the store path as an outside
 // footer so long DB paths are never head-truncated inside the box.
 func renderSecretsBlock(stats secrets.Stats, dbPath string, width int) []string {
-	value := sflUniqueStyle.Render(formatInt(int(stats.New))) + sflMutedStyle.Render(" new") +
+	denom := stats.New + stats.Existing + stats.DupInRun
+	value := sflUniqueStyle.Render(formatInt(int(stats.New))) +
+		sflMutedStyle.Render(tuistat.ShareParen(stats.New, denom)) +
+		sflMutedStyle.Render(" new") +
 		sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(stats.Existing))) +
+		sflMutedStyle.Render(tuistat.ShareParen(stats.Existing, denom)) +
 		sflMutedStyle.Render(" already stored")
-	if stats.DupInRun > 0 {
-		value += sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(stats.DupInRun))) +
-			sflMutedStyle.Render(" dupes")
-	}
 	body := []string{
 		recapRow("Secrets", value),
+	}
+	// Dupes ride a second row so share-annotated findings still fit the
+	// default 80-col box (one line with three (N.N%) tails mid-cuts).
+	if stats.DupInRun > 0 {
+		dup := sflCountStyle.Render(formatInt(int(stats.DupInRun))) +
+			sflMutedStyle.Render(tuistat.ShareParen(stats.DupInRun, denom)) +
+			sflMutedStyle.Render(" dupes")
+		body = append(body, strings.Repeat(" ", sflRecapLabelW)+dup)
 	}
 	if stats.Deduped > 0 {
 		body = append(body, recapRow("Skipped", sflCountStyle.Render(formatInt(int(stats.Deduped)))+

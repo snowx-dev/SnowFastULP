@@ -475,6 +475,13 @@ func run(cfg runConfig) error {
 	default:
 		summary = renderFinalSummaryWithNotice(outPath, stats, updateNotice)
 	}
+	frost := summaryFooterLines(termWidth(), updateNotice)
+	// Env dest as an outside-box path footer (peer of Output/Library/Store), only
+	// when files landed — lazy mkdir may leave no directory if nothing was copied.
+	if stats.EnvCopied > 0 {
+		summary = spliceBeforeFooter(summary,
+			renderSflPathFooter("Env      ", []string{resolveEnvDir(cfg)}, sflMutedStyle), frost)
+	}
 	if cfg.Secrets {
 		// Slot the secrets recap box just above the frost footer so it reads as
 		// a peer of the credential summary. The footer is the deterministic
@@ -482,7 +489,7 @@ func run(cfg runConfig) error {
 		// than depending on any single renderer's internal layout.
 		block := renderSecretsBlock(secretsStats,
 			resolveSecretsPath(cfg.SecretsPath, cfg.OutputDir, cfg.LibraryDir), termWidth())
-		summary = spliceBeforeFooter(summary, block, summaryFooterLines(termWidth(), updateNotice))
+		summary = spliceBeforeFooter(summary, block, frost)
 	}
 	// A prominent encrypted-archive warning comes BEFORE the COMPLETE summary so
 	// a "0 ULP" run can't read as empty when the real cause is a missing password.

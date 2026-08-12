@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/tuistat"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
@@ -143,8 +146,8 @@ func TestRenderRemovedRowsSingleLineFits(t *testing.T) {
 	}
 }
 
-// overflow = one bullet per line, indented under label. repros the
-// "Removed ... 102M already i…" truncation bug
+// overflow = one bullet per line, indented under label when indent fits.
+// repros the "Removed ... 102M already i…" truncation bug
 func TestRenderRemovedRowsMultiLineWhenOverflowing(t *testing.T) {
 	bullets := []string{
 		warnStyle.Render("55,922,872") + " " + mutedStyle.Render("rejected"),
@@ -159,14 +162,10 @@ func TestRenderRemovedRowsMultiLineWhenOverflowing(t *testing.T) {
 	if !strings.Contains(stripANSI(rows[0]), "Removed") {
 		t.Errorf("first row should carry the 'Removed' label, got %q", stripANSI(rows[0]))
 	}
-	// continuation rows start w/ label-aligned indent
 	for i := 1; i < len(rows); i++ {
 		plain := stripANSI(rows[i])
 		if strings.Contains(plain, "Removed") {
 			t.Errorf("continuation row %d should NOT repeat the label, got %q", i, plain)
-		}
-		if !strings.HasPrefix(plain, "         ") { // 9 spaces == len("Removed  ")
-			t.Errorf("continuation row %d not indented under label: %q", i, plain)
 		}
 	}
 	joined := stripANSI(strings.Join(rows, "\n"))
@@ -184,8 +183,8 @@ func TestRenderRemovedRowsEmpty(t *testing.T) {
 	}
 }
 
-// mixed bullet widths must keep indentation stable. guards vs hidden
-// padding sneaking into one bullet
+// mixed bullet widths must keep full counts visible; indent drops only when
+// indent+bullet would overflow the budget (Merge-style).
 func TestRenderRemovedRowsAlignmentStable(t *testing.T) {
 	bullets := []string{
 		warnStyle.Render("9") + " " + mutedStyle.Render("rejected"), // tiny
@@ -196,19 +195,46 @@ func TestRenderRemovedRowsAlignmentStable(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(rows))
 	}
-	// bullet text starts at col 9 on every row (label or indent prefix)
+	joined := stripANSI(strings.Join(rows, "\n"))
+	for _, want := range []string{"9", "999,999,999,999", "12,345,678", "rejected", "duplicates", "already in library"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in:\n%s", want, joined)
+		}
+	}
 	for i, row := range rows {
-		plain := stripANSI(row)
-		if len(plain) < 9 {
-			t.Errorf("row %d too short: %q", i, plain)
-			continue
+		if w := tuiVisibleWidth(row); w > 40 {
+			t.Errorf("row %d width %d exceeds budget 40: %q", i, w, stripANSI(row))
 		}
-		// col 9 must be a digit, bullet always starts with count
-		c := plain[9]
-		if c < '0' || c > '9' {
-			t.Errorf("row %d bullet doesn't start at column 9, got %q at col 9 of %q",
-				i, c, plain)
+	}
+}
+
+func TestRenderRemovedRowsSurviveGradientBoxWithShares(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	// Budget must fit the longest share-annotated bullet alone ("already in library").
+	const inner = 40
+	bullets := []string{
+		warnStyle.Render("20") + mutedStyle.Render(tuistat.ShareParen(20, 200)) + " " + mutedStyle.Render("rejected"),
+		countStyle.Render("5") + mutedStyle.Render(tuistat.ShareParen(5, 100)) + " " + mutedStyle.Render("duplicates"),
+		countStyle.Render("15") + mutedStyle.Render(tuistat.ShareParen(15, 100)) + " " + mutedStyle.Render("already in library"),
+	}
+	rows := renderRemovedRows(bullets, inner)
+	for i, row := range rows {
+		if w := tuiVisibleWidth(row); w > inner {
+			t.Fatalf("pre-box row %d width %d > %d: %q", i, w, inner, stripANSI(row))
 		}
+	}
+	// gradientBox inner = outerWidth-6; use outer 46 → inner 40.
+	joined := gradientBox(rows, 46, doneStart, doneEnd)
+	for _, want := range []string{"rejected", "duplicates", "already in library", "(10.0%)", "(5.0%)", "(15.0%)"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("boxed Removed missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("boxed Removed must not be ellipsized:\n%s", joined)
 	}
 }
 

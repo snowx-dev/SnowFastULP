@@ -336,6 +336,45 @@ func TestRenderDoneLinesIncludesLibrarySkipped(t *testing.T) {
 	}
 }
 
+func TestRenderDoneLinesPartitionShares(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	m.LinesRead.Store(200)
+	m.LinesAccepted.Store(100)
+	m.LinesUnique.Store(80)
+	m.LinesRejected.Store(20)       // 20/200 = 10%
+	m.LinesSkippedByDest.Store(15)  // 15/100 = 15%; dups = 100-80-15 = 5 → 5%
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 20, InputFileCount: 1, Workers: 1,
+		DedupWorkers: 1, BucketCount: 1,
+	}
+	joined := strings.Join(renderDoneLines(time.Second, m, r, 100), "\n")
+	for _, want := range []string{
+		"(80.0%)", // unique of accepted
+		"(10.0%)", // rejected of read
+		"(5.0%)",  // duplicates of accepted
+		"(15.0%)", // already in library of accepted
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("DONE shares missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderDoneLinesOmitsShareWhenAllUnique(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	m.LinesRead.Store(50)
+	m.LinesAccepted.Store(50)
+	m.LinesUnique.Store(50)
+	r := &ulpengine.Resolved{
+		TotalInputs: 1 << 20, InputFileCount: 1, Workers: 1,
+		DedupWorkers: 1, BucketCount: 1,
+	}
+	joined := strings.Join(renderDoneLines(time.Second, m, r, 86), "\n")
+	if strings.Contains(joined, "%") {
+		t.Fatalf("all-unique DONE must omit 100%% share:\n%s", joined)
+	}
+}
+
 // -odr dry-run: the live header carries a DRY RUN badge, the COMPLETE frame is
 // relabeled, an explicit "nothing written" banner sits inside the box, the
 // output footer states the dry-run, and the library recap reports the

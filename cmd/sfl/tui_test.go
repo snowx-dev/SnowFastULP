@@ -11,6 +11,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
+	"github.com/snowx-dev/SnowFastULP/internal/tuistat"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
 
@@ -70,13 +71,42 @@ func TestRenderFinalSummaryShowsSnowFastLogStats(t *testing.T) {
 		"Logs",
 		"10 parsed",
 		"Unique",
-		"2 duplicates",
+		"duplicates",
+		"(80.0%)",
+		"(20.0%)",
 		"Sources",
 		"2 archives",
 		"out/sfl.txt",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRecapCountRowsUniqueSharesOmitWhenWhole(t *testing.T) {
+	joined := strings.Join(recapCountRows(sflog.ExtractStats{
+		Credentials: 8, Emitted: 8, Duplicates: 0,
+	}), "\n")
+	if strings.Contains(joined, "%") {
+		t.Fatalf("all-unique recap must omit 100%% share:\n%s", joined)
+	}
+}
+
+func TestRenderIngestLibraryRowsSharesVsEmitted(t *testing.T) {
+	joined := strings.Join(renderIngestLibraryRows(5, 3, 2, 10, 72, false), "\n")
+	for _, want := range []string{"(50.0%)", "(30.0%)", "(20.0%)", "Added", "rejected", "already in library"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("ingest library rows missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderSecretsBlockShares(t *testing.T) {
+	joined := strings.Join(renderSecretsBlock(secrets.Stats{New: 2, Existing: 1, DupInRun: 1}, "", 80), "\n")
+	for _, want := range []string{"(50.0%)", "(25.0%)", "new", "already stored", "dupes"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("secrets block missing %q:\n%s", want, joined)
 		}
 	}
 }
@@ -600,6 +630,38 @@ func TestRenderIngestMergeRowsSurviveGradientBox(t *testing.T) {
 	}
 }
 
+func TestRenderSflRemovedRowsSurviveGradientBoxWithShares(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	// width 56 => boxInner 42 — fits share-annotated "already in library".
+	const width = 56
+	inner := boxInner(width)
+	bullets := []string{
+		sflWarnStyle.Render("2") + sflMutedStyle.Render(tuistat.ShareParen(2, 10)) + " " + sflMutedStyle.Render("rejected"),
+		sflCountStyle.Render("3") + sflMutedStyle.Render(tuistat.ShareParen(3, 10)) + " " + sflMutedStyle.Render("already in library"),
+	}
+	rows := renderSflRemovedRows(bullets, inner)
+	if len(rows) < 2 {
+		t.Fatalf("expected stacked Removed rows, got %d", len(rows))
+	}
+	for i, row := range rows {
+		if w := lipgloss.Width(row); w > inner {
+			t.Fatalf("pre-box row %d width %d > %d", i, w, inner)
+		}
+	}
+	joined := strings.Join(sflGradientBox(rows, width, gradStart, gradEnd), "\n")
+	for _, want := range []string{"rejected", "already in library", "(20.0%)", "(30.0%)"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("boxed Removed missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("boxed Removed must not be ellipsized:\n%s", joined)
+	}
+}
+
 func TestRenderIngestRegenPanel(t *testing.T) {
 	longName := "/data/lib/sfu_20260101_120000_part04.txt.zst"
 	panel := renderIngestRegenPanel([]sflog.IngestWorker{
@@ -965,6 +1027,46 @@ func TestRenderFinalSummaryLongOutputPathOutsideBox(t *testing.T) {
 	}
 	if !strings.Contains(joined, "┃") {
 		t.Fatalf("missing path footer gutter:\n%s", joined)
+	}
+}
+
+func TestEnvPathFooterSplicedWhenCopied(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	envDir := longUUIDLibraryPath + "/sfl_20260812_120000_secrets"
+	stats := sflog.ExtractStats{Emitted: 1, EnvCopied: 3}
+	summary := renderFinalSummaryWithNotice("out/sfl.txt", stats, nil)
+	frost := summaryFooterLines(termWidth(), nil)
+	summary = spliceBeforeFooter(summary,
+		renderSflPathFooter("Env      ", []string{envDir}, sflMutedStyle), frost)
+
+	joined := strings.Join(summary, "\n")
+	if !strings.Contains(joined, envDir) {
+		t.Fatalf("env path must appear in full:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Env") || !strings.Contains(joined, "┃") {
+		t.Fatalf("missing Env path footer gutter:\n%s", joined)
+	}
+	closeIdx := strings.LastIndex(joined, "╰")
+	envIdx := strings.Index(joined, envDir)
+	if closeIdx < 0 || envIdx < closeIdx {
+		t.Fatalf("env path should be below the COMPLETE frame:\n%s", joined)
+	}
+	if strings.Contains(joined, "Env:") {
+		t.Fatalf("in-box 'Env:' label must not return:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Env files") || !strings.Contains(joined, "copied") {
+		t.Fatalf("recap should still show Env files count:\n%s", joined)
+	}
+}
+
+func TestEnvPathFooterAbsentWhenNothingCopied(t *testing.T) {
+	joined := strings.Join(renderFinalSummary("out/sfl.txt", sflog.ExtractStats{Emitted: 1}), "\n")
+	// No splice when EnvCopied==0 (mirrors main). Footer label column is "Env      ".
+	if strings.Contains(joined, "Env      ") {
+		t.Fatalf("no Env footer when nothing copied:\n%s", joined)
 	}
 }
 
