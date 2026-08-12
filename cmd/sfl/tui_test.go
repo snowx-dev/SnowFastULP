@@ -149,7 +149,7 @@ func TestRenderNoIngestSummaryReportsLibraryUnchanged(t *testing.T) {
 	for _, want := range []string{
 		"COMPLETE",
 		"library unchanged",
-		"Library: ",
+		"Library",
 		"/data/Library",
 	} {
 		if !strings.Contains(joined, want) {
@@ -477,7 +477,7 @@ func TestRenderIngestStatsRowsRegen(t *testing.T) {
 		RegenBytesTotal: 80 << 30,
 		RegenBPS:        128 << 20,
 		ArchivesTotal:   8,
-	}), "\n")
+	}, 72), "\n")
 	for _, want := range []string{"Library", "3", "16", "parts", "12.0GB", "80.0GB", "128.0MB/s"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("regen stats missing %q:\n%s", want, joined)
@@ -496,7 +496,7 @@ func TestRenderIngestStatsRowsShard(t *testing.T) {
 		ULPBytes:    189 << 20,
 		BytesRead:   90 << 20,
 		LinesRead:   1_200_000,
-	}), "\n")
+	}, 72), "\n")
 	for _, want := range []string{"ULP", "90.0MB", "189.0MB", "1,200,000"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("shard stats missing %q:\n%s", want, joined)
@@ -515,11 +515,88 @@ func TestRenderIngestStatsRowsDedup(t *testing.T) {
 		Skipped:      120,
 		BucketsDone:  4,
 		BucketsTotal: 64,
-	}), "\n")
+	}, 72), "\n")
 	for _, want := range []string{"Merge", "5", "added", "120", "already in library", "bucket", "4", "64"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("dedup stats missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestRenderIngestMergeRowsSingleLineWhenWide(t *testing.T) {
+	iv := sflog.IngestView{
+		ShowMerge: true, Unique: 5, Skipped: 120, BucketsDone: 4, BucketsTotal: 64,
+	}
+	rows := renderIngestMergeRows(iv, 72)
+	if len(rows) != 1 {
+		t.Fatalf("wide Merge should be one line, got %d:\n%v", len(rows), rows)
+	}
+	joined := strings.Join(rows, "\n")
+	for _, want := range []string{"Merge", "added", "already in library", "bucket", "4", "64"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("wide Merge missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestRenderIngestMergeRowsStacksWhenNarrow(t *testing.T) {
+	iv := sflog.IngestView{
+		ShowMerge: true, Unique: 5, Skipped: 120, BucketsDone: 96, BucketsTotal: 128,
+	}
+	const inner = 28
+	// Force stack: narrower than the single-line Merge content.
+	rows := renderIngestMergeRows(iv, inner)
+	if len(rows) < 2 {
+		t.Fatalf("narrow Merge should stack, got %d rows:\n%v", len(rows), rows)
+	}
+	joined := strings.Join(rows, "\n")
+	for _, want := range []string{"Merge", "added", "already in library", "bucket", "96", "128"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("stacked Merge missing %q:\n%s", want, joined)
+		}
+	}
+	for i, row := range rows {
+		if w := lipgloss.Width(row); w > inner {
+			t.Fatalf("stacked row %d width %d exceeds inner %d: %q", i, w, inner, row)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("stacked Merge must not rely on ellipsis:\n%s", joined)
+	}
+	// Sanity: the single-line form would be mid-cut by padOrTrim at this width.
+	single := renderIngestMergeRows(iv, 200)[0]
+	if trimmed := sflPadOrTrim(single, inner); !strings.Contains(trimmed, "…") {
+		t.Fatalf("sanity: padOrTrim should ellipsize oversized Merge; got %q", trimmed)
+	}
+}
+
+// TestRenderIngestMergeRowsSurviveGradientBox is the Bugbot regression: stacked
+// continuations used to keep a full label indent, still overflow boxInner, and
+// get ellipsized by sflPadOrTrim inside sflGradientBox — after the user-visible
+// renderer, not just the pre-box strings.
+func TestRenderIngestMergeRowsSurviveGradientBox(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	iv := sflog.IngestView{
+		ShowMerge: true, Unique: 5, Skipped: 120, BucketsDone: 96, BucketsTotal: 128,
+	}
+	// width 42 => boxInner 28 (same budget the live ingest frame uses).
+	const width = 42
+	inner := boxInner(width)
+	if inner != 28 {
+		t.Fatalf("boxInner(%d) = %d, want 28 (test assumption)", width, inner)
+	}
+	body := append([]string{gradientBar(0.5, inner)}, renderIngestMergeRows(iv, inner)...)
+	joined := strings.Join(sflGradientBox(body, width, gradStart, gradEnd), "\n")
+	for _, want := range []string{"added", "already in library", "bucket", "96", "128"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("boxed Merge missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "…") {
+		t.Fatalf("boxed Merge must not be ellipsized by padOrTrim:\n%s", joined)
 	}
 }
 
@@ -782,6 +859,22 @@ func TestRenderEncryptedWarning(t *testing.T) {
 	}
 }
 
+func TestRenderEncryptedWarningKeepsPathTail(t *testing.T) {
+	longPath := "/run/media/bigboi/b992e755-aaaa-bbbb-cccc-dddddddddddd/Data_logs/deep/nested/locked_release.zip"
+	stats := sflog.ExtractStats{
+		PasswordNotFound: 1,
+		Issues:           []sflog.Issue{{Path: longPath, Kind: sflog.IssuePasswordNotFound}},
+	}
+	// Tight width forces TruncatePath inside the warning box.
+	joined := strings.Join(renderEncryptedWarning(stats, false, 40), "\n")
+	if !strings.Contains(joined, "locked_release.zip") {
+		t.Fatalf("encrypted warning must keep basename tail:\n%s", joined)
+	}
+	if strings.Contains(joined, "b992e755") {
+		t.Fatalf("head UUID should be truncated away at narrow width:\n%s", joined)
+	}
+}
+
 func TestRenderIngestOutputFooter(t *testing.T) {
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -796,6 +889,103 @@ func TestRenderIngestOutputFooter(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("footer missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+// longUUIDLibraryPath mimics a removable-volume mount that used to get
+// head-truncated inside the gradient box ("…/D" instead of the useful basename).
+const longUUIDLibraryPath = "/run/media/bigboi/b992e755-aaaa-bbbb-cccc-dddddddddddd/Data_logs"
+
+func TestRenderIngestSummaryLongLibraryPathOutsideBox(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	lines := renderIngestSummary(longUUIDLibraryPath, 1234, 5, 3, 2, sflog.ExtractStats{
+		Logs: 2, Credentials: 10, Emitted: 10,
+	}, []string{longUUIDLibraryPath + "/sfu_part1.txt.zst"}, false)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, longUUIDLibraryPath) {
+		t.Fatalf("library path must appear in full:\n%s", joined)
+	}
+	// Ellipsis on the library path itself is the failure mode; Output footer
+	// may still list the same prefix as a full path (no ellipsis).
+	closeIdx := strings.LastIndex(joined, "╰")
+	libIdx := strings.Index(joined, longUUIDLibraryPath)
+	if closeIdx < 0 || libIdx < 0 || libIdx < closeIdx {
+		t.Fatalf("library path should be below the gradient box:\n%s", joined)
+	}
+	pathLine := joined[libIdx:]
+	if i := strings.IndexByte(pathLine, '\n'); i >= 0 {
+		pathLine = pathLine[:i]
+	}
+	if strings.Contains(pathLine, "…") {
+		t.Fatalf("library path line must not be ellipsized: %q", pathLine)
+	}
+}
+
+func TestRenderNoIngestSummaryLongLibraryPathOutsideBox(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	lines := renderNoIngestSummary(longUUIDLibraryPath, sflog.ExtractStats{Logs: 1}, false)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, longUUIDLibraryPath) {
+		t.Fatalf("library path must appear in full:\n%s", joined)
+	}
+	closeIdx := strings.LastIndex(joined, "╰")
+	libIdx := strings.Index(joined, longUUIDLibraryPath)
+	if closeIdx < 0 || libIdx < closeIdx {
+		t.Fatalf("library path should be below the COMPLETE frame:\n%s", joined)
+	}
+	if strings.Contains(joined, "Library:") {
+		t.Fatalf("in-box 'Library:' label should be gone (footer uses Library gutter):\n%s", joined)
+	}
+}
+
+func TestRenderFinalSummaryLongOutputPathOutsideBox(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	outPath := longUUIDLibraryPath + "/sfl_20260812_120000.txt"
+	lines := renderFinalSummary(outPath, sflog.ExtractStats{Emitted: 1})
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, outPath) {
+		t.Fatalf("output path must appear in full:\n%s", joined)
+	}
+	closeIdx := strings.LastIndex(joined, "╰")
+	pathIdx := strings.Index(joined, outPath)
+	if closeIdx < 0 || pathIdx < closeIdx {
+		t.Fatalf("output path should be below the COMPLETE frame:\n%s", joined)
+	}
+	if strings.Contains(joined, "Output:") {
+		t.Fatalf("in-box 'Output:' label should be gone (footer uses Output gutter):\n%s", joined)
+	}
+	if !strings.Contains(joined, "┃") {
+		t.Fatalf("missing path footer gutter:\n%s", joined)
+	}
+}
+
+func TestRenderSecretsBlockLongStorePathOutsideBox(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	dbPath := longUUIDLibraryPath + "/sfl-secrets.sqlite"
+	lines := renderSecretsBlock(secrets.Stats{New: 2, Existing: 1}, dbPath, 80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, dbPath) {
+		t.Fatalf("store path must appear in full:\n%s", joined)
+	}
+	closeIdx := strings.LastIndex(joined, "╰")
+	pathIdx := strings.Index(joined, dbPath)
+	if closeIdx < 0 || pathIdx < closeIdx {
+		t.Fatalf("store path should be below the secrets box:\n%s", joined)
+	}
+	if strings.Contains(joined, "…") && strings.Contains(joined[pathIdx:pathIdx+len(dbPath)+2], "…") {
+		t.Fatalf("store path must not be ellipsized:\n%s", joined)
 	}
 }
 

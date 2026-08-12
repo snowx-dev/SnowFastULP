@@ -618,7 +618,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 		iv, _ := prog.IngestSnapshot()
 		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] INGESTING")+dryRunSuffix(prog), elapsed, width)
 		bar := gradientBar(iv.Fraction, inner)
-		body := append([]string{bar}, renderIngestStatsRows(iv)...)
+		body := append([]string{bar}, renderIngestStatsRows(iv, inner)...)
 		if iv.Status != "" {
 			body = append(body, sflMutedStyle.Render(iv.Status))
 		}
@@ -925,7 +925,8 @@ func renderExtractStatsRows(files, archives, logs, logsTotal, emitted, dupes, do
 
 // renderIngestStatsRows is the labeled live-stats block during library ingest.
 // Rows appear only when relevant so regen/shard phases never show a frozen 0/0.
-func renderIngestStatsRows(iv sflog.IngestView) []string {
+// innerW is the box content width so Merge can stack instead of mid-truncating.
+func renderIngestStatsRows(iv sflog.IngestView, innerW int) []string {
 	var rows []string
 	if ingestShowLibraryRow(iv) {
 		rows = append(rows, recapRow("Library", renderIngestLibraryValue(iv)))
@@ -937,16 +938,51 @@ func renderIngestStatsRows(iv sflog.IngestView) []string {
 			sflMutedStyle.Render(" lines")))
 	}
 	if iv.ShowMerge {
-		merge := sflUniqueStyle.Render(formatInt(int(iv.Unique))) + sflMutedStyle.Render(" added") +
-			sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(iv.Skipped))) +
-			sflMutedStyle.Render(" already in library")
-		if iv.BucketsTotal > 0 {
-			merge += sflMutedStyle.Render("  ·  bucket ") +
-				sflCountStyle.Render(formatInt(int(iv.BucketsDone))) +
-				sflMutedStyle.Render(" / ") +
-				sflCountStyle.Render(formatInt(int(iv.BucketsTotal)))
+		rows = append(rows, renderIngestMergeRows(iv, innerW)...)
+	}
+	return rows
+}
+
+// renderIngestMergeRows is one Merge line when it fits, else stacked fragments
+// under the label so bucket N/M is never mid-cut by padOrTrim. Every returned
+// row is kept <= maxInnerWidth (drop the label indent on continuations when
+// indent+fragment would still overflow the box).
+func renderIngestMergeRows(iv sflog.IngestView, maxInnerWidth int) []string {
+	added := sflUniqueStyle.Render(formatInt(int(iv.Unique))) + sflMutedStyle.Render(" added")
+	already := sflCountStyle.Render(formatInt(int(iv.Skipped))) + sflMutedStyle.Render(" already in library")
+	parts := []string{added, already}
+	if iv.BucketsTotal > 0 {
+		parts = append(parts, sflMutedStyle.Render("bucket ")+
+			sflCountStyle.Render(formatInt(int(iv.BucketsDone)))+
+			sflMutedStyle.Render(" / ")+
+			sflCountStyle.Render(formatInt(int(iv.BucketsTotal))))
+	}
+	label := "Merge"
+	if pad := sflRecapLabelW - lipgloss.Width(label); pad > 0 {
+		label += strings.Repeat(" ", pad)
+	}
+	labelRendered := sflLabelStyle.Render(label)
+	sep := sflMutedStyle.Render("  ·  ")
+	singleLineRest := strings.Join(parts, sep)
+	totalWidth := lipgloss.Width(label) + lipgloss.Width(singleLineRest)
+	if maxInnerWidth <= 0 || totalWidth <= maxInnerWidth {
+		return []string{labelRendered + singleLineRest}
+	}
+	indent := strings.Repeat(" ", lipgloss.Width(label))
+	fits := func(s string) bool {
+		return maxInnerWidth <= 0 || lipgloss.Width(s) <= maxInnerWidth
+	}
+	first := labelRendered + parts[0]
+	if !fits(first) {
+		first = parts[0]
+	}
+	rows := []string{first}
+	for _, p := range parts[1:] {
+		cont := indent + p
+		if !fits(cont) {
+			cont = p
 		}
-		rows = append(rows, recapRow("Merge", merge))
+		rows = append(rows, cont)
 	}
 	return rows
 }
@@ -1068,7 +1104,7 @@ func renderIngestRegenRow(w sflog.IngestWorker, inner, tick, idx int) string {
 		nameW = 8
 	}
 	line := sflSpinnerStyle.Render(workerSpinnerFrame(tick, idx)) + " " +
-		sflMutedStyle.Render(truncatePath(name, nameW)+partAnnot) + "  " +
+		sflMutedStyle.Render(tuiframe.TruncatePath(name, nameW)+partAnnot) + "  " +
 		bar + " " + sflCountStyle.Render(pctText)
 	if bytesText != "" {
 		line += "  " + sflByteStyle.Render(bytesText)
@@ -1163,7 +1199,7 @@ func renderSflWorkerRow(w sflog.ActiveWorker, inner, idxMarkerW, tick int) strin
 	return sflMutedStyle.Render(marker) + " " +
 		sflSpinnerStyle.Render(workerSpinnerFrame(tick, w.Index)) + " " +
 		sflOkStyle.Render(stage) + "  " +
-		sflMutedStyle.Render(truncatePath(workerPathLabel(w.Path), pathW))
+		sflMutedStyle.Render(tuiframe.TruncatePath(workerPathLabel(w.Path), pathW))
 }
 
 // termHeight is the terminal row count (stderr), defaulting to 24 when unknown
@@ -1320,9 +1356,12 @@ func renderFinalSummary(outPath string, stats sflog.ExtractStats) []string {
 func renderFinalSummaryWithNotice(outPath string, stats sflog.ExtractStats, notice *selfupdate.Notice) []string {
 	width := termWidth()
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render("SnowFastLog COMPLETE")
-	body := append(recapCountRows(stats), "", sflMutedStyle.Render("Output: ")+outPath)
-	box := sflGradientBox(body, width, gradStart, gradEnd)
-	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
+	box := sflGradientBox(recapCountRows(stats), width, gradStart, gradEnd)
+	out := frameWithFooter(title, box, width, nil)
+	if outPath != "" {
+		out = append(out, renderSflPathFooter("Output   ", []string{outPath}, sflOkStyle)...)
+	}
+	return append(out, summaryFooterLines(width, notice)...)
 }
 
 // renderNoIngestSummary is the -od frame when extraction produced no
@@ -1342,10 +1381,13 @@ func renderNoIngestSummaryWithNotice(libraryDir string, stats sflog.ExtractStats
 	body := append(recapCountRows(stats),
 		"",
 		sflMutedStyle.Render("No credentials extracted — library unchanged."),
-		sflMutedStyle.Render("Library: ")+libraryDir,
 	)
 	box := sflGradientBox(body, width, gradStart, gradEnd)
-	return frameWithFooter(title, box, width, summaryFooterLines(width, notice))
+	out := frameWithFooter(title, box, width, nil)
+	if libraryDir != "" {
+		out = append(out, renderSflPathFooter("Library  ", []string{libraryDir}, sflMutedStyle)...)
+	}
+	return append(out, summaryFooterLines(width, notice)...)
 }
 
 // renderIngestSummary is the -od completion frame: the same extraction recap,
@@ -1363,18 +1405,49 @@ func renderIngestSummaryWithNotice(libraryDir string, libraryLines, newToLib, al
 		titleText = "SnowFastLog DRY RUN"
 	}
 	title := sflIndent + sflOkStyle.Render("✓ ") + sflTitleStyle.Render(titleText)
-	// Box holds clean stats only: extraction recap, Added/Removed ingest rows,
-	// library path. Failures/skips are streamed to the -err file (never stdout);
-	// the running library total gets its own box below (mirrors sfu's renderODSummary).
+	// Box holds clean stats only: extraction recap + Added/Removed ingest rows.
+	// Library/Output paths live in outside-box footers (full width, never
+	// padOrTrim'd). Failures/skips go to the -err file; the running library
+	// total gets its own box below (mirrors sfu's renderODSummary).
 	body := append(recapCountRows(stats), renderIngestLibraryRows(newToLib, alreadyInLib, dropped, boxInner(width), dryRun)...)
-	body = append(body, "", sflMutedStyle.Render("Library: ")+libraryDir)
 	box := sflGradientBox(body, width, gradStart, gradEnd)
 	box = append(box, "")
 	box = append(box, libraryTotalBox(libraryLines, width)...)
 	out := []string{"", title, ""}
 	out = append(out, box...)
+	if libraryDir != "" {
+		out = append(out, renderSflPathFooter("Library  ", []string{libraryDir}, sflMutedStyle)...)
+	}
 	out = append(out, renderIngestOutputFooter(outputPaths, dryRun)...)
 	out = append(out, summaryFooterLines(width, notice)...)
+	return out
+}
+
+// renderSflPathFooter lays out a labelled, gradient-bordered list of paths under
+// a summary box (same gutter as sfu's renderDonePathFooter). Paths are not
+// padOrTrim'd so long mounts stay readable.
+func renderSflPathFooter(label string, paths []string, pathStyle lipgloss.Style) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	mid := gradStart.BlendLuv(gradEnd, 0.5)
+	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
+	labelCell := sflLabelStyle.Render(label)
+	labelW := lipgloss.Width(labelCell)
+	prefix := strings.Repeat(" ", sflLeftPad) + border.Render("┃") + "  "
+	blankLabel := strings.Repeat(" ", labelW)
+
+	out := []string{""}
+	for i, p := range paths {
+		pathCell := pathStyle.Render(p)
+		var line string
+		if i == 0 {
+			line = prefix + labelCell + pathCell
+		} else {
+			line = prefix + blankLabel + pathCell
+		}
+		out = append(out, line)
+	}
 	return out
 }
 
@@ -1385,9 +1458,7 @@ func renderIngestOutputFooter(paths []string, dryRun bool) []string {
 	mid := gradStart.BlendLuv(gradEnd, 0.5)
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color(mid.Hex()))
 	labelCell := sflLabelStyle.Render(label)
-	labelW := lipgloss.Width(labelCell)
 	prefix := strings.Repeat(" ", sflLeftPad) + border.Render("┃") + "  "
-	blankLabel := strings.Repeat(" ", labelW)
 
 	// dry-run wrote nothing to the library; state that plainly instead of
 	// listing the per-run temp scratch paths (already cleaned by now).
@@ -1402,24 +1473,13 @@ func renderIngestOutputFooter(paths []string, dryRun bool) []string {
 		return []string{"", prefix + labelCell + sflMutedStyle.Render("(nothing new)")}
 	}
 
-	out := []string{""}
-	for i, p := range paths {
-		pathCell := sflOkStyle.Render(p)
-		var line string
-		if i == 0 {
-			line = prefix + labelCell + pathCell
-		} else {
-			line = prefix + blankLabel + pathCell
-		}
-		out = append(out, line)
-	}
-	return out
+	return renderSflPathFooter(label, paths, sflOkStyle)
 }
 
 // renderSecretsBlock is the standalone secrets recap appended to the summary
 // when -secrets is on: a blank spacer then a peer gradient box reporting what
-// this run found (new vs. already stored) and where the store lives. Styled like
-// the other recap boxes so it reads as a sibling of the credential summary.
+// this run found (new vs. already stored), with the store path as an outside
+// footer so long DB paths are never head-truncated inside the box.
 func renderSecretsBlock(stats secrets.Stats, dbPath string, width int) []string {
 	value := sflUniqueStyle.Render(formatInt(int(stats.New))) + sflMutedStyle.Render(" new") +
 		sflMutedStyle.Render("  ·  ") + sflCountStyle.Render(formatInt(int(stats.Existing))) +
@@ -1435,8 +1495,11 @@ func renderSecretsBlock(stats secrets.Stats, dbPath string, width int) []string 
 		body = append(body, recapRow("Skipped", sflCountStyle.Render(formatInt(int(stats.Deduped)))+
 			sflMutedStyle.Render(" duplicate files (already scanned)")))
 	}
-	body = append(body, recapRow("Store", sflMutedStyle.Render(dbPath)))
-	return append([]string{""}, sflGradientBox(body, width, gradStart, gradEnd)...)
+	out := append([]string{""}, sflGradientBox(body, width, gradStart, gradEnd)...)
+	if dbPath != "" {
+		out = append(out, renderSflPathFooter("Store    ", []string{dbPath}, sflMutedStyle)...)
+	}
+	return out
 }
 
 // libraryTotalBox is the standalone "<N> lines in library" box, the single
@@ -1481,7 +1544,7 @@ func renderEncryptedWarning(stats sflog.ExtractStats, passwordsProvided bool, wi
 		if is.Kind != sflog.IssuePasswordNotFound {
 			continue
 		}
-		body = append(body, sflMutedStyle.Render(truncatePath(is.Path, inner)))
+		body = append(body, sflMutedStyle.Render(tuiframe.TruncatePath(is.Path, inner)))
 		shown++
 	}
 	if rem := n - shown; rem > 0 {
@@ -1556,19 +1619,6 @@ func workerPathLabel(p string) string {
 	outer := baseName(p[:first])
 	inner := baseName(p[strings.LastIndexByte(p, '!')+1:])
 	return outer + " ▸ " + inner
-}
-
-func truncatePath(p string, max int) string {
-	if max < 8 {
-		max = 8
-	}
-	// Count and slice on rune boundaries so a UTF-8 path (or the "▸" nested
-	// separator) is never cut mid-rune into mojibake.
-	r := []rune(p)
-	if len(r) <= max {
-		return p
-	}
-	return "…" + string(r[len(r)-(max-1):])
 }
 
 func formatDuration(d time.Duration) string {
