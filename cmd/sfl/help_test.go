@@ -27,6 +27,8 @@ func TestRenderHelpMatchesSnowFastLayout(t *testing.T) {
 		"Set parser/archive worker count.",
 		"-debug",
 		"Write a debug log for this run.",
+		"Optional config:",
+		"relative paths resolve against process CWD, like flags",
 	}
 	for _, s := range want {
 		if !strings.Contains(help, s) {

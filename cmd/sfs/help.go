@@ -34,8 +34,8 @@ func renderHelp(bin string) string {
 
 	primary := []argDef{
 		{"-txt", "", "Search plain .txt files instead of .zst archives (no index)."},
-		{"-o", "FILE", "Write results to this file instead of the auto-generated CWD file."},
-		{"-s", "", "Stream results to stdout without the live screen."},
+		{"-o", "FILE", "Also write results to FILE (tees with default stream; file-only with -stats)."},
+		{"-stats", "", "Live progress screen; write hits to an auto CWD result file (or -o). Not valid with -sec."},
 		{"-clean", "", "Strip URL schemes from output lines."},
 		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
 		{"-since", "DUR", "Only search archives modified within DUR, e.g. 7d, 12h, 90m."},
@@ -48,6 +48,7 @@ func renderHelp(bin string) string {
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
 		{"-no-update-check", "", "Disable background update availability check."},
+		{"-s", "", "Deprecated alias for default stream-to-stdout mode."},
 		{"-silent", "", "Alias for -s."},
 		{"-workers", "N", "Alias for -j."},
 		{"-secrets-path", "PATH", "Alias for -sec-path."},
@@ -70,18 +71,18 @@ func renderHelp(bin string) string {
 	var b strings.Builder
 
 	b.WriteString(phaseStyle.Render("SnowFastSearch") + " " + mutedStyle.Render(version.String) + "\n")
-	b.WriteString("\nParallel search over .zst archives (index-backed) or plain .txt files (-txt).\nIndexes are built automatically for .zst when needed.\n\n")
+	b.WriteString("\nParallel search over .zst archives (index-backed) or plain .txt files (-txt).\nIndexes are built automatically for .zst when needed.\nHits stream to stdout by default.\n\n")
 
 	b.WriteString(labelStyle.Render("Usage:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " " +
 		byteStyle.Render("PATTERN") + " " +
-		mutedStyle.Render("[-o FILE | -s]") + "\n")
+		mutedStyle.Render("[-o FILE] [-stats]") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " " +
 		byteStyle.Render("DIR") + " " +
 		byteStyle.Render("PATTERN") + " " +
-		mutedStyle.Render("[-o FILE | -s]") + "\n")
+		mutedStyle.Render("[-o FILE] [-stats]") + "\n")
 	b.WriteString(mutedStyle.Render("    Flags may appear before or after the pattern. More flags below: Args for nerds, then Args for devs.") + "\n")
-	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; [sfs].dir for PATTERN-only)") + "\n")
+	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; [sfs].dir for PATTERN-only; relative paths resolve against process CWD, like flags)") + "\n")
 	b.WriteString(mutedStyle.Render("    PATTERN '*' exports every line (quote it in the shell).") + "\n\n")
 
 	b.WriteString(labelStyle.Render("Commands:") + "\n")
@@ -92,10 +93,10 @@ func renderHelp(bin string) string {
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'facebook.com:'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " -txt ./dumps 'user@example'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'user@example'\n")
-	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'gmail' -s | head\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'gmail' | head\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library '*' -since 5m -o recent.txt\n")
-	b.WriteString("    " + phaseStyle.Render(bin) + " ./library -o hits.txt 'user@example'\n")
-	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -s\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " ./library -stats 'user@example'\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " ./library -stats -o hits.txt 'user@example'\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -o out.txt -clean\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'aws' -sec -since 1h\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " '*' -sec -l 10\n")

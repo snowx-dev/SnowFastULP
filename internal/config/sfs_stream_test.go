@@ -9,45 +9,56 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 )
 
-func TestApplySFSStreamFromTOML(t *testing.T) {
-	f := loadSFSConfig(t, "[sfs]\nstream = true\n")
-	stream := false
+func TestApplySFSStatsFromTOML(t *testing.T) {
+	f := loadSFSConfig(t, "[sfs]\nstats = true\n")
+	stats := false
 
-	if err := f.ApplySFS(config.Visited{}, config.SFSFlags{Stream: &stream}); err != nil {
+	if err := f.ApplySFS(config.Visited{}, config.SFSFlags{Stats: &stats}); err != nil {
 		t.Fatal(err)
 	}
-	if !stream {
-		t.Fatal("expected stream=true from TOML")
+	if !stats {
+		t.Fatal("expected stats=true from TOML")
 	}
 }
 
-func TestApplySFSSilentAliasSetsStream(t *testing.T) {
-	f := loadSFSConfig(t, "[sfs]\nsilent = true\n")
-	stream := false
-
-	if err := f.ApplySFS(config.Visited{}, config.SFSFlags{Stream: &stream}); err != nil {
-		t.Fatal(err)
-	}
-	if !stream {
-		t.Fatal("expected legacy silent=true to enable stream mode")
-	}
-}
-
-func TestApplySFSStreamCLIWinsOverSilentAlias(t *testing.T) {
-	f := loadSFSConfig(t, "[sfs]\nsilent = true\n")
+func TestApplySFSStatsCLIWinsOverConfig(t *testing.T) {
+	f := loadSFSConfig(t, "[sfs]\nstats = true\n")
 	fs := flag.NewFlagSet("sfs", flag.ContinueOnError)
-	stream := fs.Bool("s", false, "")
-	if err := fs.Parse([]string{"-s=false"}); err != nil {
+	stats := fs.Bool("stats", false, "")
+	if err := fs.Parse([]string{"-stats=false"}); err != nil {
 		t.Fatal(err)
 	}
 	visited := config.Visited{}
 	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
 
-	if err := f.ApplySFS(visited, config.SFSFlags{Stream: stream}); err != nil {
+	if err := f.ApplySFS(visited, config.SFSFlags{Stats: stats}); err != nil {
 		t.Fatal(err)
 	}
-	if *stream {
-		t.Fatal("explicit CLI -s=false should override legacy silent=true")
+	if *stats {
+		t.Fatal("explicit CLI -stats=false should override config stats=true")
+	}
+}
+
+// Legacy [sfs].stream / [sfs].silent are accepted for parse-compat but are
+// mode no-ops now that stream is the default. Config stats=true still applies
+// even when the user visits legacy -s on the CLI; stream/silent have no
+// effect on mode resolution.
+func TestApplySFSStatsConfigWithStreamCLIStillSetsStats(t *testing.T) {
+	f := loadSFSConfig(t, "[sfs]\nstats = true\n")
+	fs := flag.NewFlagSet("sfs", flag.ContinueOnError)
+	fs.Bool("s", false, "")
+	if err := fs.Parse([]string{"-s"}); err != nil {
+		t.Fatal(err)
+	}
+	visited := config.Visited{}
+	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
+
+	stats := false
+	if err := f.ApplySFS(visited, config.SFSFlags{Stats: &stats}); err != nil {
+		t.Fatal(err)
+	}
+	if !stats {
+		t.Fatal("config stats=true should still apply when only -s is visited")
 	}
 }
 

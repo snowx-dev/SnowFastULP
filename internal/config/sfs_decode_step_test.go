@@ -28,7 +28,6 @@ decode_step = 524288
 	fs := flag.NewFlagSet("sfs", flag.ContinueOnError)
 	o := fs.String("o", "", "")
 	txt := fs.Bool("txt", false, "")
-	silent := fs.Bool("silent", false, "")
 	clean := fs.Bool("clean", false, "")
 	j := fs.Int("j", 0, "")
 	debug := fs.Bool("debug", false, "")
@@ -41,7 +40,7 @@ decode_step = 524288
 	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
 
 	if err := f.ApplySFS(visited, config.SFSFlags{
-		O: o, Txt: txt, Silent: silent, Clean: clean, J: j, Debug: debug,
+		O: o, Txt: txt, Clean: clean, J: j, Debug: debug,
 		DecodeStep: decodeStep,
 	}); err != nil {
 		t.Fatal(err)
@@ -70,7 +69,6 @@ decode_step = 524288
 	fs := flag.NewFlagSet("sfs", flag.ContinueOnError)
 	o := fs.String("o", "", "")
 	txt := fs.Bool("txt", false, "")
-	silent := fs.Bool("silent", false, "")
 	clean := fs.Bool("clean", false, "")
 	j := fs.Int("j", 0, "")
 	debug := fs.Bool("debug", false, "")
@@ -83,7 +81,7 @@ decode_step = 524288
 	fs.Visit(func(fl *flag.Flag) { visited[fl.Name] = true })
 
 	if err := f.ApplySFS(visited, config.SFSFlags{
-		O: o, Txt: txt, Silent: silent, Clean: clean, J: j, Debug: debug,
+		O: o, Txt: txt, Clean: clean, J: j, Debug: debug,
 		DecodeStep: decodeStep,
 	}); err != nil {
 		t.Fatal(err)

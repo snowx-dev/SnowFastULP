@@ -32,7 +32,7 @@ func TestRunTxtModeWritesHits(t *testing.T) {
 		txtMode:  true,
 		workers:  2,
 		outFile:  outPath,
-		stream:   true,
+		stream:   false,
 		started:  time.Now(),
 		metrics:  metrics,
 	})

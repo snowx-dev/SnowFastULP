@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/pathdisp"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/tuiframe"
@@ -1458,7 +1459,7 @@ func renderDonePathFooter(label string, paths []string, pathStyle lipgloss.Style
 
 	out := []string{""}
 	for i, p := range paths {
-		pathCell := pathStyle.Render(p)
+		pathCell := pathStyle.Render(pathdisp.ForDisplay(p))
 		var line string
 		if i == 0 {
 			line = prefix + labelCell + pathCell

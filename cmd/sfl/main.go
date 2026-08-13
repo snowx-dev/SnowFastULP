@@ -18,6 +18,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/console"
 	"github.com/snowx-dev/SnowFastULP/internal/fileabort"
+	"github.com/snowx-dev/SnowFastULP/internal/outdir"
 	"github.com/snowx-dev/SnowFastULP/internal/secrets"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
@@ -191,6 +192,22 @@ func main() {
 	libraryDir := *outDedup
 	if *outDryRun != "" {
 		libraryDir = *outDryRun
+	}
+	// Output dir preflight: reject a file masquerading as a directory for both
+	// -o (dir-hint guard) and -od/-odr (always-dir guard), mirroring sfu. Dry-run
+	// stats only; non-dry-run stats + MkdirAll so the pipeline never hits ENOTDIR.
+	if destDedup {
+		libFlag := "-od"
+		if *outDryRun != "" {
+			libFlag = "-odr"
+		}
+		if err := preflightOutputDir(libFlag, libraryDir, dryRun); err != nil {
+			usagef("%v", err)
+		}
+	} else {
+		if err := preflightOutputDir("-o", *out, dryRun); err != nil {
+			usagef("%v", err)
+		}
 	}
 	cfg := runConfig{
 		Input: inputArg, OutputDir: *out, LibraryDir: libraryDir, Password: *password,
@@ -992,6 +1009,22 @@ func createOutputPath(cfg runConfig) (string, error) {
 		name += ".zst"
 	}
 	return filepath.Join(cfg.OutputDir, name), nil
+}
+
+// preflightOutputDir validates an output dir flag value before the pipeline
+// starts: -o gets the dir-hint guard (reject -o cleaned.txt), -od/-odr the
+// always-dir guard, and any existing file at the path is rejected with a
+// friendly message instead of a raw ENOTDIR from MkdirAll. Non-dry-run also
+// creates missing parents so the pipeline never hits ENOTDIR mid-run.
+func preflightOutputDir(flagName, dir string, dryRun bool) error {
+	if _, _, err := outdir.ResolveDir(flagName, dir); err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve output dir: %w", err)
+	}
+	return outdir.EnsureReady(flagName, abs, !dryRun)
 }
 
 // makeStagingDir creates a 0700 dir to hold the decrypted ULP. It tries primary

@@ -22,6 +22,7 @@ func TestLoadMissingFileNotExplicit(t *testing.T) {
 
 func TestLoadValidSFUAndSFS(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	path := filepath.Join(dir, "config.toml")
 	content := `
 [sfu]
@@ -171,7 +172,7 @@ func TestResolvePathExpandsTilde(t *testing.T) {
 		{"~/a/b/c", filepath.Join(home, "a", "b", "c")},
 	}
 	for _, c := range cases {
-		got, err := config.ResolvePath("/some/base", c.in)
+		got, err := config.ResolvePath(c.in)
 		if err != nil {
 			t.Fatalf("%q: %v", c.in, err)
 		}
@@ -278,9 +279,11 @@ func TestApplySFUCLIODOverridesConfigO(t *testing.T) {
 	}
 }
 
-func TestApplySFUResolvesRelativeODAgainstBaseDir(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
+func TestApplySFUResolvesRelativeODAgainstCWD(t *testing.T) {
+	work := t.TempDir()
+	cfgDir := t.TempDir()
+	t.Chdir(work)
+	path := filepath.Join(cfgDir, "config.toml")
 	if err := os.WriteFile(path, []byte("[sfu]\nod = \"lib\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -292,13 +295,14 @@ func TestApplySFUResolvesRelativeODAgainstBaseDir(t *testing.T) {
 	if err := f.ApplySFU(config.Visited{}, config.SFUFlags{O: &o, OD: &od}); err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(dir, "lib"); od != want {
-		t.Fatalf("od = %q want %q", od, want)
+	if want := filepath.Join(work, "lib"); od != want {
+		t.Fatalf("od = %q want %q (CWD, not config dir)", od, want)
 	}
 }
 
 func TestApplySFUResolvesTempDir(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte("[sfu]\ntemp_dir = \"tmp\"\n"), 0o644); err != nil {
 		t.Fatal(err)

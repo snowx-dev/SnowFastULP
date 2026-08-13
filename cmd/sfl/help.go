@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 	"golang.org/x/term"
 )
@@ -83,7 +84,8 @@ func renderHelp(bin string) string {
 	b.WriteString("  " + sflOkStyle.Render(bin) + " " + sflWarnStyle.Render("INPUT_PATH") + " " +
 		sflMutedStyle.Render("-o ./ulp/") + "\n")
 	b.WriteString("  " + sflOkStyle.Render(bin) + " " + sflWarnStyle.Render("INPUT_PATH") + " " +
-		sflMutedStyle.Render("-od ./library/ -p passwords.txt") + "\n\n")
+		sflMutedStyle.Render("-od ./library/ -p passwords.txt") + "\n")
+	b.WriteString(sflMutedStyle.Render("  Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; relative paths resolve against process CWD, like flags)") + "\n\n")
 
 	b.WriteString(sflLabelStyle.Render("Examples:") + "\n")
 	b.WriteString("  " + sflOkStyle.Render(bin) + " ./extracted-log/ -o ./ulp/\n")

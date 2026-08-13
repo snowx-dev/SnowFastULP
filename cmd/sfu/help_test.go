@@ -43,6 +43,15 @@ func TestRenderHelpUsesShortBeginnerFriendlyFlagDescriptions(t *testing.T) {
 			t.Fatalf("help still contains verbose detail %q\n\n%s", s, help)
 		}
 	}
+
+	for _, want := range []string{
+		"Optional config:",
+		"relative paths resolve against process CWD, like flags",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help is missing %q\n\n%s", want, help)
+		}
+	}
 }
 
 // -odr is documented in the nerdy tier so library-mode users can find the

@@ -8,10 +8,12 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 )
 
-// [sfu].input resolved against config file dir, not CWD
+// [sfu].input resolved against CWD, not the config file directory.
 func TestResolvedSFUInputRelative(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
+	work := t.TempDir()
+	cfgDir := t.TempDir()
+	t.Chdir(work)
+	path := filepath.Join(cfgDir, "config.toml")
 	content := `
 [sfu]
 input = "./dumps/raw"
@@ -29,7 +31,7 @@ del   = true
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(dir, "dumps", "raw")
+	want := filepath.Join(work, "dumps", "raw")
 	if in != want {
 		t.Fatalf("input = %q, want %q", in, want)
 	}

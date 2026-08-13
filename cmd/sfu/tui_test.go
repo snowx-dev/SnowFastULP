@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/snowx-dev/SnowFastULP/internal/outdir"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 )
@@ -603,7 +604,7 @@ func TestRenderDoneIncludesAllSummaryFields(t *testing.T) {
 		"00:01:42",
 		"10.0 GB",
 		"4",
-		"./sfu_",
+		"sfu_20260509",
 		"77,500,000",
 		"166,172",
 		"234,000", // accepted - unique
@@ -681,7 +682,7 @@ func TestResolveOutputDir(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotDir, gotMkdir, err := resolveOutputDir("-o", c.in)
+			gotDir, gotMkdir, err := outdir.ResolveDir("-o", c.in)
 			if c.wantErrStr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErrStr) {
 					t.Fatalf("err = %v, want substring %q", err, c.wantErrStr)

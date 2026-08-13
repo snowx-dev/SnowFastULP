@@ -26,14 +26,15 @@ func TestRenderFinalSummaryOutputFullPath(t *testing.T) {
 func TestRenderFinalSummaryOutputResolvesRelativePath(t *testing.T) {
 	m := &search.Metrics{}
 	m.Hits.Store(1)
+	dir := t.TempDir()
+	t.Chdir(dir)
 	rel := "hits.txt"
-	want, err := filepath.Abs(rel)
-	if err != nil {
-		t.Fatal(err)
-	}
 	joined := strings.Join(renderFinalSummary(time.Now(), m, rel, "", nil), "\n")
-	if !strings.Contains(collapseRenderedText(joined), want) {
-		t.Fatalf("missing resolved output path %q in:\n%s", want, joined)
+	if !strings.Contains(collapseRenderedText(joined), "hits.txt") {
+		t.Fatalf("missing relative output path in:\n%s", joined)
+	}
+	if strings.Contains(joined, dir) {
+		t.Fatalf("should prefer CWD-relative form, not absolute under %q:\n%s", dir, joined)
 	}
 }
 

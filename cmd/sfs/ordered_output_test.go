@@ -50,7 +50,7 @@ func TestRunOrderedOutputMultiArchiveCompleteAndInOrder(t *testing.T) {
 		archives: archives,
 		workers:  4, // concurrent → archives complete out of order
 		outFile:  outPath,
-		stream:   true,
+		stream:   false, // stats/file-only: ordered archive output
 		started:  time.Now(),
 		metrics:  metrics,
 	}); err != nil {

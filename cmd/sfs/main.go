@@ -68,10 +68,12 @@ func main() {
 		fatal("%v", err)
 	}
 
-	outFile := flag.String("o", "", "write results to this file (default: sfs_results_YYYYMMDD-HHMM.txt)")
-	stream := flag.Bool("s", false, "stream results to stdout without the live screen")
+	outFile := flag.String("o", "", "also write results to this file (with -stats: file only; default stream: tee to stdout)")
+	stats := flag.Bool("stats", false, "live progress screen; write hits to an auto result file (or -o)")
+	// retained for parse-compat; stream is the default now so -s/-silent are no-ops.
+	flag.Bool("s", false, "deprecated alias for default stream-to-stdout mode")
 	txtMode := flag.Bool("txt", false, "search plain .txt files instead of .zst archives (no index)")
-	silent := flag.Bool("silent", false, "deprecated alias for -s")
+	flag.Bool("silent", false, "deprecated alias for -s")
 	clean := flag.Bool("clean", false, "strip URL scheme prefixes from output lines")
 	since := flag.String("since", "", "only search archives modified within this window, e.g. 7d, 12h, 90m (default: all)")
 	workers := flag.Int("j", 0, "")
@@ -99,7 +101,7 @@ func main() {
 	visited.ResolveIntAlias(workers, workersAlias, "j", "workers")
 	visited.ResolveStringAlias(secPath, secretsPathAlias, "sec-path", "secrets-path")
 	if err := cfg.ApplySFS(visited, config.SFSFlags{
-		O: outFile, Txt: txtMode, Stream: stream, Silent: silent, Clean: clean, J: workers, Debug: debugFlag,
+		O: outFile, Txt: txtMode, Stats: stats, Clean: clean, J: workers, Debug: debugFlag,
 		DecodeStep: decodeStep, MaxHitsPerChunk: maxHitsPerChunk, Limit: limit, Since: since,
 		Sec: sec, SecretsPath: secPath,
 	}); err != nil {
@@ -125,6 +127,19 @@ func main() {
 	}
 	// -sec (or -sec-path) skips archive discovery/indexing.
 	if *sec || *secPath != "" {
+		warns, err := checkSecretsFlags(secretsFlagCheck{
+			Stats:           visited["stats"] && *stats,
+			Txt:             visited["txt"] && *txtMode,
+			WorkersSet:      visited["j"] || visited["workers"],
+			DecodeStepSet:   visited["decode-step"],
+			MaxHitsChunkSet: visited["max-hits-per-chunk"],
+		})
+		if err != nil {
+			usage("%v", err)
+		}
+		for _, w := range warns {
+			fmt.Fprintln(os.Stderr, w)
+		}
 		if err := runSecretsSearch(secretsSearchArgs{
 			root:        args.Root,
 			pattern:     pattern,
@@ -198,13 +213,15 @@ func main() {
 	if err != nil {
 		fatal("getwd: %v", err)
 	}
-	streamMode := streamRequested(*stream, *silent)
-	outputMode, err := resolveOutputMode(*outFile, streamMode, cwd, started)
+	// -stats selects the old file+TUI path; legacy -s/-silent are no-ops (stream is default).
+	statsMode := *stats
+	outputMode, err := resolveOutputMode(*outFile, statsMode, cwd, started)
 	if err != nil {
 		fatal("%v", err)
 	}
 	*outFile = outputMode.OutFile
-	streamMode = outputMode.Stream
+	streamMode := outputMode.Stream
+	statsMode = outputMode.Stats
 	// dont clobber search target w/ -o/default output, O_TRUNC fires pre-scan
 	if err := ensureNoOutputCollision(*outFile, archives); err != nil {
 		fatal("%v", err)
@@ -219,7 +236,7 @@ func main() {
 	ctx = fileabort.WithContext(ctx, files)
 	go reg.WatchInterrupt(ctx, files, signaled)
 
-	uiMode := resolveUIMode(streamMode || !vtOK)
+	uiMode := resolveUIMode(!statsMode || !vtOK)
 
 	var dbg *debugLog
 	var debugLogPath string
@@ -249,6 +266,7 @@ func main() {
 		workers:    w,
 		outFile:    *outFile,
 		stream:     streamMode,
+		stats:      statsMode,
 		clean:      *clean,
 		cwd:        cwd,
 		gomaxprocs: runtime.GOMAXPROCS(0),
@@ -290,6 +308,7 @@ func main() {
 		started:         started,
 		debug:           dbg,
 		metrics:         metrics,
+		stdout:          os.Stdout,
 		indexBytesTotal: debugInfo.indexBytesTotal,
 		uiMode:          uiMode,
 	})
@@ -308,7 +327,7 @@ func main() {
 	if dbg != nil {
 		dbg.logCompletion(metrics, wall, debugInfo)
 	}
-	if !streamMode {
+	if statsMode {
 		// A generated-default output with zero hits would leave a 0-byte
 		// sfs_results_*.txt cluttering CWD; remove it (run() has returned, so
 		// its deferred Close already ran — safe to unlink on Windows too) and
@@ -343,6 +362,10 @@ type runConfig struct {
 	started         time.Time
 	debug           *debugLog
 	metrics         *search.Metrics
+	// stdout is the hit stream sink for stream/tee mode. Defaults to os.Stdout
+	// in main; tests inject a buffer so they never mutate the process-global
+	// os.Stdout (which would race with t.Parallel).
+	stdout          io.Writer
 	// indexBytesTotal and uiMode are resolved by the caller (main) since it
 	// already computes them for the debug header; run() consumes them instead
 	// of re-statting every archive and re-resolving the UI mode.
@@ -379,12 +402,18 @@ func run(ctx context.Context, cfg runConfig) error {
 
 	uiMode := cfg.uiMode
 
-	// Hit output sink: a file when -o / default-generated, otherwise stdout for
-	// -s streaming. The live status frame (stderr) shows a hit counter and
-	// progress; results themselves are never painted into the alt-screen, which
-	// is what kept letting the frame leak onto the user's scrollback.
-	var resultWriter io.Writer = os.Stdout
-	if out != nil {
+	// Hit sink: stats → file only; stream → stdout; stream+-o → tee both.
+	// The live status frame (stderr) shows a hit counter and progress; results
+	// themselves are never painted into the alt-screen.
+	stdout := cfg.stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	var resultWriter io.Writer = stdout
+	switch {
+	case cfg.stream && out != nil:
+		resultWriter = io.MultiWriter(stdout, out)
+	case out != nil:
 		resultWriter = out
 	}
 
@@ -472,10 +501,12 @@ func run(ctx context.Context, cfg runConfig) error {
 
 	hitCh := make(chan search.Hit, 4096)
 	sink := search.NewWriter(resultWriter, cfg.clean)
-	orderedOutput := cfg.outFile != ""
-	// Flush each hit only when streaming to an interactive stdout (-s on a TTY)
-	// so the user sees results live; piped/file runs buffer for throughput.
-	streamFlush := out == nil && stdoutIsTTY()
+	// Ordered archive grouping only in stats (file-only) mode; stream/tee stay
+	// unordered for live throughput like the old -s path.
+	orderedOutput := !cfg.stream
+	// Flush each hit when streaming to an interactive stdout so the user sees
+	// results live; piped/file-only runs buffer for throughput.
+	streamFlush := cfg.stream && stdoutIsTTY()
 
 	var printer *search.OrderedPrinter
 	writeHit := func(h search.Hit) error {

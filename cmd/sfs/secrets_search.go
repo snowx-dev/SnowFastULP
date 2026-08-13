@@ -24,12 +24,40 @@ type secretsSearchArgs struct {
 	clean       bool   // -clean
 }
 
+// secretsUnsupportedFlags lists archive-search options that do not apply to
+// -sec. stats/txt are hard errors; the rest are stderr notes.
+type secretsFlagCheck struct {
+	Stats           bool
+	Txt             bool
+	WorkersSet      bool
+	DecodeStepSet   bool
+	MaxHitsChunkSet bool
+}
+
+// checkSecretsFlags rejects -stats/-txt with -sec and notes other unused flags.
+func checkSecretsFlags(c secretsFlagCheck) (warns []string, err error) {
+	if c.Stats {
+		return nil, fmt.Errorf("-stats is not supported with -sec (use -o FILE for file-only output)")
+	}
+	if c.Txt {
+		return nil, fmt.Errorf("-txt is not supported with -sec")
+	}
+	if c.WorkersSet {
+		warns = append(warns, "note: -j/-workers is ignored with -sec")
+	}
+	if c.DecodeStepSet {
+		warns = append(warns, "note: -decode-step is ignored with -sec")
+	}
+	if c.MaxHitsChunkSet {
+		warns = append(warns, "note: -max-hits-per-chunk is ignored with -sec")
+	}
+	return warns, nil
+}
+
 // runSecretsSearch answers a `sfs -sec` query: it reads the secrets DB
-// (read-only) and writes matching rows through the same output plumbing the ULP
-// search uses. When streaming to a real terminal (no -o, stdout a TTY) the rows
-// render as a styled, bordered table for easy scanning; a pipe or explicit -o
-// keeps the grep/cut-friendly TSV so downstream tooling stays intact. -clean is
-// honored on the TSV path.
+// (read-only) and writes matching rows. When streaming to a real terminal
+// (no -o, stdout a TTY) the rows render as a styled table; a pipe or explicit
+// -o keeps the grep/cut-friendly TSV (-o is file-only, never tees).
 func runSecretsSearch(a secretsSearchArgs) error {
 	opts, err := buildSecretsQueryOpts(a)
 	if err != nil {
@@ -42,22 +70,10 @@ func runSecretsSearch(a secretsSearchArgs) error {
 	return runSecretsTSV(a, dbPath, opts)
 }
 
-// runSecretsTSV is the plain output path: an explicit -o file, a generated
-// sfs_results_*.txt, or streaming TSV to a piped stdout. Reuses the ULP search
-// writer so -clean and the file-finalization rules match archive search.
+// runSecretsTSV is the plain output path: an explicit -o file, or streaming TSV
+// to a piped stdout. Reuses the ULP search writer so -clean matches archive search.
 func runSecretsTSV(a secretsSearchArgs, dbPath string, opts secrets.QueryOpts) error {
-	started := time.Now()
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getwd: %w", err)
-	}
-	stream := a.outFile == ""
-	om, err := resolveOutputMode(a.outFile, stream, cwd, started)
-	if err != nil {
-		return err
-	}
-
-	out, w, err := openSecretsOutput(om.OutFile)
+	out, w, err := openSecretsOutput(a.outFile)
 	if err != nil {
 		return err
 	}
@@ -68,18 +84,15 @@ func runSecretsTSV(a secretsSearchArgs, dbPath string, opts secrets.QueryOpts) e
 	if ferr := sink.Flush(); ferr != nil && qerr == nil {
 		qerr = ferr
 	}
-	// Close before finalizeEmptyOutput so an empty generated file can be removed
-	// (Windows cannot unlink an open handle).
 	if out != nil {
 		if cerr := out.Close(); cerr != nil && qerr == nil {
 			qerr = cerr
 		}
 	}
-	summaryOut, _ := finalizeEmptyOutput(om.OutFile, om.Generated, int64(n))
 	if qerr != nil {
 		return qerr
 	}
-	printSecretsSummary(n, summaryOut, om.Stream)
+	printSecretsSummary(n, a.outFile, a.outFile == "")
 	return nil
 }
 
@@ -98,6 +111,8 @@ func buildSecretsQueryOpts(a secretsSearchArgs) (secrets.QueryOpts, error) {
 	return opts, nil
 }
 
+// openSecretsOutput returns a file handle (if any) and the hit writer.
+// Explicit -o is file-only (no stdout tee); empty path streams to stdout.
 func openSecretsOutput(outFile string) (*os.File, io.Writer, error) {
 	if outFile == "" {
 		return nil, os.Stdout, nil

@@ -6,8 +6,9 @@
 # Default path may be absent (no config loaded); explicit overrides must exist.
 #
 # Optional defaults for sfu, sfs, and sfl. CLI flags always override these values.
-# Relative paths resolve against the directory containing THIS file, not the CWD
-# where you invoke sfu/sfs/sfl. Leading ~/ expands to home.
+# Relative paths resolve against the process CWD (same as CLI flags), not the
+# config file directory. Leading ~/ expands to home. Use absolute or ~/… paths
+# when the location must not depend on where you run the tool.
 #
 # Naming: TOML keys use snake_case, CLI flags use kebab-case. The loader
 # maps them automatically (e.g. `temp_dir` here = `-temp-dir` on the CLI).
@@ -48,8 +49,10 @@
                                # separator rejects the line).
 # parse_rules  = "./rules.txt"  # one regexp per line; first pattern whose
                                # named groups url|host + login + password all
-                               # capture non-empty imports the line. Resolved
-                               # relative to this config file.
+                               # capture non-empty imports the line. Relative
+                               # to process CWD (like other paths). Uses Go's
+                               # RE2 engine (linear-time, no backtracking);
+                               # keep patterns simple on untrusted dumps.
 
 # Concurrency / tuning (0 = auto for all three)
 # workers  = 0                # phase-1 parser goroutines.
@@ -66,11 +69,14 @@
 [sfs]
 # I/O
 # dir    = "./library/"       # default search dir when no positional given.
-# o      = "./results.txt"    # write results to this file (default: CWD sfs_results_*.txt).
-# stream = false              # stream results to stdout instead of writing a result file.
+# o      = "./results.txt"    # also write results to this file (tees with default
+                               # stream; file-only when stats = true).
+# stats  = false              # live progress screen + auto sfs_results_*.txt
+                               # (or o). Default is stream hits to stdout.
 # txt    = false              # search plain .txt files instead of .zst archives
                                # (skips the index path; slower but no preindex needed).
 # clean  = false              # strip URL scheme prefixes from output lines.
+# stream = false              # deprecated alias for default stream-to-stdout mode.
 # silent = false              # deprecated alias for stream.
 # l      = 0                  # stop after N total hits, then exit (0 = unlimited).
 # since  = "7d"               # only search archives modified within this window

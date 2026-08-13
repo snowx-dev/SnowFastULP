@@ -10,9 +10,10 @@ import (
 )
 
 // [sfs].sec + secrets_path flow into flags when the CLI didn't set them, and
-// secrets_path resolves against the config dir (mirroring sfl).
+// secrets_path resolves against CWD (same as other config paths).
 func TestApplySFSSecretsFromTOML(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	path := filepath.Join(dir, "config.toml")
 	content := `
 [sfs]
@@ -43,7 +44,7 @@ secrets_path = "vault/secrets.sqlite"
 		t.Fatal("sec = false, want true (from TOML)")
 	}
 	if want := filepath.Join(dir, "vault/secrets.sqlite"); *secPath != want {
-		t.Fatalf("sec-path = %q, want %q (resolved against config dir)", *secPath, want)
+		t.Fatalf("sec-path = %q, want %q (resolved against CWD)", *secPath, want)
 	}
 }
 

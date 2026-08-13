@@ -1,29 +1,18 @@
 package main
 
 import (
-	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/snowx-dev/SnowFastULP/internal/pathdisp"
 )
 
 func outputPathForSummary(path string) string {
-	if path == "" {
-		return ""
-	}
-	// A parenthesized note (e.g. "(no matches)" when a zero-hit generated file
-	// was removed) is shown verbatim, not absolutized as a filesystem path.
-	if strings.HasPrefix(path, "(") {
-		return path
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		return abs
-	}
-	return path
+	return pathdisp.ForDisplay(path)
 }
 
-// -o path below COMPLETE frame, full path no trim
+// -o path below COMPLETE frame, prefer CWD-relative form
 func renderOutputFooter(outFile string, boxStart, boxEnd colorful.Color) []string {
 	outFile = outputPathForSummary(outFile)
 	if outFile == "" {

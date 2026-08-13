@@ -4,8 +4,7 @@ import "fmt"
 
 // File is the decoded config.toml.
 type File struct {
-	path    string
-	baseDir string
+	path string
 
 	SFU SFUSection `toml:"sfu"`
 	SFS SFSSection `toml:"sfs"`
@@ -41,6 +40,7 @@ type SFSSection struct {
 	Dir             string `toml:"dir"`
 	Txt             bool   `toml:"txt"`
 	O               string `toml:"o"`
+	Stats           bool   `toml:"stats"`
 	Stream          bool   `toml:"stream"`
 	Silent          bool   `toml:"silent"`
 	Clean           bool   `toml:"clean"`
@@ -80,10 +80,7 @@ type SFLSection struct {
 // Path returns the loaded config file path.
 func (f File) Path() string { return f.path }
 
-// BaseDir is the dir containing the config file.
-func (f File) BaseDir() string { return f.baseDir }
-
-// ResolvedSFUDir returns [sfu].o, [sfu].od or [sfu].input resolved against base dir.
+// ResolvedSFUDir returns [sfu].o, [sfu].od or [sfu].input resolved against CWD.
 func (f File) ResolvedSFUDir(key string) (string, error) {
 	var raw string
 	switch key {
@@ -96,15 +93,15 @@ func (f File) ResolvedSFUDir(key string) (string, error) {
 	default:
 		return "", fmt.Errorf("config: unknown sfu dir key %q", key)
 	}
-	return ResolvePath(f.baseDir, raw)
+	return ResolvePath(raw)
 }
 
-// ResolvedSFSDir returns [sfs].dir resolved against base dir.
+// ResolvedSFSDir returns [sfs].dir resolved against CWD.
 func (f File) ResolvedSFSDir() (string, error) {
-	return ResolvePath(f.baseDir, f.SFS.Dir)
+	return ResolvePath(f.SFS.Dir)
 }
 
-// ResolvedSFLDir returns [sfl].o, [sfl].od or [sfl].input resolved against base dir.
+// ResolvedSFLDir returns [sfl].o, [sfl].od or [sfl].input resolved against CWD.
 func (f File) ResolvedSFLDir(key string) (string, error) {
 	var raw string
 	switch key {
@@ -117,5 +114,5 @@ func (f File) ResolvedSFLDir(key string) (string, error) {
 	default:
 		return "", fmt.Errorf("config: unknown sfl dir key %q", key)
 	}
-	return ResolvePath(f.baseDir, raw)
+	return ResolvePath(raw)
 }

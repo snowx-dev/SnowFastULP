@@ -13,6 +13,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/cliargs"
 	"github.com/snowx-dev/SnowFastULP/internal/config"
 	"github.com/snowx-dev/SnowFastULP/internal/console"
+	"github.com/snowx-dev/SnowFastULP/internal/outdir"
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/termctl"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
@@ -25,33 +26,6 @@ import (
 // alt-screen is always left cleanly. ulpengine.PrintManualCleanupHint prints
 // stranded scratch paths on a force-exit.
 var reg = termctl.New(os.Stderr, ulpengine.PrintManualCleanupHint)
-
-// validates output dir flag, empty = CWD. must look like a dir, plain
-// file paths rejected. flagName used in error msg
-func resolveOutputDir(flagName, userOut string) (dir string, autoMkdir bool, err error) {
-	userOut = strings.TrimSpace(userOut)
-	if userOut == "" {
-		return ".", true, nil
-	}
-	if !isDirHint(userOut) {
-		return "", false, fmt.Errorf(
-			"%s must be a directory (trailing %q or existing directory); got %q — use e.g. %s ./out/",
-			flagName, string(os.PathSeparator), userOut, flagName)
-	}
-	return userOut, true, nil
-}
-
-// looks like a dir: trailing separator, or stats as existing dir.
-// stat errors fall through to false
-func isDirHint(p string) bool {
-	if strings.HasSuffix(p, "/") || strings.HasSuffix(p, string(os.PathSeparator)) {
-		return true
-	}
-	if info, err := os.Stat(p); err == nil && info.IsDir() {
-		return true
-	}
-	return false
-}
 
 // outputMode captures which output sink the run targets and whether it's a
 // dry-run preview. Kept pure so the -o / -od / -odr mutual-exclusion and
@@ -265,7 +239,7 @@ func main() {
 		*zst = true
 	}
 
-	outDir, autoMkdir, err := resolveOutputDir(outFlagName, outArg)
+	outDir, autoMkdir, err := outdir.ResolveDir(outFlagName, outArg)
 	if err != nil {
 		usagef("%v", err)
 	}
@@ -283,9 +257,9 @@ func main() {
 		fatalf("resolve output: %v", err)
 	}
 
-	if autoMkdir && !dryRun {
-		if err := os.MkdirAll(outDirAbs, 0o755); err != nil {
-			fatalf("create output dir: %v", err)
+	if autoMkdir {
+		if err := outdir.EnsureReady(outFlagName, outDirAbs, !dryRun); err != nil {
+			fatalf("%v", err)
 		}
 	}
 

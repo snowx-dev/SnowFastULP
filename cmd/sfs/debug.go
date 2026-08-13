@@ -107,6 +107,7 @@ type debugRunInfo struct {
 	workers         int
 	outFile         string
 	stream          bool
+	stats           bool
 	clean           bool
 	cwd             string
 	gomaxprocs      int
@@ -140,6 +141,7 @@ func (d *debugLog) writeHeader(bin string, started time.Time, argv []string, inf
 	d.writef("workers: %d\n", info.workers)
 	d.writef("output: %s\n", debugOutputDesc(info.outFile))
 	d.writef("stream: %v\n", info.stream)
+	d.writef("stats: %v\n", info.stats)
 	d.writef("clean: %v\n", info.clean)
 	d.writef("uiMode: %s\n", info.uiMode)
 	d.writef("stderrTTY: %v\n", info.stderrTTY)

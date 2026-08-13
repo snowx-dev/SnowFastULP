@@ -8,8 +8,10 @@ import (
 	"strings"
 )
 
-// ResolvePath joins rel onto baseDir, expands leading ~. no env var expansion.
-func ResolvePath(baseDir, rel string) (string, error) {
+// ResolvePath expands leading ~ and returns a cleaned path.
+// Relative paths resolve against the process CWD (same as CLI flags), not the
+// config file directory. No env var expansion.
+func ResolvePath(rel string) (string, error) {
 	rel = strings.TrimSpace(rel)
 	if rel == "" {
 		return "", nil
@@ -28,10 +30,11 @@ func ResolvePath(baseDir, rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return filepath.Clean(rel), nil
 	}
-	if baseDir == "" {
-		return filepath.Clean(rel), nil
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("config: resolve relative path: %w", err)
 	}
-	return filepath.Clean(filepath.Join(baseDir, rel)), nil
+	return filepath.Clean(filepath.Join(cwd, rel)), nil
 }
 
 // DefaultPath returns the platform default config file location.

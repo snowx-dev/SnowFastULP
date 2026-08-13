@@ -11,6 +11,7 @@ import (
 
 func TestConfigDirForPatternOnly(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	lib := filepath.Join(dir, "library")
 	if err := os.Mkdir(lib, 0o755); err != nil {
 		t.Fatal(err)

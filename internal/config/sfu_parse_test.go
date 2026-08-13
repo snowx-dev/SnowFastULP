@@ -11,6 +11,7 @@ import (
 // [sfu].parse_delims / parse_rules land on flags when no CLI flag set them.
 func TestSFUParseCustomFromConfig(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	cfgPath := filepath.Join(dir, "config.toml")
 	content := `
 [sfu]
@@ -32,7 +33,6 @@ parse_rules  = "./rules.txt"
 	if delims != "|" {
 		t.Fatalf("parse_delims = %q", delims)
 	}
-	// parse_rules is resolved against the config file's dir
 	if want := filepath.Join(dir, "rules.txt"); rules != want {
 		t.Fatalf("parse_rules = %q, want %q", rules, want)
 	}

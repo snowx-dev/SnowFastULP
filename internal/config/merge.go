@@ -96,7 +96,7 @@ func (f File) ApplySFU(v Visited, fl SFUFlags) error {
 		*fl.Buckets = *f.SFU.Buckets
 	}
 	if !v.set("temp-dir") && f.SFU.TempDir != "" {
-		p, err := ResolvePath(f.baseDir, f.SFU.TempDir)
+		p, err := ResolvePath(f.SFU.TempDir)
 		if err != nil {
 			return err
 		}
@@ -127,7 +127,7 @@ func (f File) ApplySFU(v Visited, fl SFUFlags) error {
 			*fl.ParseDelims = f.SFU.ParseDelims
 		}
 		if f.SFU.ParseRules != "" && fl.ParseRules != nil {
-			p, err := ResolvePath(f.baseDir, f.SFU.ParseRules)
+			p, err := ResolvePath(f.SFU.ParseRules)
 			if err != nil {
 				return err
 			}
@@ -150,8 +150,7 @@ func (f File) ApplySFU(v Visited, fl SFUFlags) error {
 type SFSFlags struct {
 	O               *string
 	Txt             *bool
-	Stream          *bool
-	Silent          *bool
+	Stats           *bool
 	Clean           *bool
 	J               *int
 	Debug           *bool
@@ -166,7 +165,7 @@ type SFSFlags struct {
 // ApplySFS applies unvisited config values to sfs flags.
 func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	if !v.set("o") && f.SFS.O != "" {
-		p, err := ResolvePath(f.baseDir, f.SFS.O)
+		p, err := ResolvePath(f.SFS.O)
 		if err != nil {
 			return err
 		}
@@ -175,10 +174,8 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 	if !v.set("txt") && f.SFS.Txt {
 		*fl.Txt = true
 	}
-	// -s and -silent both route through setSFSStreamFlag; either config key
-	// wins when neither flag was visited on the command line.
-	if !v.set("s") && !v.set("silent") && (f.SFS.Stream || f.SFS.Silent) {
-		setSFSStreamFlag(fl)
+	if !v.set("stats") && f.SFS.Stats && fl.Stats != nil {
+		*fl.Stats = true
 	}
 	if !v.set("clean") && f.SFS.Clean {
 		*fl.Clean = true
@@ -205,23 +202,13 @@ func (f File) ApplySFS(v Visited, fl SFSFlags) error {
 		*fl.Sec = true
 	}
 	if !v.set("sec-path") && f.SFS.SecretsPath != "" && fl.SecretsPath != nil {
-		p, err := ResolvePath(f.baseDir, f.SFS.SecretsPath)
+		p, err := ResolvePath(f.SFS.SecretsPath)
 		if err != nil {
 			return err
 		}
 		*fl.SecretsPath = p
 	}
 	return nil
-}
-
-func setSFSStreamFlag(fl SFSFlags) {
-	if fl.Stream != nil {
-		*fl.Stream = true
-		return
-	}
-	if fl.Silent != nil {
-		*fl.Silent = true
-	}
 }
 
 // SFLFlags holds pointers to sfl flag variables for config merge.
@@ -273,7 +260,7 @@ func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 		*fl.Workers = *f.SFL.Workers
 	}
 	if !v.set("temp-dir") && f.SFL.TempDir != "" && fl.TempDir != nil {
-		p, err := ResolvePath(f.baseDir, f.SFL.TempDir)
+		p, err := ResolvePath(f.SFL.TempDir)
 		if err != nil {
 			return err
 		}
@@ -281,7 +268,7 @@ func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 	}
 	if !v.set("p") && f.SFL.Password != "" && fl.Password != nil {
 		p := f.SFL.Password
-		if resolved, err := ResolvePath(f.baseDir, p); err == nil {
+		if resolved, err := ResolvePath(p); err == nil {
 			if _, statErr := os.Stat(resolved); statErr == nil {
 				p = resolved
 			}
@@ -316,7 +303,7 @@ func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 		*fl.Env = true
 	}
 	if !v.set("secrets-path") && f.SFL.SecretsPath != "" && fl.SecretsPath != nil {
-		p, err := ResolvePath(f.baseDir, f.SFL.SecretsPath)
+		p, err := ResolvePath(f.SFL.SecretsPath)
 		if err != nil {
 			return err
 		}

@@ -10,25 +10,28 @@ import (
 type outputMode struct {
 	OutFile   string
 	Stream    bool
+	Stats     bool
 	Generated bool
 }
 
-func streamRequested(streamFlag, silentAlias bool) bool {
-	return streamFlag || silentAlias
-}
-
-func resolveOutputMode(requestedOut string, stream bool, cwd string, started time.Time) (outputMode, error) {
+// resolveOutputMode picks hit destination from -stats / -o.
+// Default (stats=false): stream to stdout; with -o, tee stdout+file.
+// Stats: file-only (auto sfs_results_*.txt or explicit -o) for the live TUI path.
+func resolveOutputMode(requestedOut string, stats bool, cwd string, started time.Time) (outputMode, error) {
+	if stats {
+		if requestedOut != "" {
+			return outputMode{OutFile: requestedOut, Stats: true}, nil
+		}
+		outFile, err := defaultOutputPath(cwd, started)
+		if err != nil {
+			return outputMode{}, err
+		}
+		return outputMode{OutFile: outFile, Generated: true, Stats: true}, nil
+	}
 	if requestedOut != "" {
-		return outputMode{OutFile: requestedOut}, nil
+		return outputMode{OutFile: requestedOut, Stream: true}, nil
 	}
-	if stream {
-		return outputMode{Stream: true}, nil
-	}
-	outFile, err := defaultOutputPath(cwd, started)
-	if err != nil {
-		return outputMode{}, err
-	}
-	return outputMode{OutFile: outFile, Generated: true}, nil
+	return outputMode{Stream: true}, nil
 }
 
 func defaultOutputPath(cwd string, started time.Time) (string, error) {

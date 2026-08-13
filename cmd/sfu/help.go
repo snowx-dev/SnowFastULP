@@ -55,7 +55,7 @@ func renderHelp(bin string) string {
 		{"-split-zst", "N", "Split compressed output every N unique lines."},
 		{"-loose", "", "Accept more input formats, with less strict parsing."},
 		{"-parse-delims", "SEP", "Replace the parser: split lines as url<SEP>login<SEP>password (exactly 3 fields)."},
-		{"-parse-rules", "FILE", "Replace the parser: regexps with named groups url|host/login/password, one per line."},
+		{"-parse-rules", "FILE", "Replace the parser: regexps with named groups url|host/login/password, one per line. Go RE2 engine (linear-time, no backtracking); keep patterns simple on untrusted dumps."},
 		{"-no-encoding-sniff", "", "Skip encoding checks and read files as UTF-8."},
 	}
 	devs := []argDef{
@@ -87,7 +87,7 @@ func renderHelp(bin string) string {
 		byteStyle.Render("<input-file-or-dir>") + " " +
 		mutedStyle.Render("[-o DIR]") + "\n")
 	b.WriteString(mutedStyle.Render("    More flags below: Args for nerds, then Args for devs (-debug, -debug-reject).") + "\n")
-	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG)") + "\n\n")
+	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; relative paths resolve against process CWD, like flags)") + "\n\n")
 
 	b.WriteString(labelStyle.Render("Commands:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " update   " +

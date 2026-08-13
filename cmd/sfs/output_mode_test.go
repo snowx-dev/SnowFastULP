@@ -7,11 +7,30 @@ import (
 	"time"
 )
 
-func TestResolveOutputModeDefaultGeneratesCWDResultFile(t *testing.T) {
+func TestResolveOutputModeDefaultStreamsToStdout(t *testing.T) {
+	mode, err := resolveOutputMode("", false, t.TempDir(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode.OutFile != "" {
+		t.Fatalf("default outFile = %q, want stdout (empty)", mode.OutFile)
+	}
+	if !mode.Stream {
+		t.Fatal("default mode should stream to stdout")
+	}
+	if mode.Stats {
+		t.Fatal("default mode should not be stats")
+	}
+	if mode.Generated {
+		t.Fatal("default stream mode should not mark a generated file")
+	}
+}
+
+func TestResolveOutputModeStatsGeneratesCWDResultFile(t *testing.T) {
 	dir := t.TempDir()
 	started := time.Date(2026, 6, 27, 23, 38, 59, 0, time.Local)
 
-	mode, err := resolveOutputMode("", false, dir, started)
+	mode, err := resolveOutputMode("", true, dir, started)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,20 +39,23 @@ func TestResolveOutputModeDefaultGeneratesCWDResultFile(t *testing.T) {
 		t.Fatalf("outFile = %q, want %q", mode.OutFile, want)
 	}
 	if mode.Stream {
-		t.Fatal("default mode should not stream to stdout")
+		t.Fatal("stats mode should not stream to stdout")
+	}
+	if !mode.Stats {
+		t.Fatal("stats mode should be marked Stats")
 	}
 	if !mode.Generated {
-		t.Fatal("default mode should mark the output file as generated")
+		t.Fatal("stats mode should mark the output file as generated")
 	}
 }
 
-func TestResolveOutputModeDefaultAvoidsClobberingSameMinuteResult(t *testing.T) {
+func TestResolveOutputModeStatsAvoidsClobberingSameMinuteResult(t *testing.T) {
 	dir := t.TempDir()
 	started := time.Date(2026, 6, 27, 23, 38, 0, 0, time.Local)
 	mustWriteFile(t, filepath.Join(dir, "sfs_results_20260627-2338.txt"), "old")
 	mustWriteFile(t, filepath.Join(dir, "sfs_results_20260627-2338_2.txt"), "old")
 
-	mode, err := resolveOutputMode("", false, dir, started)
+	mode, err := resolveOutputMode("", true, dir, started)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +65,7 @@ func TestResolveOutputModeDefaultAvoidsClobberingSameMinuteResult(t *testing.T) 
 	}
 }
 
-func TestResolveOutputModeExplicitOutputWinsOverGeneratedDefault(t *testing.T) {
+func TestResolveOutputModeExplicitTeeWithoutStats(t *testing.T) {
 	dir := t.TempDir()
 	explicit := filepath.Join(dir, "hits.txt")
 
@@ -54,33 +76,36 @@ func TestResolveOutputModeExplicitOutputWinsOverGeneratedDefault(t *testing.T) {
 	if mode.OutFile != explicit {
 		t.Fatalf("outFile = %q, want explicit %q", mode.OutFile, explicit)
 	}
-	if mode.Stream {
-		t.Fatal("explicit file output should not be stdout stream mode")
+	if !mode.Stream {
+		t.Fatal("-o without -stats should stream (tee) to stdout")
+	}
+	if mode.Stats {
+		t.Fatal("-o without -stats should not be stats mode")
 	}
 	if mode.Generated {
 		t.Fatal("explicit file output should not be marked generated")
 	}
 }
 
-func TestResolveOutputModeStreamUsesStdout(t *testing.T) {
-	mode, err := resolveOutputMode("", true, t.TempDir(), time.Now())
+func TestResolveOutputModeStatsWithExplicitOutput(t *testing.T) {
+	dir := t.TempDir()
+	explicit := filepath.Join(dir, "hits.txt")
+
+	mode, err := resolveOutputMode(explicit, true, dir, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode.OutFile != "" {
-		t.Fatalf("stream mode outFile = %q, want stdout", mode.OutFile)
+	if mode.OutFile != explicit {
+		t.Fatalf("outFile = %q, want explicit %q", mode.OutFile, explicit)
 	}
-	if !mode.Stream {
-		t.Fatal("stream mode should be marked as stdout streaming")
+	if mode.Stream {
+		t.Fatal("stats + -o should be file-only (no stdout stream)")
 	}
-}
-
-func TestStreamRequestedAcceptsSilentAlias(t *testing.T) {
-	if !streamRequested(false, true) {
-		t.Fatal("-silent should remain an alias for stream mode")
+	if !mode.Stats {
+		t.Fatal("stats + -o should be marked Stats")
 	}
-	if !streamRequested(true, false) {
-		t.Fatal("-s should request stream mode")
+	if mode.Generated {
+		t.Fatal("explicit -o should not be marked generated")
 	}
 }
 

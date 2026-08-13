@@ -10,6 +10,7 @@ import (
 
 func TestLoadValidSFL(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	path := filepath.Join(dir, "config.toml")
 	content := `
 [sfl]
@@ -83,6 +84,7 @@ func TestApplySFLConfigODTakesPriorityOverO(t *testing.T) {
 
 func TestApplySFLResolvesRelativePaths(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(filepath.Join(dir, "pw.txt"), []byte("secret\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -114,6 +116,7 @@ func TestApplySFLResolvesRelativePaths(t *testing.T) {
 
 func TestApplySFLSecrets(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte("[sfl]\nsecrets = true\nsecrets_path = \"vault/secrets.sqlite\"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -174,6 +177,7 @@ func TestApplySFLCLIOOverridesConfigOD(t *testing.T) {
 // suppresses the config od pull so the two don't trip mutual exclusion.
 func TestApplySFLODRReusesODPath(t *testing.T) {
 	dir := t.TempDir()
+	t.Chdir(dir)
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte("[sfl]\nod = \"lib\"\nodr = true\n"), 0o644); err != nil {
 		t.Fatal(err)
