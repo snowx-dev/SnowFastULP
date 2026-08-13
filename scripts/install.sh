@@ -378,6 +378,54 @@ for item in "${assets[@]}"; do
   ok "installed $cmd -> $install_dir/$cmd"
 done
 
+# Drop the install marker so `sfu update` knows this is a trusted install
+# dir and may auto-install new binaries alongside the existing ones.
+# Stamp failure must not abort config/PATH. Sudo is not required for the
+# default user-local install; the SUDO_USER handling is defensive only.
+write_install_stamp() {
+  local data_home snowfast_data_dir abs_dir user_home
+  abs_dir="$(cd "$install_dir" && pwd)" || abs_dir="$install_dir"
+
+  user_home="$HOME"
+  if [ -n "${SUDO_USER:-}" ] && [ "$(id -u)" -eq 0 ]; then
+    if command -v getent >/dev/null 2>&1; then
+      user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+    fi
+    if [ -z "$user_home" ] && command -v dscl >/dev/null 2>&1; then
+      user_home="$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)"
+    fi
+    if [ -z "$user_home" ]; then
+      user_home="$(eval echo "~$SUDO_USER" 2>/dev/null || true)"
+    fi
+    if [ -z "$user_home" ] || [ "$user_home" = "~$SUDO_USER" ]; then
+      user_home="$HOME"
+      warn "could not resolve home for $SUDO_USER; writing stamp under $user_home"
+    fi
+  fi
+
+  data_home="${XDG_DATA_HOME:-}"
+  if [ -n "${SUDO_USER:-}" ] && [ "$(id -u)" -eq 0 ]; then
+    case "$data_home" in
+      "$user_home"/*) ;;
+      *) data_home="" ;;
+    esac
+  fi
+  if [ -z "$data_home" ]; then
+    data_home="$user_home/.local/share"
+  fi
+  snowfast_data_dir="$data_home/snowfast"
+  mkdir -p "$snowfast_data_dir" || return 1
+  printf 'dir=%s\nversion=%s\ninstalled_at=%s\n' "$abs_dir" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$snowfast_data_dir/install.stamp" || return 1
+  if [ -n "${SUDO_USER:-}" ] && [ "$(id -u)" -eq 0 ]; then
+    chown "$SUDO_USER" "$snowfast_data_dir" "$snowfast_data_dir/install.stamp" 2>/dev/null || true
+  fi
+}
+
+if ! write_install_stamp; then
+  warn "could not write install marker (sfu update --install-new can still add new tools)"
+fi
+
 section "Writing config"
 
 config_status="preserved existing"

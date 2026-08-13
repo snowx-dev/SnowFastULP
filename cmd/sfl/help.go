@@ -45,7 +45,7 @@ func renderHelp(bin string) string {
 		{"-loose", "", "High-recall parser: accept host:port:user:pw, bare host:user:pw, LPU; less precise output. Merges credentials that differ only by URL path."},
 	}
 	nerds = append(nerds,
-		argDef{"-env", "", "Copy env/key files flat into <out>/sfl_<timestamp>_secrets/."},
+		argDef{"-env", "", "Copy env/key files flat into <out>/sfl_<timestamp>_secrets/, and copy Telegram tdata folders whole into the same dir."},
 	)
 	// Secret-scanning flags only exist in a `-tags secrets` build; hide them
 	// from -h otherwise so the help never advertises a missing feature.
@@ -86,6 +86,10 @@ func renderHelp(bin string) string {
 	b.WriteString("  " + sflOkStyle.Render(bin) + " " + sflWarnStyle.Render("INPUT_PATH") + " " +
 		sflMutedStyle.Render("-od ./library/ -p passwords.txt") + "\n")
 	b.WriteString(sflMutedStyle.Render("  Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; relative paths resolve against process CWD, like flags)") + "\n\n")
+
+	b.WriteString(sflLabelStyle.Render("Commands:") + "\n")
+	b.WriteString("  " + sflOkStyle.Render(bin) + " update   " +
+		sflMutedStyle.Render("# upgrade sfu, sfs & sfl to the latest release; --dry-run previews, --install-new adds new tools") + "\n\n")
 
 	b.WriteString(sflLabelStyle.Render("Examples:") + "\n")
 	b.WriteString("  " + sflOkStyle.Render(bin) + " ./extracted-log/ -o ./ulp/\n")

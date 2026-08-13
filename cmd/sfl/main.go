@@ -75,15 +75,18 @@ func main() {
 		fmt.Printf("SnowFastLog %s\n", version.String)
 		return
 	}
-	if cliargs.IsHelpRequest(os.Args[1:]) {
-		printHelp(filepath.Base(os.Args[0]), os.Stdout)
-		reg.ExitWithCode(0)
-	}
+	// `update` / `upgrade`: replace installed SnowFast binaries with the latest release.
+	// Handled before --help so `sfl update --help` reaches the update subcommand's
+	// own help text instead of the generic top-level help.
 	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
 		if err != nil {
 			fatalf("%v", err)
 		}
 		return
+	}
+	if cliargs.IsHelpRequest(os.Args[1:]) {
+		printHelp(filepath.Base(os.Args[0]), os.Stdout)
+		reg.ExitWithCode(0)
 	}
 
 	fileCfg, err := config.LoadFromArgv(os.Args[1:])

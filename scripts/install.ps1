@@ -235,6 +235,20 @@ try {
         Write-Ok "installed $($item.Command) -> $dest"
     }
 
+    # Drop the install marker so `sfu update` knows this is a trusted install
+    # dir and may auto-install new binaries alongside the existing ones.
+    # Go's os.UserConfigDir reads %APPDATA%; do not invent a fallback path
+    # the updater will never consult.
+    $appData = $env:APPDATA
+    if ($appData) {
+        $snowfastDataDir = Join-Path $appData "snowfast"
+        New-Item -ItemType Directory -Path $snowfastDataDir -Force | Out-Null
+        $absDir = [IO.Path]::GetFullPath($resolvedInstallDir)
+        $stamp = "dir=$absDir`nversion=$resolvedVersion`ninstalled_at=$((Get-Date).ToUniversalTime().ToString('o'))`n"
+        $stampPath = Join-Path $snowfastDataDir 'install.stamp'
+        [IO.File]::WriteAllText($stampPath, $stamp, [Text.UTF8Encoding]::new($false))
+    }
+
     Write-Section "Writing config"
 
     $configStatus = "preserved existing"

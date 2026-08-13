@@ -109,24 +109,27 @@ func main() {
 
 	flag.Usage = func() { printHelp(filepath.Base(os.Args[0]), os.Stderr) }
 
-	// resolve --version / --help before loading cfg so bad cfg
+	// resolve --version before loading cfg so bad cfg
 	// doesnt block diagnostic output
 	if cliargs.IsVersionRequest(os.Args[1:]) {
 		fmt.Printf("SnowFastULP %s\n", version.String)
 		return
 	}
-	if cliargs.IsHelpRequest(os.Args[1:]) {
-		printHelp(filepath.Base(os.Args[0]), os.Stdout)
-		reg.ExitWithCode(0)
-	}
 
 	// `update` / `upgrade`: replace installed SnowFast binaries with the latest release.
-	// Handled before cfg load so a bad config can't block self-update.
+	// Handled before --help so `sfu update --help` reaches the update subcommand's
+	// own help text instead of the generic top-level help. Also before cfg load so a
+	// bad config can't block self-update.
 	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
 		if err != nil {
 			fatalf("%v", err)
 		}
 		return
+	}
+
+	if cliargs.IsHelpRequest(os.Args[1:]) {
+		printHelp(filepath.Base(os.Args[0]), os.Stdout)
+		reg.ExitWithCode(0)
 	}
 
 	// Gate color on stderr (the TUI + summary target): a redirected stderr log

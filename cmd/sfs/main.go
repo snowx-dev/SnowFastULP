@@ -45,18 +45,21 @@ func main() {
 		fmt.Printf("SnowFastSearch %s\n", version.String)
 		return
 	}
-	if cliargs.IsHelpRequest(os.Args[1:]) {
-		printHelp(filepath.Base(os.Args[0]), os.Stdout)
-		reg.ExitWithCode(0)
-	}
 
 	// `update` / `upgrade`: replace installed SnowFast binaries with the latest release.
-	// Handled before cfg load so a bad config can't block self-update.
+	// Handled before --help so `sfs update --help` reaches the update subcommand's
+	// own help text instead of the generic top-level help. Also before cfg load so a
+	// bad config can't block self-update.
 	if handled, err := selfupdate.Dispatch(os.Args[1:], version.String, os.Stdout); handled {
 		if err != nil {
 			fatal("%v", err)
 		}
 		return
+	}
+
+	if cliargs.IsHelpRequest(os.Args[1:]) {
+		printHelp(filepath.Base(os.Args[0]), os.Stdout)
+		reg.ExitWithCode(0)
 	}
 
 	// Gate color on stderr (the live-screen target): a redirected stderr must
