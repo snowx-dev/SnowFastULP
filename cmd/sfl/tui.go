@@ -1307,6 +1307,10 @@ func recapCountRows(stats sflog.ExtractStats) []string {
 		rows = append(rows, recapRow("Env files", sflCountStyle.Render(formatInt(stats.EnvCopied))+
 			sflMutedStyle.Render(" copied")))
 	}
+	if stats.EnvDirsCopied > 0 {
+		rows = append(rows, recapRow("tdata", sflCountStyle.Render(formatInt(stats.EnvDirsCopied))+
+			sflMutedStyle.Render(" folder(s) copied")))
+	}
 	return rows
 }
 

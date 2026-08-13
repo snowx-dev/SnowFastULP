@@ -182,6 +182,17 @@ func TestRecapCountRowsIncludesEnv(t *testing.T) {
 	}
 }
 
+func TestRecapCountRowsIncludesTdata(t *testing.T) {
+	rows := recapCountRows(sflog.ExtractStats{EnvDirsCopied: 2})
+	joined := strings.Join(rows, "\n")
+	if !strings.Contains(joined, "tdata") || !strings.Contains(joined, "2") || !strings.Contains(joined, "folder") {
+		t.Fatalf("recap missing tdata row:\n%s", joined)
+	}
+	if strings.Contains(joined, "Env files") {
+		t.Fatalf("EnvCopied==0 should omit Env files row:\n%s", joined)
+	}
+}
+
 func TestRenderFinalSummaryUpdateNoticeFooter(t *testing.T) {
 	lines := renderFinalSummaryWithNotice("out/sfl.txt", sflog.ExtractStats{
 		Emitted: 1,
@@ -1117,9 +1128,33 @@ func TestEnvPathFooterSplicedWhenCopied(t *testing.T) {
 
 func TestEnvPathFooterAbsentWhenNothingCopied(t *testing.T) {
 	joined := strings.Join(renderFinalSummary("out/sfl.txt", sflog.ExtractStats{Emitted: 1}), "\n")
-	// No splice when EnvCopied==0 (mirrors main). Footer label column is "Env      ".
+	// No splice when EnvCopied==0 && EnvDirsCopied==0 (mirrors main).
 	if strings.Contains(joined, "Env      ") {
 		t.Fatalf("no Env footer when nothing copied:\n%s", joined)
+	}
+}
+
+func TestEnvPathFooterSplicedWhenOnlyTdataCopied(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(prev)
+
+	envDir := longUUIDLibraryPath + "/sfl_20260812_120000_secrets"
+	stats := sflog.ExtractStats{Emitted: 1, EnvDirsCopied: 1}
+	summary := renderFinalSummaryWithNotice("out/sfl.txt", stats, nil)
+	frost := summaryFooterLines(termWidth(), nil)
+	summary = spliceBeforeFooter(summary,
+		renderSflPathFooter("Env      ", []string{envDir}, sflMutedStyle), frost)
+
+	joined := strings.Join(summary, "\n")
+	if !strings.Contains(joined, envDir) {
+		t.Fatalf("env path must appear when only tdata folders copied:\n%s", joined)
+	}
+	if !strings.Contains(joined, "tdata") {
+		t.Fatalf("recap should show tdata row:\n%s", joined)
+	}
+	if strings.Contains(joined, "Env files") {
+		t.Fatalf("EnvCopied==0 should omit Env files row:\n%s", joined)
 	}
 }
 

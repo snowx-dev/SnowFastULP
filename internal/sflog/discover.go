@@ -16,6 +16,7 @@ const (
 	sourceArchive  sourceKind = iota // archive or split/volume part
 	sourcePassword                   // credential dump (see isPasswordFile)
 	sourceEnv                        // env/key file for -env copy
+	sourceTelegram                   // Telegram tdata folder for -env whole-tree copy
 	sourceOther                      // any other file, reported only when scanExtra
 )
 
@@ -109,6 +110,14 @@ func walkSources(root string, scanExtra, envExtra bool, onFound func(path string
 			return err
 		}
 		if d.IsDir() {
+			// A Telegram tdata folder is copied as a whole tree under -env.
+			// Emit it as its own source and skip the interior so the flat -env
+			// path does not also walk key_datas / maps0 / cache trees one file
+			// at a time (double copy + wasted I/O on potentially huge caches).
+			if envExtra && isTelegramTdataDir(path) {
+				onFound(path, sourceTelegram)
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if kind, ok := classifySource(path, scanExtra, envExtra); ok {

@@ -95,6 +95,10 @@ type ExtractStats struct {
 	EnvCopied         int
 	EnvSkippedOverCap int
 	EnvWriteErrors    int
+	// EnvDirsCopied counts Telegram tdata folders copied whole under -env
+	// (loose on-disk or promoted from archive staging). Kept separate from
+	// EnvCopied (per-file) so the summary can surface "tdata folders: N".
+	EnvDirsCopied int
 
 	// capped, ordered list of concrete problems (see issueCap)
 	Issues []Issue

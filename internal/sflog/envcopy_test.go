@@ -46,6 +46,37 @@ func TestSafeRelPath(t *testing.T) {
 	if flatBasename(safeRelPath(`../evil/.env`)) != ".env" {
 		t.Fatalf("traversal should still yield basename .env, got %q", flatBasename(safeRelPath(`../evil/.env`)))
 	}
+
+	root := t.TempDir()
+	for _, in := range []string{`C:/tdata/key_datas`, `/tdata/key_datas`, `//share/tdata/key_datas`} {
+		rel := safeRelPath(in)
+		if strings.Contains(rel, ":") {
+			t.Fatalf("safeRelPath(%q) leaked volume: %q", in, rel)
+		}
+		if filepath.IsAbs(rel) {
+			t.Fatalf("safeRelPath(%q) still absolute: %q", in, rel)
+		}
+		dest := filepath.Join(root, rel)
+		if !destUnderRoot(root, dest) {
+			t.Fatalf("safeRelPath(%q)=%q joined dest escaped %q", in, rel, root)
+		}
+	}
+}
+
+func TestDestUnderRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "secrets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !destUnderRoot(root, filepath.Join(root, "tdata", "key_datas")) {
+		t.Fatal("child should be under root")
+	}
+	if destUnderRoot(root, root+"-evil") {
+		t.Fatal("sibling prefix must not match")
+	}
+	if destUnderRoot(root, filepath.Dir(root)) {
+		t.Fatal("parent must not match")
+	}
 }
 
 func TestEnvCopyLooseFile(t *testing.T) {

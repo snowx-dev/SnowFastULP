@@ -68,17 +68,23 @@ func isEnvCopyCandidate(path string) bool {
 	return false
 }
 
-// safeRelPath sanitizes a relative path for writing under the secrets folder.
+// safeRelPath sanitizes a relative path for writing under a secrets/staging
+// root. Absolute, UNC, and Windows volume prefixes (C:) are stripped so
+// filepath.Join(root, rel) cannot discard root on Windows. ".." and empty
+// parts are dropped; leftover drive-like elements containing ':' are skipped.
 func safeRelPath(rel string) string {
-	rel = filepath.Clean(filepath.FromSlash(strings.ReplaceAll(rel, "\\", "/")))
-	parts := strings.Split(rel, string(filepath.Separator))
+	s := strings.ReplaceAll(rel, "\\", "/")
+	for strings.HasPrefix(s, "/") {
+		s = s[1:]
+	}
+	parts := strings.Split(s, "/")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
-		if p == "" || p == "." {
+		if p == "" || p == "." || p == ".." {
 			continue
 		}
-		if p == ".." {
+		if strings.Contains(p, ":") {
 			continue
 		}
 		out = append(out, sanitizePathElem(p))
@@ -87,6 +93,21 @@ func safeRelPath(rel string) string {
 		return "_"
 	}
 	return filepath.Join(out...)
+}
+
+// destUnderRoot reports whether dest is root or a path inside it. Both are
+// cleaned; a trailing separator on root prevents /secrets matching /secrets-evil.
+func destUnderRoot(root, dest string) bool {
+	root = filepath.Clean(root)
+	dest = filepath.Clean(dest)
+	if dest == root {
+		return true
+	}
+	sep := string(filepath.Separator)
+	if !strings.HasSuffix(root, sep) {
+		root += sep
+	}
+	return strings.HasPrefix(dest, root)
 }
 
 func sanitizePathElem(s string) string {
@@ -106,12 +127,19 @@ func sanitizePathElem(s string) string {
 // EnvCopyStats holds final -env copy counters.
 type EnvCopyStats struct {
 	Copied, SkippedOverCap, WriteErrors int
+	// DirsCopied counts Telegram tdata folders copied whole (loose or promoted
+	// from archive staging). Copied counts the files inside them.
+	DirsCopied int
 }
 
 type envJob struct {
 	srcPath    string // loose on-disk file (empty for archive members)
 	data       []byte // in-memory bytes (archive members)
 	memberName string // in-archive path (archive members)
+	// srcDir, when set, marks a directory-copy job: the worker recursively
+	// copies the whole tree rooted at srcDir into <root>/tdata/ (Telegram
+	// tdata folders). data/srcPath/memberName are unused for dir jobs.
+	srcDir string
 }
 
 // EnvCopier asynchronously copies env/key files flat into root
@@ -126,6 +154,11 @@ type EnvCopier struct {
 
 	mu    sync.Mutex
 	stats EnvCopyStats
+	// dirMu guards destination directory naming for recursive tdata copies
+	// (EnqueueDir / PromoteTdata) since multiple archive workers may finish
+	// confirmed tdata trees concurrently. The file-copy path is already
+	// serialized on the single worker goroutine.
+	dirMu sync.Mutex
 }
 
 // NewEnvCopier creates a copier writing flat into root. The directory is
@@ -162,7 +195,7 @@ func (c *EnvCopier) EnqueueFile(srcPath string) {
 		c.bumpWriteError()
 		return
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		c.bumpWriteError()
 		return
 	}
@@ -182,6 +215,114 @@ func (c *EnvCopier) enqueueEnvBytes(memberName string, data []byte) {
 		return
 	}
 	c.queue <- envJob{memberName: memberName, data: data}
+}
+
+// EnqueueDir queues a loose on-disk directory tree for async recursive copy.
+// Prefer CopyDir for callers that need the result (processTelegramDir / -del).
+func (c *EnvCopier) EnqueueDir(srcDir string) {
+	if c == nil {
+		return
+	}
+	c.queue <- envJob{srcDir: srcDir}
+}
+
+// CopyDir copies a loose tdata tree into <root>/tdata/ (with _2/_3 suffixes)
+// synchronously so the caller can set -del eligibility from the outcome.
+func (c *EnvCopier) CopyDir(srcDir string) error {
+	if c == nil {
+		return os.ErrInvalid
+	}
+	dest, err := c.reserveTdataDest()
+	if err != nil {
+		c.bumpWriteError()
+		c.removeRootIfEmpty()
+		return err
+	}
+	n, err := copyTree(srcDir, dest)
+	if err != nil {
+		c.bumpWriteError()
+		if n == 0 {
+			_ = os.RemoveAll(dest)
+			c.removeRootIfEmpty()
+			return err
+		}
+		c.creditTdataDir(n)
+		return err
+	}
+	c.creditTdataDir(n)
+	return nil
+}
+
+// PromoteTdata moves a staged tdata tree into <root>/tdata/ (or tdata_2, …).
+// Rename is tried first; any failure (EXDEV, Windows dest-exists) falls back
+// to copyTree into the reserved dest, then the staging tree is removed.
+func (c *EnvCopier) PromoteTdata(stagedDir string) error {
+	if c == nil {
+		return os.ErrInvalid
+	}
+	dest, err := c.reserveTdataDest()
+	if err != nil {
+		c.bumpWriteError()
+		c.removeRootIfEmpty()
+		return err
+	}
+	if err := os.Rename(stagedDir, dest); err != nil {
+		n, copyErr := copyTree(stagedDir, dest)
+		_ = os.RemoveAll(stagedDir)
+		if copyErr != nil {
+			c.bumpWriteError()
+			if n == 0 {
+				_ = os.RemoveAll(dest)
+				c.removeRootIfEmpty()
+				return copyErr
+			}
+			c.creditTdataDir(n)
+			return copyErr
+		}
+		c.creditTdataDir(n)
+		return nil
+	}
+	c.creditTdataDir(countFiles(dest))
+	return nil
+}
+
+// reserveTdataDest claims a unique tdata / tdata_N directory under c.root by
+// Mkdir (atomic) while holding dirMu, so concurrent PromoteTdata/CopyDir
+// cannot pick the same name. The dest is 0700. Caller owns filling or
+// removing it.
+func (c *EnvCopier) reserveTdataDest() (string, error) {
+	if err := os.MkdirAll(c.root, 0o700); err != nil {
+		return "", err
+	}
+	c.dirMu.Lock()
+	defer c.dirMu.Unlock()
+	base := filepath.Join(c.root, "tdata")
+	if err := os.Mkdir(base, 0o700); err == nil {
+		return base, nil
+	} else if !os.IsExist(err) {
+		return "", err
+	}
+	for i := 2; i < 1000; i++ {
+		candidate := base + "_" + itoa(i)
+		err := os.Mkdir(candidate, 0o700)
+		if err == nil {
+			return candidate, nil
+		}
+		if !os.IsExist(err) {
+			return "", err
+		}
+	}
+	return "", os.ErrInvalid
+}
+
+func (c *EnvCopier) creditTdataDir(n int) {
+	c.mu.Lock()
+	c.stats.Copied += n
+	c.stats.DirsCopied++
+	c.mu.Unlock()
+	if c.prog != nil {
+		c.prog.addEnvCopied(int64(n))
+	}
 }
 
 // CopyMember reads up to maxLen from r and enqueues when name is a candidate.
@@ -225,6 +366,10 @@ func flatBasename(relDest string) string {
 }
 
 func (c *EnvCopier) writeJob(job envJob) {
+	if job.srcDir != "" {
+		c.writeDirJob(job.srcDir)
+		return
+	}
 	var base string
 	if job.srcPath != "" {
 		base = sanitizePathElem(filepath.Base(job.srcPath))
@@ -234,7 +379,7 @@ func (c *EnvCopier) writeJob(job envJob) {
 	// Create the destination dir only when we are about to write. A single
 	// worker serializes jobs, so concurrent mkdir races are not a concern.
 	// filepath.Join keeps this correct on Windows and Unix.
-	if err := os.MkdirAll(c.root, 0o755); err != nil {
+	if err := os.MkdirAll(c.root, 0o700); err != nil {
 		c.bumpWriteError()
 		return
 	}
@@ -283,10 +428,10 @@ func copyFile(src, dest string) error {
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
+	if !info.Mode().IsRegular() {
 		return os.ErrInvalid
 	}
-	in, err := os.Open(src)
+	in, err := openReadNoFollow(src)
 	if err != nil {
 		return err
 	}
@@ -339,6 +484,84 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b[pos:])
+}
+
+// writeDirJob copies a queued directory tree via CopyDir (same reservation
+// path as the synchronous caller).
+func (c *EnvCopier) writeDirJob(srcDir string) {
+	_ = c.CopyDir(srcDir)
+}
+
+// copyTree recursively copies src into dest, returning the number of regular
+// files copied. Non-regular nodes (symlinks, fifos, devices) are skipped so
+// a planted fifo cannot hang the copier. Errors on a single file are returned
+// so the caller can record a write error; the partial tree is left in place.
+func copyTree(src, dest string) (int, error) {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return 0, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return 0, nil
+	}
+	if info.IsDir() {
+		if err := os.MkdirAll(dest, 0o700); err != nil {
+			return 0, err
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return 0, err
+		}
+		var n int
+		for _, e := range entries {
+			s := filepath.Join(src, e.Name())
+			d := filepath.Join(dest, sanitizePathElem(e.Name()))
+			m, err := copyTree(s, d)
+			n += m
+			if err != nil {
+				return n, err
+			}
+		}
+		return n, nil
+	}
+	if !info.Mode().IsRegular() {
+		return 0, nil
+	}
+	if err := copyFile(src, dest); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
+// countFiles reports the number of regular files under root (recursive).
+func countFiles(root string) int {
+	var n int
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, e := d.Info(); e == nil && info.Mode().IsRegular() {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
+// uniqueDir returns a non-existing directory path by suffixing _2, _3, … after
+// the base name (tdata -> tdata_2 -> tdata_3). ok is false when every candidate
+// through _999 already exists; callers must not clobber an existing tree.
+func uniqueDir(path string) (string, bool) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path, true
+	}
+	for i := 2; i < 1000; i++ {
+		candidate := path + "_" + itoa(i)
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 func (c *EnvCopier) bumpWriteError() {

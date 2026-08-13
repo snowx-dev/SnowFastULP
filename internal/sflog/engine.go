@@ -88,6 +88,9 @@ const (
 	// kindEnvCopy is a loose env/key file discovered under -env: copied to the
 	// side directory, never ULP-parsed.
 	kindEnvCopy
+	// kindTelegramCopy is a loose Telegram tdata folder discovered under -env:
+	// copied whole into the side directory, never ULP-parsed.
+	kindTelegramCopy
 )
 
 // assemblyKind tells processArchive how a multi-part archive item's volumes
@@ -227,7 +230,7 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 			nArchives++
 		case kindSecretScan:
 			nSecrets++
-		case kindEnvCopy:
+		case kindEnvCopy, kindTelegramCopy:
 			// counted with secret scan files for debug only; no separate bucket
 		default:
 			nFiles++
@@ -419,6 +422,8 @@ func (e *Engine) process(ctx context.Context, idx int, it workItem, lines chan<-
 		e.processSecretFile(ctx, idx, it, acc)
 	case kindEnvCopy:
 		e.processEnvFile(ctx, idx, it, acc)
+	case kindTelegramCopy:
+		e.processTelegramDir(ctx, idx, it, acc)
 	default:
 		e.processFile(ctx, idx, it, lines, acc)
 	}
@@ -550,6 +555,31 @@ func (e *Engine) processEnvFile(ctx context.Context, idx int, it workItem, acc *
 	acc.addResult(it.path, false, true, false)
 	if e.Debug != nil {
 		e.Debug("env file %s: queued for copy", it.path)
+	}
+}
+
+// processTelegramDir copies a loose Telegram tdata folder under -env.
+// The copy is synchronous so OK reflects success and -del keeps the source
+// on failure. Never ULP-parsed.
+func (e *Engine) processTelegramDir(ctx context.Context, idx int, it workItem, acc *accum) {
+	if e.EnvCopier == nil {
+		return
+	}
+	cr := newCreditor(e.Progress, it.weight, 1)
+	defer cr.finish()
+
+	if ctx.Err() != nil {
+		acc.addResult(it.path, false, false, true)
+		return
+	}
+	err := e.EnvCopier.CopyDir(it.path)
+	acc.addResult(it.path, false, err == nil, err != nil)
+	if e.Debug != nil {
+		if err != nil {
+			e.Debug("telegram tdata %s: copy error: %v", it.path, err)
+		} else {
+			e.Debug("telegram tdata %s: copied", it.path)
+		}
 	}
 }
 
@@ -739,7 +769,7 @@ func buildWorklist(input string, scanExtra, envExtra bool, secretCap, envCap int
 	if err != nil {
 		return nil, err
 	}
-	var filesP, archivesP, secretP, envP []string
+	var filesP, archivesP, secretP, envP, tgP []string
 	err = walkSources(input, scanExtra, envExtra, func(path string, kind sourceKind) {
 		switch kind {
 		case sourceArchive:
@@ -748,6 +778,8 @@ func buildWorklist(input string, scanExtra, envExtra bool, secretCap, envCap int
 			filesP = append(filesP, path)
 		case sourceEnv:
 			envP = append(envP, path)
+		case sourceTelegram:
+			tgP = append(tgP, path)
 		default: // sourceOther
 			secretP = append(secretP, path)
 		}
@@ -769,8 +801,9 @@ func buildWorklist(input string, scanExtra, envExtra bool, secretCap, envCap int
 	sort.Strings(archivesP)
 	sort.Strings(secretP)
 	sort.Strings(envP)
+	sort.Strings(tgP)
 
-	items := make([]workItem, 0, len(filesP)+len(archivesP)+len(secretP)+len(envP))
+	items := make([]workItem, 0, len(filesP)+len(archivesP)+len(secretP)+len(envP)+len(tgP))
 	for _, f := range filesP {
 		items = append(items, workItem{path: f, kind: kindFile, weight: fileWeight(f), logKey: logGroupKey(absRoot, rootIsDir, f)})
 	}
@@ -779,6 +812,9 @@ func buildWorklist(input string, scanExtra, envExtra bool, secretCap, envCap int
 	}
 	for _, f := range envP {
 		items = append(items, workItem{path: f, kind: kindEnvCopy, weight: cappedWeight(f, envCap), logKey: logGroupKey(absRoot, rootIsDir, f)})
+	}
+	for _, f := range tgP {
+		items = append(items, workItem{path: f, kind: kindTelegramCopy, weight: telegramDirWeight(f), logKey: logGroupKey(absRoot, rootIsDir, f)})
 	}
 	keyOf := func(a string) string { return logGroupKey(absRoot, rootIsDir, a) }
 	items = append(items, groupArchiveVolumes(archivesP, fileWeight, keyOf)...)
@@ -822,6 +858,15 @@ func fileWeight(path string) int64 {
 	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
 		return fi.Size()
 	}
+	return 1
+}
+
+// telegramDirWeight paces a loose tdata folder as one logical item: the actual
+// recursive copy runs async on the EnvCopier worker (climbing the live "Env
+// copied" counter), so the engine item itself completes on enqueue. Walking
+// a multi-GB tdata twice (once to weight, once to copy) would double the I/O
+// for no pacing benefit, so we return a unit weight.
+func telegramDirWeight(path string) int64 {
 	return 1
 }
 

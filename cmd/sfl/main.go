@@ -380,8 +380,9 @@ func run(cfg runConfig) error {
 		stats.EnvCopied = es.Copied
 		stats.EnvSkippedOverCap = es.SkippedOverCap
 		stats.EnvWriteErrors = es.WriteErrors
-		dbg.Event("env: copied=%d skipped=%d errors=%d",
-			es.Copied, es.SkippedOverCap, es.WriteErrors)
+		stats.EnvDirsCopied = es.DirsCopied
+		dbg.Event("env: copied=%d skipped=%d errors=%d dirs=%d",
+			es.Copied, es.SkippedOverCap, es.WriteErrors, es.DirsCopied)
 	}
 	if closeSecrets != nil {
 		// Flip the live frame to a dedicated "finalizing secrets" phase while the
@@ -498,7 +499,7 @@ func run(cfg runConfig) error {
 	frost := summaryFooterLines(termWidth(), updateNotice)
 	// Env dest as an outside-box path footer (peer of Output/Library/Store), only
 	// when files landed — lazy mkdir may leave no directory if nothing was copied.
-	if stats.EnvCopied > 0 {
+	if stats.EnvCopied > 0 || stats.EnvDirsCopied > 0 {
 		summary = spliceBeforeFooter(summary,
 			renderSflPathFooter("Env      ", []string{resolveEnvDir(cfg)}, sflMutedStyle), frost)
 	}
