@@ -230,8 +230,10 @@ func (e *Engine) Run(ctx context.Context, input string, w io.Writer) (ExtractSta
 			nArchives++
 		case kindSecretScan:
 			nSecrets++
-		case kindEnvCopy, kindTelegramCopy:
-			// counted with secret scan files for debug only; no separate bucket
+		case kindEnvCopy:
+			// Flat env files are not a separate debug bucket.
+		case kindTelegramCopy:
+			// Loose tdata dirs are paced as unit-weight items, not files.
 		default:
 			nFiles++
 		}
@@ -629,6 +631,8 @@ func (e *Engine) processArchive(ctx context.Context, idx int, it workItem, lines
 			acc.openErrors.Add(1)
 		case IssueMissingVolume:
 			acc.missingVolumes.Add(1)
+		case IssueEnvCopy:
+			// EnvWriteErrors is counted on the copier; this only blocks -del.
 		default:
 			acc.parseErrors.Add(1)
 		}
@@ -861,11 +865,9 @@ func fileWeight(path string) int64 {
 	return 1
 }
 
-// telegramDirWeight paces a loose tdata folder as one logical item: the actual
-// recursive copy runs async on the EnvCopier worker (climbing the live "Env
-// copied" counter), so the engine item itself completes on enqueue. Walking
-// a multi-GB tdata twice (once to weight, once to copy) would double the I/O
-// for no pacing benefit, so we return a unit weight.
+// telegramDirWeight paces a loose tdata folder as one logical item. CopyDir
+// runs synchronously on the engine worker; walking a large tree twice (weight
+// then copy) would double I/O for no pacing benefit.
 func telegramDirWeight(path string) int64 {
 	return 1
 }

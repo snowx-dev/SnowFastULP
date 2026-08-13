@@ -381,8 +381,9 @@ func run(cfg runConfig) error {
 		stats.EnvSkippedOverCap = es.SkippedOverCap
 		stats.EnvWriteErrors = es.WriteErrors
 		stats.EnvDirsCopied = es.DirsCopied
-		dbg.Event("env: copied=%d skipped=%d errors=%d dirs=%d",
-			es.Copied, es.SkippedOverCap, es.WriteErrors, es.DirsCopied)
+		stats.EnvDirsSkippedOverCap = es.DirsSkippedOverCap
+		dbg.Event("env: copied=%d skipped=%d errors=%d dirs=%d tdata-skip=%d",
+			es.Copied, es.SkippedOverCap, es.WriteErrors, es.DirsCopied, es.DirsSkippedOverCap)
 	}
 	if closeSecrets != nil {
 		// Flip the live frame to a dedicated "finalizing secrets" phase while the

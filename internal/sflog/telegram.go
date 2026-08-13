@@ -1,11 +1,14 @@
 package sflog
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+var errTdataPathEscape = errors.New("tdata member path escaped staging root")
 
 // Telegram Desktop stores session state in a folder named tdata.
 // The identifying file is key_datas (encrypted localKey); multi-account
@@ -127,8 +130,10 @@ func tdataMemberIsKeyData(memberName string) bool {
 // touch the final tdata/ name. Staging lives under env.root so promote is
 // same-filesystem (no EXDEV).
 type tdataStager struct {
-	tempDir string
-	root    string // created lazily on first stage; "" until then
+	tempDir     string
+	root        string // created lazily on first stage; "" until then
+	prefixBytes map[string]int64
+	dropped     map[string]bool // prefixes that hit the size cap
 }
 
 func newTdataStager(env *EnvCopier) *tdataStager {
@@ -174,6 +179,10 @@ func (s *tdataStager) stage(memberName string, r io.Reader) (bool, error) {
 		}
 		s.root = d
 	}
+	if s.dropped[prefix] {
+		_, _ = io.Copy(io.Discard, r)
+		return true, nil
+	}
 	joined := prefix
 	if rel != "" {
 		joined = prefix + "/" + rel
@@ -181,7 +190,7 @@ func (s *tdataStager) stage(memberName string, r io.Reader) (bool, error) {
 	dest := filepath.Join(s.root, safeRelPath(joined))
 	if !destUnderRoot(s.root, dest) {
 		_, _ = io.Copy(io.Discard, r)
-		return true, nil
+		return true, errTdataPathEscape
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		_, _ = io.Copy(io.Discard, r)
@@ -192,8 +201,22 @@ func (s *tdataStager) stage(memberName string, r io.Reader) (bool, error) {
 		_, _ = io.Copy(io.Discard, r)
 		return true, err
 	}
-	_, err = io.Copy(f, r)
+	used := s.prefixBytes[prefix]
+	remain := tdataCopyMaxBytes - used
+	if remain < 0 {
+		remain = 0
+	}
+	n, err := io.Copy(f, io.LimitReader(r, remain+1))
 	cerr := f.Close()
+	if s.prefixBytes == nil {
+		s.prefixBytes = map[string]int64{}
+	}
+	s.prefixBytes[prefix] = used + n
+	if n > remain {
+		_, _ = io.Copy(io.Discard, r)
+		s.dropPrefix(prefix)
+		return true, errTdataOverCap
+	}
 	if err != nil {
 		_ = os.Remove(dest)
 		return true, err
@@ -205,13 +228,24 @@ func (s *tdataStager) stage(memberName string, r io.Reader) (bool, error) {
 	return true, nil
 }
 
-// promote moves every confirmed tdata dir staged under root into the -env
-// secrets dir via env.PromoteTdata. No-op when nothing was staged.
-func (s *tdataStager) promote(env *EnvCopier) int {
-	if s == nil || s.root == "" || env == nil {
-		return 0
+func (s *tdataStager) dropPrefix(prefix string) {
+	if s.dropped == nil {
+		s.dropped = map[string]bool{}
 	}
-	var n int
+	s.dropped[prefix] = true
+	if s.root != "" {
+		_ = os.RemoveAll(filepath.Join(s.root, safeRelPath(prefix)))
+	}
+}
+
+// promote moves every confirmed tdata dir staged under root into the -env
+// secrets dir via env.PromoteTdata. Returns the first PromoteTdata error so
+// the archive can set HadIssue and -del keeps the source.
+func (s *tdataStager) promote(env *EnvCopier) error {
+	if s == nil || s.root == "" || env == nil {
+		return nil
+	}
+	var first error
 	_ = filepath.WalkDir(s.root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
 			return nil
@@ -222,11 +256,13 @@ func (s *tdataStager) promote(env *EnvCopier) int {
 		if !dirHasKeyDataFile(path) {
 			return nil
 		}
-		if err := env.PromoteTdata(path); err == nil {
-			n++
-			return filepath.SkipDir
+		if err := env.PromoteTdata(path); err != nil {
+			if first == nil {
+				first = err
+			}
+			return nil
 		}
-		return nil
+		return filepath.SkipDir
 	})
-	return n
+	return first
 }

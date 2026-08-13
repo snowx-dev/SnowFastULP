@@ -193,6 +193,28 @@ func TestRecapCountRowsIncludesTdata(t *testing.T) {
 	}
 }
 
+func TestRecapCountRowsIncludesOverCap(t *testing.T) {
+	rows := recapCountRows(sflog.ExtractStats{EnvSkippedOverCap: 2})
+	joined := strings.Join(rows, "\n")
+	if !strings.Contains(joined, "Env skip") || !strings.Contains(joined, "over size cap") || !strings.Contains(joined, "2") {
+		t.Fatalf("recap missing env over-cap row:\n%s", joined)
+	}
+	if strings.Contains(joined, "tdata skip") {
+		t.Fatalf("flat env over-cap must not use tdata skip row:\n%s", joined)
+	}
+}
+
+func TestRecapCountRowsIncludesTdataOverCap(t *testing.T) {
+	rows := recapCountRows(sflog.ExtractStats{EnvDirsSkippedOverCap: 3})
+	joined := strings.Join(rows, "\n")
+	if !strings.Contains(joined, "tdata skip") || !strings.Contains(joined, "over size cap") || !strings.Contains(joined, "3") {
+		t.Fatalf("recap missing tdata over-cap row:\n%s", joined)
+	}
+	if strings.Contains(joined, "Env skip") {
+		t.Fatalf("tdata over-cap must not use Env skip row:\n%s", joined)
+	}
+}
+
 func TestRenderFinalSummaryUpdateNoticeFooter(t *testing.T) {
 	lines := renderFinalSummaryWithNotice("out/sfl.txt", sflog.ExtractStats{
 		Emitted: 1,

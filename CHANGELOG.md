@@ -6,11 +6,34 @@ All notable changes to SnowFastMerge are documented here. The format follows
 
 ## [Unreleased]
 
+### Self-update — manifest bins and install stamp
+- `sfu`/`sfs`/`sfl update` unions manifest `bins` onto the hardcoded trio; a
+  partial list cannot drop sfu/sfs/sfl.
+- New tools install next to the running binary only when the install-script
+  stamp `dir=` matches that directory (`os.SameFile`), or with `--install-new`.
+  Extra (non-trio) names are **never** overwritten without that gate — even if
+  a file of that name already exists in a shared bin dir.
+- Skipped extra tools print one line pointing at `--install-new`.
+
+### sfl — Telegram tdata under `-env`
+- `-env` copies Telegram Desktop `tdata` folders (directory named `tdata` plus
+  a regular `key_datas` / `key_data#Ns` file) whole into
+  `<out>/sfl_<timestamp>_secrets/tdata` (`tdata_2`, … on collision), from loose
+  trees and zip/rar/7z.
+- `-del` runs after copies finish and only deletes a source whose tdata copy
+  succeeded. Copy/promote failure or a folder over **5 GiB** skips the dest
+  tree and keeps the source.
+- Recap splits flat env files from tdata folders; file vs tdata over-cap skips
+  get separate rows.
+- On Windows, env/tdata file copies open the source without following reparse
+  points (same as Unix `O_NOFOLLOW`).
+
 ### sfs — streaming is the default
 - `sfs` now streams hits to **stdout by default**. The previous default (auto
   `sfs_results_*.txt` file + live TUI) is now behind **`-stats`**.
-- `-o FILE` without `-stats` **tees** hits to stdout **and** the file. Previously
-  `-o` was file-only. Use `-stats -o FILE` (or `-stats` alone) for file-only output.
+- `-o FILE` without `-stats` **tees** hits to stdout **and** the file (unordered).
+  Previously `-o` was file-only. Use `-stats -o FILE` (or `-stats` alone) for
+  file-only **ordered** output.
 - Legacy `-s` / `-silent` / `[sfs].stream` / `[sfs].silent` are accepted as
   **no-ops** for parse-compat; they have no effect on mode. `-stats` is the only
   mode switch.

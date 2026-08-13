@@ -34,7 +34,7 @@ func renderHelp(bin string) string {
 
 	primary := []argDef{
 		{"-txt", "", "Search plain .txt files instead of .zst archives (no index)."},
-		{"-o", "FILE", "Also write results to FILE (tees with default stream; file-only with -stats)."},
+		{"-o", "FILE", "Also write results to FILE (tees with default stream; file-only with -stats or -sec). Tee is unordered; -stats -o FILE is ordered."},
 		{"-stats", "", "Live progress screen; write hits to an auto CWD result file (or -o). Not valid with -sec."},
 		{"-clean", "", "Strip URL schemes from output lines."},
 		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
@@ -48,8 +48,8 @@ func renderHelp(bin string) string {
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},
 		{"-no-update-check", "", "Disable background update availability check."},
-		{"-s", "", "Deprecated alias for default stream-to-stdout mode."},
-		{"-silent", "", "Alias for -s."},
+		{"-s", "", "Ignored (parse-compat). Does not override [sfs].stats."},
+		{"-silent", "", "Alias for -s (also ignored)."},
 		{"-workers", "N", "Alias for -j."},
 		{"-secrets-path", "PATH", "Alias for -sec-path."},
 		{"-decode-step", "BYTES", "Per-Read decode budget (default 1048576)."},

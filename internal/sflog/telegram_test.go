@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	zipenc "github.com/yeka/zip"
 )
 
 func TestIsKeyDataFile(t *testing.T) {
@@ -154,8 +157,8 @@ func TestEnvCopyLooseTdataDir(t *testing.T) {
 	if es.DirsCopied != 1 {
 		t.Fatalf("DirsCopied = %d, want 1 (copied=%d errors=%d)", es.DirsCopied, es.Copied, es.WriteErrors)
 	}
-	if es.Copied != 4 {
-		t.Fatalf("Copied = %d, want 4 regular files", es.Copied)
+	if es.Copied != 0 {
+		t.Fatalf("Copied = %d, want 0 (tdata files are not flat env copies)", es.Copied)
 	}
 	// The whole tree lands under <secrets>/tdata/ preserving structure.
 	dst := filepath.Join(root, "tdata")
@@ -495,22 +498,6 @@ func TestEnvCopyZipDecoyOnly(t *testing.T) {
 	}
 }
 
-func TestUniqueDirExhaustion(t *testing.T) {
-	dir := t.TempDir()
-	base := filepath.Join(dir, "tdata")
-	if err := os.Mkdir(base, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for i := 2; i < 1000; i++ {
-		if err := os.Mkdir(base+"_"+itoa(i), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, ok := uniqueDir(base); ok {
-		t.Fatal("expected uniqueDir exhaustion")
-	}
-}
-
 func TestReserveTdataDestExhaustion(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "tdata"), 0o700); err != nil {
@@ -718,5 +705,245 @@ func TestEnvCopyEncryptedTdataRar(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "tdata", "key_datas")); err != nil {
 		t.Fatalf("encrypted rar tdata missing: %v", err)
+	}
+}
+
+func TestCopyDirErrorWipesDestNoCredit(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read 000 dirs")
+	}
+	src := filepath.Join(t.TempDir(), "tdata")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "key_datas"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(src, "locked")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	if err := copier.CopyDir(src); err == nil {
+		t.Fatal("expected CopyDir error on unreadable subdir")
+	}
+	es := copier.Close()
+	if es.DirsCopied != 0 {
+		t.Fatalf("DirsCopied = %d, want 0 (partial tree must not be credited)", es.DirsCopied)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tdata")); !os.IsNotExist(err) {
+		t.Fatalf("partial dest should be removed, stat err=%v", err)
+	}
+}
+
+func TestEnvCopyTdataZipPromoteFailHadIssue(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "log.zip")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	mustAddZipFile(t, zw, "Victim/tdata/key_datas", "localkey")
+	_ = zw.Close()
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "tdata"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tdata", "marker"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Occupy every dest name so promote fails after staging (MkdirTemp still
+	// works — it does not use tdata/tdata_N).
+	for i := 2; i < 1000; i++ {
+		if err := os.Mkdir(filepath.Join(root, "tdata_"+itoa(i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	e := &Engine{Workers: 1, EnvCopier: copier, Passwords: []string{""}}
+	var out strings.Builder
+	_, results, err := e.Run(context.Background(), archivePath, &out)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	_ = copier.Close()
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	if !results[0].HadIssue {
+		t.Fatal("promote exhaustion must set HadIssue so -del keeps the archive")
+	}
+	if results[0].OK && !results[0].HadIssue {
+		t.Fatal("would be -del eligible")
+	}
+	got, err := os.ReadFile(filepath.Join(root, "tdata", "marker"))
+	if err != nil || string(got) != "keep" {
+		t.Fatalf("occupied tdata must be left intact, got %q err=%v", got, err)
+	}
+}
+
+func TestCopyDirOverCapSkips(t *testing.T) {
+	old := tdataCopyMaxBytes
+	tdataCopyMaxBytes = 8
+	t.Cleanup(func() { tdataCopyMaxBytes = old })
+
+	src := filepath.Join(t.TempDir(), "tdata")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "key_datas"), []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	err := copier.CopyDir(src)
+	if !errors.Is(err, errTdataOverCap) {
+		t.Fatalf("CopyDir err = %v, want errTdataOverCap", err)
+	}
+	es := copier.Close()
+	if es.DirsCopied != 0 || es.DirsSkippedOverCap != 1 {
+		t.Fatalf("stats = %+v, want DirsCopied=0 DirsSkippedOverCap=1", es)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tdata")); !os.IsNotExist(err) {
+		t.Fatalf("over-cap dest should be removed: %v", err)
+	}
+}
+
+func TestLooseTdataOverCapNotDelEligible(t *testing.T) {
+	old := tdataCopyMaxBytes
+	tdataCopyMaxBytes = 8
+	t.Cleanup(func() { tdataCopyMaxBytes = old })
+
+	dir := t.TempDir()
+	td := filepath.Join(dir, "Victim", "tdata")
+	if err := os.MkdirAll(td, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(td, "key_datas"), []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	e := &Engine{Workers: 1, EnvCopier: copier}
+	var out strings.Builder
+	_, results, err := e.Run(context.Background(), dir, &out)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	_ = copier.Close()
+	if len(results) != 1 || results[0].OK {
+		t.Fatalf("results = %+v, want OK=false so -del keeps the source", results)
+	}
+}
+
+func TestZipTdataOverCap(t *testing.T) {
+	old := tdataCopyMaxBytes
+	tdataCopyMaxBytes = 8
+	t.Cleanup(func() { tdataCopyMaxBytes = old })
+
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "log.zip")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	mustAddZipFile(t, zw, "Victim/tdata/key_datas", "0123456789abcdef")
+	_ = zw.Close()
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	copier.Start()
+	e := &Engine{Workers: 1, EnvCopier: copier, Passwords: []string{""}}
+	var out strings.Builder
+	_, results, err := e.Run(context.Background(), archivePath, &out)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	es := copier.Close()
+	if es.DirsCopied != 0 || es.DirsSkippedOverCap != 1 {
+		t.Fatalf("stats = %+v, want skip", es)
+	}
+	if len(results) != 1 || !results[0].HadIssue {
+		t.Fatalf("results = %+v, want HadIssue so -del keeps the archive", results)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tdata")); !os.IsNotExist(err) {
+		t.Fatalf("over-cap zip tdata should not land: %v", err)
+	}
+}
+
+// Listing size is patched under the cap so dropOverCapTdataZip keeps both
+// trees; LimitReader then trips on VictimA. Sibling VictimB must still promote.
+func TestZipTdataRuntimeOverCapPromotesSibling(t *testing.T) {
+	old := tdataCopyMaxBytes
+	tdataCopyMaxBytes = 8
+	t.Cleanup(func() { tdataCopyMaxBytes = old })
+
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "log.zip")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	mustAddZipFile(t, zw, "VictimA/tdata/key_datas", "0123456789abcdef")
+	mustAddZipFile(t, zw, "VictimB/tdata/key_datas", "ok")
+	_ = zw.Close()
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	zr, err := zipenc.OpenReader(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+
+	files := filterConfirmedTdataZip(zr.File)
+	for _, f := range files {
+		if strings.Contains(f.Name, "VictimA") {
+			f.UncompressedSize64 = 4
+		}
+	}
+
+	root := filepath.Join(t.TempDir(), "secrets")
+	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)
+	var issues int
+	ec := extractCtx{
+		env:     copier,
+		onIssue: func(string, IssueKind, error) { issues++ },
+		display: archivePath,
+	}
+	files = dropOverCapTdataZip(files, ec)
+	if len(files) < 2 {
+		t.Fatalf("patched listing dropped a member; files=%d", len(files))
+	}
+
+	tg := newTdataStager(copier)
+	defer tg.cleanup()
+	if !stageTdataZipMembers(context.Background(), files, ec, tg, "") {
+		t.Fatal("runtime over-cap must not abort staging of sibling tdata")
+	}
+	if err := tg.promote(copier); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	es := copier.Close()
+	if es.DirsCopied != 1 || es.DirsSkippedOverCap != 1 {
+		t.Fatalf("stats = %+v, want DirsCopied=1 DirsSkippedOverCap=1", es)
+	}
+	if issues == 0 {
+		t.Fatal("over-cap must still report IssueEnvCopy")
+	}
+	got, err := os.ReadFile(filepath.Join(root, "tdata", "key_datas"))
+	if err != nil || string(got) != "ok" {
+		t.Fatalf("promoted sibling body = %q err=%v, want ok", got, err)
 	}
 }

@@ -202,6 +202,23 @@ func TestCopyFileSkipsSymlink(t *testing.T) {
 	}
 }
 
+func TestOpenReadNoFollowRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.env")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.env")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("symlinks not supported:", err)
+	}
+	f, err := openReadNoFollow(link)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("expected error opening symlink")
+	}
+}
+
 func TestWriteJobRemovesEmptyRootOnFailedCopy(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sfl_stamp_secrets")
 	copier := NewEnvCopier(root, nil, defaultEnvCopyMaxLen)

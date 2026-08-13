@@ -227,6 +227,35 @@ func (ec extractCtx) confirmPassword() {
 	}
 }
 
+func reportTdataIssue(ec extractCtx, err error) {
+	if err == nil || ec.onIssue == nil {
+		return
+	}
+	ec.onIssue(ec.display, IssueEnvCopy, err)
+}
+
+func promoteTdataOrReport(ec extractCtx, tg *tdataStager) {
+	if err := tg.promote(ec.env); err != nil {
+		reportTdataIssue(ec, err)
+	}
+}
+
+// tdataStageStreamErr maps a staging error for streaming formats. Over-cap is
+// an issue + skip (keep extracting ULPs); CRC/password still fail the stream.
+func tdataStageStreamErr(ec extractCtx, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errTdataOverCap) {
+		if ec.env != nil {
+			ec.env.bumpSkippedTdataOverCap()
+		}
+		reportTdataIssue(ec, err)
+		return nil
+	}
+	return err
+}
+
 // countCredFile records one successfully parsed credential file: it bumps the
 // scan's committed tally and ticks the live Progress counter so the TUI "files"
 // number advances mid-extraction instead of jumping at archive EOF. Live ticks
@@ -581,6 +610,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 		return archiveScan{}, nil
 	}
 	tdataFiles = filterConfirmedTdataZip(tdataFiles)
+	tdataFiles = dropOverCapTdataZip(tdataFiles, ec)
 
 	tg := newTdataStager(ec.env)
 	defer tg.cleanup()
@@ -626,7 +656,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 			scanOtherZipMembers(ctx, otherFiles, ec, pw)
 			copyOtherZipMembers(ctx, envOtherFiles, ec, pw)
 			if stageTdataZipMembers(ctx, tdataFiles, ec, tg, pw) {
-				tg.promote(ec.env)
+				promoteTdataOrReport(ec, tg)
 			}
 		}
 		return scan, err
@@ -672,7 +702,7 @@ func readZipFiles(ctx context.Context, files []*zipenc.File, ec extractCtx, weig
 	scanOtherZipMembers(ctx, otherFiles, ec, pw)
 	copyOtherZipMembers(ctx, envOtherFiles, ec, pw)
 	if ctx.Err() == nil && stageTdataZipMembers(ctx, tdataFiles, ec, tg, pw) {
-		tg.promote(ec.env)
+		promoteTdataOrReport(ec, tg)
 	}
 	return scan, nil
 }
@@ -698,12 +728,51 @@ func filterConfirmedTdataZip(files []*zipenc.File) []*zipenc.File {
 	return out
 }
 
+// dropOverCapTdataZip drops confirmed tdata prefixes whose listed uncompressed
+// size exceeds tdataCopyMaxBytes so we never decompress a disk-bomb tree.
+func dropOverCapTdataZip(files []*zipenc.File, ec extractCtx) []*zipenc.File {
+	if len(files) == 0 {
+		return files
+	}
+	sizes := map[string]int64{}
+	for _, f := range files {
+		p, _, ok := tdataMemberPrefix(f.Name)
+		if ok {
+			sizes[p] += int64(f.UncompressedSize64)
+		}
+	}
+	keep := map[string]bool{}
+	skipped := false
+	for p, n := range sizes {
+		if n > tdataCopyMaxBytes {
+			skipped = true
+			if ec.env != nil {
+				ec.env.bumpSkippedTdataOverCap()
+			}
+			continue
+		}
+		keep[p] = true
+	}
+	if skipped {
+		reportTdataIssue(ec, errTdataOverCap)
+	}
+	var out []*zipenc.File
+	for _, f := range files {
+		p, _, ok := tdataMemberPrefix(f.Name)
+		if ok && keep[p] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // stageTdataZipMembers streams confirmed tdata zip members into the stager.
 // Returns false if the context was cancelled mid-stage (caller must not promote).
 func stageTdataZipMembers(ctx context.Context, tdataFiles []*zipenc.File, ec extractCtx, tg *tdataStager, pw string) bool {
 	if ec.env == nil || tg == nil || len(tdataFiles) == 0 {
 		return true
 	}
+	ok := true
 	for _, f := range tdataFiles {
 		if ctx.Err() != nil {
 			return false
@@ -715,15 +784,24 @@ func stageTdataZipMembers(ctx context.Context, tdataFiles []*zipenc.File, ec ext
 		rc, err := member.Open()
 		if err != nil {
 			ec.env.bumpWriteError()
+			reportTdataIssue(ec, err)
+			ok = false
 			continue
 		}
 		_, stageErr := stageIfTdata(tg, member.Name, rc)
 		rc.Close()
 		if stageErr != nil {
+			if errors.Is(stageErr, errTdataOverCap) {
+				ec.env.bumpSkippedTdataOverCap()
+				reportTdataIssue(ec, stageErr)
+				continue
+			}
 			ec.env.bumpWriteError()
+			reportTdataIssue(ec, stageErr)
+			ok = false
 		}
 	}
-	return ctx.Err() == nil
+	return ok && ctx.Err() == nil
 }
 
 // scanMembersParallel scans n archive members for secrets. open(i) yields the
@@ -1372,8 +1450,8 @@ func readRarStream(ctx context.Context, ec extractCtx, rr *rardecode.Reader) (ar
 			// consumes the member stream. Copy errors (CRC / wrong password)
 			// must fail the stream so password retry still runs.
 			if consumed, serr := stageIfTdata(tg, h.Name, rr); consumed {
-				if serr != nil {
-					return serr
+				if ferr := tdataStageStreamErr(ec, serr); ferr != nil {
+					return ferr
 				}
 				continue
 			}
@@ -1439,8 +1517,8 @@ wg.Wait()
 if mergeErr := mergeOutcomes(ec, &scan, outcomes); mergeErr != nil && streamErr == nil {
 	streamErr = mergeErr
 }
-if ctx.Err() == nil && !isWrongPassword(streamErr) {
-	tg.promote(ec.env)
+if ctx.Err() == nil && streamErr == nil {
+	promoteTdataOrReport(ec, tg)
 }
 return scan, streamErr
 }
@@ -1580,8 +1658,8 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 			members++
 			ec.heartbeat(members)
 			if consumed, serr := stageIfTdata(tg, h.Name, rc); consumed {
-				if serr != nil {
-					return serr
+				if ferr := tdataStageStreamErr(ec, serr); ferr != nil {
+					return ferr
 				}
 				cr.add(h.PackedSize)
 				continue
@@ -1642,8 +1720,8 @@ func readRarVolumeStream(ctx context.Context, ec extractCtx, rc *rardecode.ReadC
 if mergeErr := mergeOutcomes(ec, &scan, outcomes); mergeErr != nil && streamErr == nil {
 	streamErr = mergeErr
 }
-if ctx.Err() == nil && !isWrongPassword(streamErr) {
-	tg.promote(ec.env)
+if ctx.Err() == nil && streamErr == nil {
+	promoteTdataOrReport(ec, tg)
 }
 return scan, streamErr
 }
@@ -1739,10 +1817,12 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 	ec.stage(StageExtracting)
 	tg := newTdataStager(ec.env)
 	defer tg.cleanup()
+	tdataStageOK := true
 	defer func() {
-		if ctx.Err() == nil && !isWrongPassword(err) {
-			tg.promote(ec.env)
+		if ctx.Err() != nil || err != nil || !tdataStageOK {
+			return
 		}
+		promoteTdataOrReport(ec, tg)
 	}()
 	members := 0
 	var uncompressed int64
@@ -1783,6 +1863,8 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 						return scan, hadMembers, oerr
 					}
 					ec.env.bumpWriteError()
+					reportTdataIssue(ec, oerr)
+					tdataStageOK = false
 					continue
 				}
 				_, serr := stageIfTdata(tg, member.Name, rc)
@@ -1791,7 +1873,14 @@ func readSevenZipMembers(ctx context.Context, ec extractCtx, zr *sevenzip.Reader
 					if isWrongPassword(serr) {
 						return scan, hadMembers, serr
 					}
+					if errors.Is(serr, errTdataOverCap) {
+						ec.env.bumpSkippedTdataOverCap()
+						reportTdataIssue(ec, serr)
+						continue
+					}
 					ec.env.bumpWriteError()
+					reportTdataIssue(ec, serr)
+					tdataStageOK = false
 					continue
 				}
 				hadMembers = true

@@ -29,6 +29,8 @@ func TestRenderHelpMatchesSnowFastLayout(t *testing.T) {
 		"Write a debug log for this run.",
 		"Optional config:",
 		"relative paths resolve against process CWD, like flags",
+		"Telegram tdata",
+		"5 GiB",
 	}
 	for _, s := range want {
 		if !strings.Contains(help, s) {

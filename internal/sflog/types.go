@@ -29,6 +29,10 @@ const (
 	// name.part2.rar) whose first volume (name.part1.rar) was not present, so
 	// the set cannot be opened. Surfaced as a skip, not a failure.
 	IssueMissingVolume
+	// IssueEnvCopy marks a Telegram tdata (or other -env dir) copy/promote
+	// failure. The source parsed; -del must keep it because the dest tree
+	// did not land.
+	IssueEnvCopy
 )
 
 // String returns a stable, log-friendly slug for the issue kind.
@@ -44,6 +48,8 @@ func (k IssueKind) String() string {
 		return "no-ulp"
 	case IssueMissingVolume:
 		return "missing-volume"
+	case IssueEnvCopy:
+		return "env-copy"
 	default:
 		return "unknown"
 	}
@@ -97,8 +103,11 @@ type ExtractStats struct {
 	EnvWriteErrors    int
 	// EnvDirsCopied counts Telegram tdata folders copied whole under -env
 	// (loose on-disk or promoted from archive staging). Kept separate from
-	// EnvCopied (per-file) so the summary can surface "tdata folders: N".
+	// EnvCopied (flat env/key files only).
 	EnvDirsCopied int
+	// EnvDirsSkippedOverCap counts tdata folders skipped for exceeding
+	// tdataCopyMaxBytes. Distinct from EnvSkippedOverCap (flat env/key files).
+	EnvDirsSkippedOverCap int
 
 	// capped, ordered list of concrete problems (see issueCap)
 	Issues []Issue

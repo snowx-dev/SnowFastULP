@@ -249,9 +249,13 @@ func run(args []string, currentVersion, invoked string, out io.Writer, hooks *te
 	ext := exeExt()
 	allowNew := canInstallNewBinsFor(self, installNew)
 
-	pending, err := planUpdates(manifest, latest, suffix, dir, ext, allowNew)
+	pending, skippedNew, err := planUpdates(manifest, latest, suffix, dir, ext, allowNew)
 	if err != nil {
 		return err
+	}
+	if len(skippedNew) > 0 {
+		fmt.Fprintf(out, "skipped extra tools (%s): install stamp missing or dir mismatch; use `%s update --install-new`\n",
+			strings.Join(skippedNew, ", "), invokedBin)
 	}
 	if len(pending) == 0 {
 		return errNoUpdateTargets(dir, known, invokedBin)
@@ -458,6 +462,15 @@ func checkInvokedBinaryName(selfPath string, known []product, invoked string) er
 		filepath.Dir(selfPath), renameLines.String(), invoked)
 }
 
+func isCoreBin(name string) bool {
+	for _, p := range products {
+		if p.bin == name {
+			return true
+		}
+	}
+	return false
+}
+
 func errNoUpdateTargets(dir string, known []product, invoked string) error {
 	names := make([]string, len(known))
 	for i, p := range known {
@@ -478,12 +491,13 @@ func errNoUpdateTargets(dir string, known []product, invoked string) error {
 		list, dir, invoked, renameLines.String())
 }
 
-func planUpdates(manifest *updateManifest, latest, suffix, dir, ext string, allowNew bool) ([]pendingUpdate, error) {
+func planUpdates(manifest *updateManifest, latest, suffix, dir, ext string, allowNew bool) ([]pendingUpdate, []string, error) {
 	known, err := resolveProducts(manifest)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var pending []pendingUpdate
+	var skipped []string
 	for _, p := range known {
 		target := filepath.Join(dir, p.bin+ext)
 		_, statErr := os.Stat(target)
@@ -494,10 +508,19 @@ func planUpdates(manifest *updateManifest, latest, suffix, dir, ext string, allo
 		case errors.Is(statErr, fs.ErrNotExist):
 			// genuinely missing → may install if allowed
 		default:
-			return nil, fmt.Errorf("stat %s: %w", target, statErr)
+			return nil, nil, fmt.Errorf("stat %s: %w", target, statErr)
 		}
-		if !exists && !allowNew {
-			continue
+		// Extra (non-trio) names always need stamp/--install-new, even when
+		// the file already exists — otherwise a manifest can overwrite git/rg
+		// in a shared bin dir. Missing core bins still need allowNew to install.
+		extra := !isCoreBin(p.bin)
+		if extra || !exists {
+			if !allowNew {
+				if extra {
+					skipped = append(skipped, p.bin)
+				}
+				continue
+			}
 		}
 
 		assetName := fmt.Sprintf("%s-%s-%s", p.prefix, latest, suffix)
@@ -508,11 +531,11 @@ func planUpdates(manifest *updateManifest, latest, suffix, dir, ext string, allo
 				// existing bins can still update.
 				continue
 			}
-			return nil, fmt.Errorf("update manifest %s has no asset %q for this platform", latest, assetName)
+			return nil, nil, fmt.Errorf("update manifest %s has no asset %q for this platform", latest, assetName)
 		}
 		wantHash, err := parseManifestHash(asset.SHA256, assetName)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		url := asset.URL
 		if url == "" {
@@ -526,7 +549,7 @@ func planUpdates(manifest *updateManifest, latest, suffix, dir, ext string, allo
 			isNew:  !exists,
 		})
 	}
-	return pending, nil
+	return pending, skipped, nil
 }
 
 // applyOrder returns pending indices with the invoked binary last.

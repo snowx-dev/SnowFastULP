@@ -76,7 +76,7 @@ func TestPlanUpdatesUsesControlledManifestHashAndURL(t *testing.T) {
 		},
 	}
 
-	pending, err := planUpdates(manifest, latest, suffix, dir, exeExt(), false)
+	pending, _, err := planUpdates(manifest, latest, suffix, dir, exeExt(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,7 +752,7 @@ func TestPlanUpdatesInstallsMissingBin(t *testing.T) {
 		manifest.Bins = append(manifest.Bins, manifestBin{Name: b.bin, Prefix: b.prefix})
 	}
 
-	pending, err := planUpdates(manifest, latest, suffix, dir, ext, true)
+	pending, _, err := planUpdates(manifest, latest, suffix, dir, ext, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,12 +808,91 @@ func TestPlanUpdatesSkipsMissingWithoutAllowNew(t *testing.T) {
 	}
 
 	// allowNew=false → missing bins are skipped, only sfu is pending.
-	pending, err := planUpdates(manifest, latest, suffix, dir, ext, false)
+	pending, _, err := planUpdates(manifest, latest, suffix, dir, ext, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pending) != 1 || pending[0].bin != "sfu" || pending[0].isNew {
 		t.Fatalf("pending = %+v, want only sfu (isNew=false)", pending)
+	}
+}
+
+func TestPlanUpdatesDoesNotOverwriteExistingExtraBinWithoutAllowNew(t *testing.T) {
+	suffix := mustAssetSuffix(t)
+	latest := "0.4"
+	dir := t.TempDir()
+	ext := exeExt()
+	if err := os.WriteFile(filepath.Join(dir, "sfu"+ext), []byte("old-sfu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sfxPath := filepath.Join(dir, "sfx"+ext)
+	if err := os.WriteFile(sfxPath, []byte("keep-me"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &updateManifest{
+		Version: latest,
+		Bins: []manifestBin{
+			{Name: "sfu", Prefix: "SnowFastULP"},
+			{Name: "sfx", Prefix: "SnowFastX"},
+		},
+		Assets: map[string]manifestAsset{
+			fmt.Sprintf("SnowFastULP-%s-%s", latest, suffix): {SHA256: hexHash([]byte("new-sfu")), URL: "https://example/sfu"},
+			fmt.Sprintf("SnowFastX-%s-%s", latest, suffix):   {SHA256: hexHash([]byte("new-sfx")), URL: "https://example/sfx"},
+		},
+	}
+	pending, skipped, err := planUpdates(manifest, latest, suffix, dir, ext, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].bin != "sfu" {
+		t.Fatalf("pending = %+v, want only sfu", pending)
+	}
+	if len(skipped) != 1 || skipped[0] != "sfx" {
+		t.Fatalf("skipped = %v, want [sfx]", skipped)
+	}
+}
+
+func TestPlanUpdatesAllowsExistingExtraBinWhenAllowNew(t *testing.T) {
+	suffix := mustAssetSuffix(t)
+	latest := "0.4"
+	dir := t.TempDir()
+	ext := exeExt()
+	if err := os.WriteFile(filepath.Join(dir, "sfu"+ext), []byte("old-sfu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sfx"+ext), []byte("old-sfx"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &updateManifest{
+		Version: latest,
+		Bins: []manifestBin{
+			{Name: "sfu", Prefix: "SnowFastULP"},
+			{Name: "sfx", Prefix: "SnowFastX"},
+		},
+		Assets: map[string]manifestAsset{
+			fmt.Sprintf("SnowFastULP-%s-%s", latest, suffix): {SHA256: hexHash([]byte("new-sfu")), URL: "https://example/sfu"},
+			fmt.Sprintf("SnowFastX-%s-%s", latest, suffix):   {SHA256: hexHash([]byte("new-sfx")), URL: "https://example/sfx"},
+		},
+	}
+	pending, skipped, err := planUpdates(manifest, latest, suffix, dir, ext, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("skipped = %v, want none", skipped)
+	}
+	got := map[string]bool{}
+	for _, u := range pending {
+		got[u.bin] = u.isNew
+	}
+	if len(got) != 2 {
+		t.Fatalf("pending bins = %v, want sfu and sfx", got)
+	}
+	if got["sfx"] {
+		t.Fatal("existing sfx should be isNew=false (overwrite, not fresh install)")
+	}
+	if got["sfu"] {
+		t.Fatal("existing sfu should be isNew=false")
 	}
 }
 
@@ -1017,6 +1096,9 @@ func TestRunSkipsMissingBinWithoutMarker(t *testing.T) {
 	if !strings.Contains(out, "updated sfu to 0.4") {
 		t.Errorf("output missing updated sfu:\n%s", out)
 	}
+	if !strings.Contains(out, "skipped extra tools (sfx)") {
+		t.Errorf("output should mention skipped sfx:\n%s", out)
+	}
 	if strings.Contains(out, "new tool available: sfx") {
 		t.Errorf("output should not mention sfx (no marker):\n%s", out)
 	}
@@ -1024,6 +1106,78 @@ func TestRunSkipsMissingBinWithoutMarker(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "sfx"+ext)); !os.IsNotExist(err) {
 		t.Errorf("sfx should not be installed without marker, got err=%v", err)
 	}
+}
+
+func TestRunDoesNotOverwriteExistingExtraBinWithoutStamp(t *testing.T) {
+	suffix := mustAssetSuffix(t)
+	latest := "0.4"
+	bins := []mockBin{
+		{"sfu", "SnowFastULP", []byte("#!/bin/sh\necho sfu-0.4\n")},
+		{"sfx", "SnowFastX", []byte("#!/bin/sh\necho sfx-0.4\n")},
+	}
+	srv := startMockReleaseServerWithBins(t, latest, suffix, bins)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ext := exeExt()
+	sfuPath := filepath.Join(dir, "sfu"+ext)
+	sfxPath := filepath.Join(dir, "sfx"+ext)
+	if err := os.WriteFile(sfuPath, []byte("old-sfu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sfxPath, []byte("keep-me"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := run(nil, "0.3", "sfu", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: sfuPath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "skipped extra tools (sfx)") {
+		t.Errorf("expected skip narration:\n%s", got)
+	}
+	if strings.Contains(got, "skipped new tools") {
+		t.Errorf("existing extra bin is not a new install:\n%s", got)
+	}
+	assertFileContents(t, sfxPath, "keep-me")
+	assertFileContents(t, sfuPath, string(bins[0].payload))
+}
+
+func TestRunOverwritesExistingExtraBinWithStamp(t *testing.T) {
+	suffix := mustAssetSuffix(t)
+	latest := "0.4"
+	newSFX := []byte("#!/bin/sh\necho sfx-0.4\n")
+	bins := []mockBin{
+		{"sfu", "SnowFastULP", []byte("#!/bin/sh\necho sfu-0.4\n")},
+		{"sfx", "SnowFastX", newSFX},
+	}
+	srv := startMockReleaseServerWithBins(t, latest, suffix, bins)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ext := exeExt()
+	sfuPath := filepath.Join(dir, "sfu"+ext)
+	sfxPath := filepath.Join(dir, "sfx"+ext)
+	if err := os.WriteFile(sfuPath, []byte("old-sfu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sfxPath, []byte("old-sfx"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeInstallStamp(t, sfuPath)
+
+	var buf bytes.Buffer
+	if err := run(nil, "0.3", "sfu", &buf, &testHooks{
+		releaseURL:     srv.URL + "/releases/latest",
+		executablePath: sfuPath,
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	assertFileContents(t, sfxPath, string(newSFX))
 }
 
 func TestRunInstallNewFlagInstallsWithoutMarker(t *testing.T) {
@@ -1173,7 +1327,7 @@ func TestPlanUpdatesStatErrorSurfaced(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	_, err := planUpdates(manifest, latest, suffix, dir, ext, false)
+	_, _, err := planUpdates(manifest, latest, suffix, dir, ext, false)
 	if err == nil {
 		t.Fatal("expected stat error, got nil")
 	}
@@ -1207,7 +1361,7 @@ func TestPlanUpdatesSkipsNewBinMissingAsset(t *testing.T) {
 		},
 	}
 
-	pending, err := planUpdates(manifest, latest, suffix, dir, ext, true)
+	pending, _, err := planUpdates(manifest, latest, suffix, dir, ext, true)
 	if err != nil {
 		t.Fatalf("planUpdates: %v", err)
 	}

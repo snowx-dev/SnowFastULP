@@ -1311,6 +1311,14 @@ func recapCountRows(stats sflog.ExtractStats) []string {
 		rows = append(rows, recapRow("tdata", sflCountStyle.Render(formatInt(stats.EnvDirsCopied))+
 			sflMutedStyle.Render(" folder(s) copied")))
 	}
+	if stats.EnvSkippedOverCap > 0 {
+		rows = append(rows, recapRow("Env skip", sflWarnStyle.Render(formatInt(stats.EnvSkippedOverCap))+
+			sflMutedStyle.Render(" over size cap")))
+	}
+	if stats.EnvDirsSkippedOverCap > 0 {
+		rows = append(rows, recapRow("tdata skip", sflWarnStyle.Render(formatInt(stats.EnvDirsSkippedOverCap))+
+			sflMutedStyle.Render(" over size cap")))
+	}
 	return rows
 }
 

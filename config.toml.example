@@ -76,8 +76,8 @@
 # txt    = false              # search plain .txt files instead of .zst archives
                                # (skips the index path; slower but no preindex needed).
 # clean  = false              # strip URL scheme prefixes from output lines.
-# stream = false              # deprecated alias for default stream-to-stdout mode.
-# silent = false              # deprecated alias for stream.
+# stream = false              # accepted and ignored (parse-compat).
+# silent = false              # accepted and ignored (parse-compat).
 # l      = 0                  # stop after N total hits, then exit (0 = unlimited).
 # since  = "7d"               # only search archives modified within this window
                                # (mtime-based; e.g. 7d, 12h, 90m). Default: all.
