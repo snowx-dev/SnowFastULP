@@ -21,7 +21,6 @@ func TestCheckerFreshCacheRevalidatedWhenAlreadyUpdated(t *testing.T) {
 	entry := cacheEntry{
 		CheckedAt: time.Now().UTC(),
 		Latest:    "0.2",
-		Newer:     true,
 	}
 	writeCacheFile(t, cacheFile, entry)
 
@@ -53,7 +52,6 @@ func TestCheckerFreshCacheSkipsNetwork(t *testing.T) {
 	entry := cacheEntry{
 		CheckedAt: time.Now().UTC(),
 		Latest:    "0.2.0",
-		Newer:     true,
 	}
 	writeCacheFile(t, cacheFile, entry)
 
@@ -86,7 +84,6 @@ func TestCheckerStaleCacheRefetches(t *testing.T) {
 	entry := cacheEntry{
 		CheckedAt: time.Now().UTC().Add(-25 * time.Hour),
 		Latest:    "0.1.0",
-		Newer:     false,
 	}
 	writeCacheFile(t, cacheFile, entry)
 
@@ -103,12 +100,12 @@ func TestCheckerStaleCacheRefetches(t *testing.T) {
 	}
 
 	got, ok := readFreshCache()
-	if !ok || !got.Newer || got.Latest != "0.2.0" {
+	if !ok || got.Latest != "0.2.0" {
 		t.Fatalf("refreshed cache = %#v ok=%v", got, ok)
 	}
 }
 
-func TestCheckerFailedCheckWritesCacheAndSuppressesRetry(t *testing.T) {
+func TestCheckerFailedCheckIsNotCachedOrReused(t *testing.T) {
 	dir := t.TempDir()
 	cacheFile := filepath.Join(dir, "cache.json")
 	cachePathHook = func() (string, error) { return cacheFile, nil }
@@ -124,6 +121,10 @@ func TestCheckerFailedCheckWritesCacheAndSuppressesRetry(t *testing.T) {
 	c := NewChecker("0.1.0", "sfu", false)
 	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
 	c.Start()
+	c.mu.Lock()
+	done := c.done
+	c.mu.Unlock()
+	<-done
 	if c.NoticeForSummary() != nil {
 		t.Fatal("expected nil notice on failed check")
 	}
@@ -131,19 +132,22 @@ func TestCheckerFailedCheckWritesCacheAndSuppressesRetry(t *testing.T) {
 		t.Fatalf("hits = %d, want 1", hits.Load())
 	}
 
-	got, ok := readFreshCache()
-	if !ok || got.Newer || got.Latest != "" {
-		t.Fatalf("cache after failure = %#v ok=%v", got, ok)
+	if _, err := os.Stat(cacheFile); !os.IsNotExist(err) {
+		t.Fatalf("failed check wrote a cache file: err=%v", err)
 	}
 
 	c2 := NewChecker("0.1.0", "sfu", false)
 	c2.hooks = c.hooks
 	c2.Start()
+	c2.mu.Lock()
+	done = c2.done
+	c2.mu.Unlock()
+	<-done
 	if c2.NoticeForSummary() != nil {
-		t.Fatal("expected nil notice from cached failure")
+		t.Fatal("expected nil notice from second failed check")
 	}
-	if hits.Load() != 1 {
-		t.Fatalf("hits after cached failure = %d, want 1", hits.Load())
+	if hits.Load() != 2 {
+		t.Fatalf("hits after second failed check = %d, want 2", hits.Load())
 	}
 }
 
@@ -164,7 +168,7 @@ func TestCheckerUpToDateWritesCacheWithoutNotice(t *testing.T) {
 	}
 
 	got, ok := readFreshCache()
-	if !ok || got.Newer || got.Latest != "0.1.1" {
+	if !ok || got.Latest != "0.1.1" {
 		t.Fatalf("cache = %#v ok=%v", got, ok)
 	}
 }
@@ -196,7 +200,6 @@ func TestCheckerDisabledSkipsCacheAndNetwork(t *testing.T) {
 	entry := cacheEntry{
 		CheckedAt: time.Now().UTC(),
 		Latest:    "9.9.9",
-		Newer:     true,
 	}
 	writeCacheFile(t, cacheFile, entry)
 

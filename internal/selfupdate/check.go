@@ -25,13 +25,16 @@ func checkCachePath() (string, error) {
 	if cachePathHook != nil {
 		return cachePathHook()
 	}
-	return filepath.Join(os.TempDir(), checkCacheFileName), nil
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "snowfast", checkCacheFileName), nil
 }
 
 type cacheEntry struct {
 	CheckedAt time.Time `json:"checked_at"`
 	Latest    string    `json:"latest"`
-	Newer     bool      `json:"newer"`
 }
 
 // Notice describes an available release for summary footers.
@@ -92,8 +95,10 @@ func (c *Checker) Start() {
 
 	go func() {
 		defer close(done)
-		entry := c.performCheck()
-		writeCheckCache(entry)
+		entry, cacheable := c.performCheck()
+		if cacheable {
+			writeCheckCache(entry)
+		}
 		c.applyEntry(entry)
 	}()
 }
@@ -143,21 +148,19 @@ func (c *Checker) applyEntry(entry cacheEntry) {
 	}
 }
 
-func (c *Checker) performCheck() cacheEntry {
+func (c *Checker) performCheck() (cacheEntry, bool) {
 	entry := cacheEntry{CheckedAt: time.Now().UTC()}
 
 	manifest, err := fetchLatest(c.hooks)
 	if err != nil {
-		return entry
+		return entry, false
 	}
 	latest := strings.TrimPrefix(manifest.Version, "v")
 	if latest == "" {
-		return entry
+		return entry, false
 	}
 	entry.Latest = latest
-	cur := strings.TrimPrefix(c.currentVersion, "v")
-	entry.Newer = compareVersions(latest, cur) > 0
-	return entry
+	return entry, true
 }
 
 func readFreshCache() (cacheEntry, bool) {
@@ -173,7 +176,7 @@ func readFreshCache() (cacheEntry, bool) {
 	if err := json.Unmarshal(data, &entry); err != nil {
 		return cacheEntry{}, false
 	}
-	if entry.CheckedAt.IsZero() {
+	if entry.CheckedAt.IsZero() || entry.Latest == "" {
 		return cacheEntry{}, false
 	}
 	if time.Since(entry.CheckedAt) > checkCacheTTL {
@@ -183,6 +186,9 @@ func readFreshCache() (cacheEntry, bool) {
 }
 
 func writeCheckCache(entry cacheEntry) {
+	if entry.Latest == "" {
+		return
+	}
 	path, err := checkCachePath()
 	if err != nil {
 		log.Printf("selfupdate: check cache path: %v", err)
@@ -212,6 +218,7 @@ func writeCheckCache(entry cacheEntry) {
 		return
 	}
 	if err := atomicfs.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		log.Printf("selfupdate: rename check cache: %v", err)
 	}
 }

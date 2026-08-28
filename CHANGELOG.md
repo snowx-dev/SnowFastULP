@@ -41,12 +41,20 @@ All notable changes to SnowFastMerge are documented here. The format follows
 ### sfs — `-sec` interactions
 - `-sec -o FILE` is **file-only** (no stdout tee), so secrets never leak to
   stdout when an output file is named.
-- `[sfs].stats` / `[sfs].txt` from config no longer hard-reject `-sec` unless
-  `-stats` / `-txt` is explicitly **enabled** on the CLI. Config-derived values
-  are the user's baseline, not an explicit ask for the run.
+- Effective `[sfs].stats` / `[sfs].txt` values from config now hard-reject
+  incompatible `-sec` runs, just like the corresponding CLI flags.
 - `-sec` warnings for ignored `-j` / `-decode-step` / `-max-hits-per-chunk` now
   fire only when the flag is passed on the CLI, not when the value comes from
   config.
+
+### sfu — custom parsers and fast-path control
+- `-parse-delims` and `-parse-rules` select custom input parsers; the matching
+  `[sfu].parse_delims` and `[sfu].parse_rules` config keys are supported.
+- `-no-fast-path` exposes the config-only fast-path diagnostic switch as an
+  advanced CLI option.
+
+### sfl — loose parsing
+- Added `-loose` and `[sfl].loose` for higher-recall ULP parsing.
 
 ### Path UX — config relatives resolve against CWD
 - Relative paths in `config.toml` (`[sfu]`, `[sfs]`, `[sfl]` sections) now resolve

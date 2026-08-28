@@ -18,9 +18,11 @@ func TestExampleConfigParsesWhenUncommented(t *testing.T) {
 		t.Fatalf("read example: %v", err)
 	}
 
-	// uncomment key=value lines, skip mutually-exclusive alternatives
+	// Uncomment key=value lines, skipping only the custom-parser alternative
+	// that conflicts with parse_delims. Output keys are allowed to coexist;
+	// ApplySFU/ApplySFL define their precedence.
 	skipKeys := map[string]bool{
-		"o": true, // mutex w/ [sfu].od, example shows both
+		"parse_rules": true, // mutex w/ [sfu].parse_delims
 	}
 	keyLine := regexp.MustCompile(`^(\s*)#\s*([A-Za-z_][A-Za-z0-9_]*)(\s*=)`)
 	var out strings.Builder
@@ -41,7 +43,12 @@ func TestExampleConfigParsesWhenUncommented(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := config.Load(dst, true); err != nil {
+	loaded, err := config.Load(dst, true)
+	if err != nil {
 		t.Fatalf("uncommented example failed to parse: %v\n\n--- generated ---\n%s", err, out.String())
+	}
+	if loaded.SFU.ParseDelims == "" || loaded.SFU.ParseRules != "" {
+		t.Fatalf("generated example must select exactly one custom parser: delims=%q rules=%q",
+			loaded.SFU.ParseDelims, loaded.SFU.ParseRules)
 	}
 }

@@ -158,18 +158,18 @@ func TestIsAllDigits(t *testing.T) {
 		"00000": true,
 	}
 	for s, want := range cases {
-		if got := isAllDigits(s); got != want {
-			t.Errorf("isAllDigits(%q) = %v, want %v", s, got, want)
+		if got := allDigits(s); got != want {
+			t.Errorf("allDigits(%q) = %v, want %v", s, got, want)
 		}
 	}
 }
 
 func TestSplitPortPath(t *testing.T) {
 	cases := []struct {
-		in     string
-		port   string
-		rest   string
-		ok     bool
+		in   string
+		port string
+		rest string
+		ok   bool
 	}{
 		{"8080", "8080", "", true},
 		{"8080/auth/login", "8080", "/auth/login", true},

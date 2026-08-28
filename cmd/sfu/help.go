@@ -57,6 +57,7 @@ func renderHelp(bin string) string {
 		{"-parse-delims", "SEP", "Replace the parser: split lines as url<SEP>login<SEP>password (exactly 3 fields)."},
 		{"-parse-rules", "FILE", "Replace the parser: regexps with named groups url|host/login/password, one per line. Go RE2 engine (linear-time, no backtracking); keep patterns simple on untrusted dumps."},
 		{"-no-encoding-sniff", "", "Skip encoding checks and read files as UTF-8."},
+		{"-no-fast-path", "", "Disable the single-goroutine fast path (debugging)."},
 	}
 	devs := []argDef{
 		{"-debug", "", "Write a debug log for this run."},

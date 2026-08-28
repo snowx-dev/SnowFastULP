@@ -64,15 +64,15 @@ func TestDelimParserRejectsEmptyFields(t *testing.T) {
 func TestDelimParserEmptyFieldsDoNotRoundTripPoison(t *testing.T) {
 	// Defense-in-depth: even if Parse ever returned ok, FormatRecordStable
 	// must not be fed empty login/password from DelimParser. Documented
-	// regression from review: example.com::pw parses false via parseUnion.
+	// regression from review: example.com::pw is not a stored record.
 	p, _ := NewDelimParser("|")
 	line := "example.com||pw"
 	if _, _, _, _, ok := p.Parse(line); ok {
 		t.Fatal("empty login must reject before FormatRecordStable")
 	}
-	h, _, l, pw, ok := parseUnion("example.com::pw")
+	h, _, l, pw, ok := parseStored("example.com::pw")
 	if ok {
-		t.Fatalf("sanity: parseUnion must reject empty-field ULP, got %q/%q/%q", h, l, pw)
+		t.Fatalf("sanity: parseStored must reject empty-field ULP, got %q/%q/%q", h, l, pw)
 	}
 }
 

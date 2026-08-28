@@ -73,3 +73,17 @@ func TestRenderHelpIncludesODRInNerdyTier(t *testing.T) {
 		t.Errorf("-odr should be in the nerdy tier, not the primary block:\n%s", help)
 	}
 }
+
+func TestRenderHelpIncludesNoFastPathInNerdyTier(t *testing.T) {
+	help := renderHelp("sfu")
+	nerdyStart := strings.Index(help, "Args (for nerds):")
+	if nerdyStart < 0 {
+		t.Fatal("could not locate nerdy tier header in help")
+	}
+	if !strings.Contains(help[nerdyStart:], "-no-fast-path") {
+		t.Fatalf("help missing -no-fast-path in nerdy tier:\n%s", help)
+	}
+	if strings.Contains(help[:nerdyStart], "-no-fast-path") {
+		t.Fatalf("-no-fast-path should be in nerdy tier, not primary block:\n%s", help)
+	}
+}

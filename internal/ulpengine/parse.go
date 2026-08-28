@@ -54,7 +54,7 @@ const androidScheme = "android://"
 // carries no colon (base64 + '@' + dotted package), so the first colon past the
 // scheme is the url/login boundary; login carries no colon either, and the
 // password takes the remainder (which may itself contain colons). Reachable
-// from parse(), and thus from parseLoose/parseUnion (both run parse first), so
+// from parse(), and thus from parseLoose, so
 // ingest, loose, and regen/round-trip all key these identically.
 func parseAndroid(line string) (host, url, login, password string, ok bool) {
 	if !strings.HasPrefix(line, androidScheme) {
@@ -289,32 +289,6 @@ func (lf *lineFormatter) FormatRecordStableLine(host, url, login, password strin
 func (lf *lineFormatter) roundTrips(serialized []byte, host, login, password string) bool {
 	h, _, l, p, ok := parseStored(string(serialized))
 	return ok && h == host && l == login && p == password
-}
-
-// reparseKey runs the regen/archive parser over a serialized record and returns
-// its dedup key (used by tests and callers that only need the digest).
-func (lf *lineFormatter) reparseKey(serialized []byte) (uint64, bool) {
-	host, _, login, password, ok := parseStored(string(serialized))
-	if !ok {
-		return 0, false
-	}
-	return lf.HashKey(host, login, password), true
-}
-
-// colonAmbiguous reports whether a formatted record has more than two colons,
-// the only case where re-parsing a formatted record can mis-split. A clean
-// host:login:password (<=2 colons) always re-parses to the same key.
-func colonAmbiguous(b []byte) bool {
-	n := 0
-	for i := 0; i < len(b); i++ {
-		if b[i] == ':' {
-			if n == 2 {
-				return true
-			}
-			n++
-		}
-	}
-	return false
 }
 
 // xxhash64(host:login:password) via streaming digest, 0 allocs

@@ -69,9 +69,6 @@ func stampDirField(stampPath string) string {
 		return ""
 	}
 	data = bytes.TrimPrefix(data, []byte(utf8BOM))
-	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
-		data = data[3:]
-	}
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())

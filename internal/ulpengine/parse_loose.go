@@ -66,23 +66,6 @@ func looseExtrasTrimmed(line string) (host, url, login, password string, ok bool
 	}
 }
 
-// parseUnion is the raw-ingest index helper: strict OR loose (with junk gate on
-// the loose extras path). Sidecar regen and FormatRecordStable verification use
-// parseStored instead — trusted archive lines must not be junk-filtered.
-func parseUnion(line string) (host, url, login, password string, ok bool) {
-	if h, u, l, p, ok := parse(line); ok {
-		return h, u, l, p, true
-	}
-	line = strings.TrimRight(line, "\r\n")
-	if len(line) < 5 || len(line) > maxParsedLineLen {
-		return "", "", "", "", false
-	}
-	if isLikelyJunk(line) {
-		return "", "", "", "", false
-	}
-	return looseExtrasTrimmed(line)
-}
-
 // finishParse w/ url=="" treated as "use host as url"
 func finishLoose(url, login, password string) (host, urlOut, loginOut, passwordOut string, ok bool) {
 	if url == "" || login == "" || password == "" {
@@ -111,18 +94,6 @@ func isLikelyJunk(line string) bool {
 		return true
 	}
 	return false
-}
-
-func isAllDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // splitPortPath splits a "port" or "port/path..." field (the 2nd colon group of

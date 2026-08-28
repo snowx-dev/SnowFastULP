@@ -7,7 +7,7 @@ import (
 
 // parseStored is the trusted-archive / regen reader. It recovers
 // (host, url, login, password) from a line that FormatRecord (or an older
-// ingest path) wrote into a library .zst. Unlike parseUnion it never applies
+// ingest path) wrote into a library .zst. Unlike parseLoose it never applies
 // isLikelyJunk — archive lines are trusted — and it can re-read logins that
 // ulpPattern rejects (spaces, $, unicode) as long as finishParse accepts them.
 //
@@ -62,7 +62,7 @@ func formatRecordInverse(line string) (host, url, login, password string, ok boo
 		if !isStoredURLPrefix(urlPart) {
 			continue
 		}
-	cands = append(cands, cand{urlPart, candLogin, candPass})
+		cands = append(cands, cand{urlPart, candLogin, candPass})
 	}
 	sort.Slice(cands, func(i, j int) bool {
 		return len(cands[i].url) > len(cands[j].url)

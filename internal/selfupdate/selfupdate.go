@@ -308,7 +308,7 @@ func run(args []string, currentVersion, invoked string, out io.Writer, hooks *te
 				// A sibling already swapped/installed: the toolkit is now
 				// version-skewed. Say so explicitly and point at the safe
 				// recovery — re-running finishes the job.
-				return skewError(out, u, err, latest, done, pending, invokedBin)
+				return skewError(u, err, latest, done, pending, invokedBin)
 			}
 			verb := "updating"
 			if u.isNew {
@@ -356,7 +356,7 @@ func formatUpdateUsage(invoked string) string {
 // both "still on the old version" (existing bins that didn't get swapped) and
 // "new bin not installed" (new bins that didn't get written), so re-running
 // is the documented recovery in either case.
-func skewError(_ io.Writer, failed pendingUpdate, err error, latest string, done []string, pending []pendingUpdate, invokedBin string) error {
+func skewError(failed pendingUpdate, err error, latest string, done []string, pending []pendingUpdate, invokedBin string) error {
 	doneSet := make(map[string]bool, len(done))
 	for _, b := range done {
 		doneSet[b] = true
@@ -570,7 +570,7 @@ func applyOrder(pending []pendingUpdate, invokedBin string) []int {
 }
 
 func downloadVerified(url string, wantHash []byte, hooks *testHooks) ([]byte, error) {
-	body, err := httpGet(url, hooks)
+	body, err := httpGet(url)
 	if err != nil {
 		return nil, err
 	}
@@ -781,7 +781,7 @@ func fetchLatest(hooks *testHooks) (*updateManifest, error) {
 
 // httpGet performs a GET with a sane timeout and returns the response body for
 // the caller to close. Non-2xx statuses are surfaced as errors.
-func httpGet(url string, hooks *testHooks) (io.ReadCloser, error) {
+func httpGet(url string) (io.ReadCloser, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

@@ -16,7 +16,7 @@ func TestFormatRecordStableChoosesRoundTrippableForm(t *testing.T) {
 		{"port url kept after verify", "https://a.example.com:8080:user:pw1", "a.example.com:8080:user:pw1"},
 		{"json tail kept full", `twitter.com:moraxd5:{"uid":"123","token"`, `twitter.com:moraxd5:{"uid":"123","token"`},
 		{"colon url rescued by host-only", "user:pw1:https://clean.example.com/:weird:path", "clean.example.com:user:pw1"},
-		// formerly dropped under parseUnion verify; parseStored recovers host form
+		// formerly dropped by the old verifier; parseStored recovers host form
 		{"messy LPU kept via host form", `jurbzdm:astr.m@ou4eudeaeC:Estr@6438:https://om.fhttpiip-dual/:login.b@example.net:PassWord9:@Nv@g`, "om.fhttpiip-dual:jurbzdm:astr.m@ou4eudeaeC:Estr@6438"},
 	}
 	lf := newLineFormatter()
@@ -66,7 +66,7 @@ func TestFormatRecordStableGuaranteesRoundTrip(t *testing.T) {
 	}
 	lf := newLineFormatter()
 	for _, line := range corpus {
-		host, url, login, password, ok := parseUnion(line)
+		host, url, login, password, ok := parseLoose(line)
 		if !ok {
 			continue
 		}
@@ -139,22 +139,6 @@ func TestFormatRecordStableDropsColonLoginFields(t *testing.T) {
 	out, repr := lf.FormatRecordStable("example.com", "example.com", "user:name", "pw", false)
 	if repr {
 		t.Fatalf("colon-login fields must be dropped, got %q", out)
-	}
-}
-
-func TestColonAmbiguous(t *testing.T) {
-	cases := map[string]bool{
-		"":               false,
-		"abc":            false,
-		"a:b":            false,
-		"a:b:c":          false,
-		"a:b:c:d":        true,
-		"h.com:8080:u:p": true,
-	}
-	for in, want := range cases {
-		if got := colonAmbiguous([]byte(in)); got != want {
-			t.Errorf("colonAmbiguous(%q) = %v, want %v", in, got, want)
-		}
 	}
 }
 

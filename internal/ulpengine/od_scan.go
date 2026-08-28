@@ -895,8 +895,8 @@ func processPartTask(ctx context.Context, t archivePart, decoderConcurrency int,
 
 	streamErr := streamArchiveLines(ctx, t.path, decoderConcurrency, ws, func(line string) error {
 		// parseStored is the archive reader: FormatRecord inverse + strict,
-		// without isLikelyJunk. Matches FormatRecordStable's reparseKey so
-		// every written line can be indexed.
+		// without isLikelyJunk. It matches FormatRecordStable's verification
+		// so every written line can be indexed.
 		host, _, login, password, ok := parseStored(line)
 		if !ok {
 			return nil

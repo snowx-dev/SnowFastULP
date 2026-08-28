@@ -88,6 +88,34 @@ func TestApplySFUConfigODTakesPriorityOverO(t *testing.T) {
 	}
 }
 
+func TestApplySFUNoFastPathConfigAndCLIOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[sfu]\nno_fast_path = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := config.Load(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	configValue := false
+	if err := f.ApplySFU(config.Visited{}, config.SFUFlags{NoFastPath: &configValue}); err != nil {
+		t.Fatal(err)
+	}
+	if !configValue {
+		t.Fatal("config no_fast_path=true was not applied")
+	}
+
+	cliValue := false
+	visited := config.Visited{"no-fast-path": true}
+	if err := f.ApplySFU(visited, config.SFUFlags{NoFastPath: &cliValue}); err != nil {
+		t.Fatal(err)
+	}
+	if cliValue {
+		t.Fatal("explicit -no-fast-path=false should override config")
+	}
+}
+
 func TestDefaultPathUnixStyle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix path test")

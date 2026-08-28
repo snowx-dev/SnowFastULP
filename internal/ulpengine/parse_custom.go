@@ -80,7 +80,7 @@ func (p DelimParser) Parse(line string) (host, url, login, password string, ok b
 	if len(parts) != 3 {
 		return "", "", "", "", false
 	}
-	// empty fields would serialize to host::pw / host:user: which parseUnion
+	// empty fields would serialize to host::pw / host:user: which parseStored
 	// cannot re-read — reject here (RegexRulesParser already requires non-empty).
 	if parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return "", "", "", "", false

@@ -94,13 +94,13 @@ func TestParseStoredKeyParityWithParseUnion(t *testing.T) {
 		"example.com:kalai123$s:pw",
 	}
 	for _, line := range corpus {
-		uh, _, ul, up, uok := parseUnion(line)
+		uh, _, ul, up, uok := parseLoose(line)
 		sh, _, sl, sp, sok := parseStored(line)
 		if !uok {
 			continue // parity only binds when union accepts
 		}
 		if !sok {
-			t.Errorf("parseUnion ok but parseStored rejected %q", line)
+			t.Errorf("parseLoose ok but parseStored rejected %q", line)
 			continue
 		}
 		if lf.HashKey(uh, ul, up) != lf.HashKey(sh, sl, sp) {

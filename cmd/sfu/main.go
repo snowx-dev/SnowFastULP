@@ -158,6 +158,7 @@ func main() {
 	parseDelims := flag.String("parse-delims", "", "replace built-in parser: split each line as url<SEP>login<SEP>password (exactly 3 fields; ignores -loose)")
 	parseRules := flag.String("parse-rules", "", "replace built-in parser: file of regexps, one per line, with named groups url|host, login, password (ignores -loose)")
 	noEncodingSniff := flag.Bool("no-encoding-sniff", false, "skip BOM detection; treat all inputs as UTF-8 (debug / A-B benchmark)")
+	noFastPath := flag.Bool("no-fast-path", false, "disable the single-goroutine fast path (debugging)")
 	debug := flag.Bool("debug", false, "write structured job debug log in current working directory (CWD at start)")
 	debugReject := flag.Bool("debug-reject", false, "append parser-rejected lines to a file in CWD")
 	noUpdateCheck := flag.Bool("no-update-check", false, "disable background update availability check")
@@ -182,7 +183,8 @@ func main() {
 		NoTUI:    noTUI, Zst: zst, Del: delSrc, NoURI: noURI,
 		Loose: loose, NoEncodingSniff: noEncodingSniff,
 		ParseDelims: parseDelims, ParseRules: parseRules,
-		Debug: debug, DebugReject: debugReject,
+		NoFastPath: noFastPath,
+		Debug:      debug, DebugReject: debugReject,
 	}); err != nil {
 		fatalf("%v", err)
 	}
@@ -305,7 +307,7 @@ func main() {
 		Workers:         *workers,
 		DedupWorkers:    *dedupW,
 		Buckets:         *buckets,
-		FastPathOff:     fileCfg.SFU.NoFastPath,
+		FastPathOff:     *noFastPath,
 		Compress:        *zst,
 		ZstChunkLines:   *splitZst,
 		RunStarted:      started,

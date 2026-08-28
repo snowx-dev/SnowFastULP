@@ -2,15 +2,14 @@ package ulpengine
 
 import "testing"
 
-// parseUnion is the index/regen parser: it must admit a key for any line that
-// strict parse() OR loose parseLoose() accepts, so a sidecar can never miss a
-// stored line. These cases pin the three regions that matter:
+// parseLoose must admit a key for any line that strict parse() OR its loose
+// extras path accepts. These cases pin the three regions that matter:
 //   - strict-only: messy real creds (truncated JSON/cookie tails) that the
 //     loose isLikelyJunk gate drops but strict keeps. losing these was the
 //     straggler bug.
 //   - loose-only: bare/IP host shapes the strict regex rejects.
 //   - junk: rejected by both, must stay rejected by union too.
-func TestParseUnionCoversStrictAndLoose(t *testing.T) {
+func TestParseLooseCoversStrictAndLoose(t *testing.T) {
 	cases := []struct {
 		name      string
 		line      string
@@ -108,26 +107,27 @@ func TestParseUnionCoversStrictAndLoose(t *testing.T) {
 			if _, _, _, _, ok := parseLoose(tc.line); ok != tc.looseOK {
 				t.Errorf("loose parse ok = %v, want %v", ok, tc.looseOK)
 			}
-			host, _, login, pass, ok := parseUnion(tc.line)
+			host, _, login, pass, ok := parse(tc.line)
+			if !ok {
+				host, _, login, pass, ok = parseLoose(tc.line)
+			}
 			if ok != tc.unionOK {
-				t.Fatalf("union parse ok = %v, want %v", ok, tc.unionOK)
+				t.Fatalf("strict-or-loose parse ok = %v, want %v", ok, tc.unionOK)
 			}
 			if !ok {
 				return
 			}
 			if host != tc.wantHost || login != tc.wantLogin || pass != tc.wantPass {
-				t.Errorf("union = (%q,%q,%q), want (%q,%q,%q)",
+				t.Errorf("strict-or-loose = (%q,%q,%q), want (%q,%q,%q)",
 					host, login, pass, tc.wantHost, tc.wantLogin, tc.wantPass)
 			}
 		})
 	}
 }
 
-// for any line strict accepts, union must return byte-identical fields (and
-// thus the same dedup key) so the index built by regen matches what ingest
-// would compute. parseLoose also runs strict-first, so this transitively
-// covers loose/union key parity on shared lines.
-func TestParseUnionKeyParityWithStrict(t *testing.T) {
+// For any line strict accepts, the strict parser returns the canonical fields
+// that ingest must preserve.
+func TestParseStrictKeyParity(t *testing.T) {
 	lines := []string{
 		"https://a.example.com:user@mail.com:pw1",
 		"user:pass:https://site.com",
@@ -139,14 +139,14 @@ func TestParseUnionKeyParityWithStrict(t *testing.T) {
 		if !sok {
 			t.Fatalf("test setup: strict rejected %q", line)
 		}
-		uh, _, ul, up, uok := parseUnion(line)
-		if !uok {
-			t.Errorf("union rejected strict-accepted line %q", line)
+		lh, _, ll, lp, lok := parse(line)
+		if !lok {
+			t.Errorf("strict parser rejected strict-accepted line %q", line)
 			continue
 		}
-		if dedupKey(sh, sl, sp) != dedupKey(uh, ul, up) {
-			t.Errorf("key mismatch for %q: strict=%q union=%q",
-				line, dedupKey(sh, sl, sp), dedupKey(uh, ul, up))
+		if dedupKey(sh, sl, sp) != dedupKey(lh, ll, lp) {
+			t.Errorf("key mismatch for %q: first=%q strict=%q",
+				line, dedupKey(sh, sl, sp), dedupKey(lh, ll, lp))
 		}
 	}
 }

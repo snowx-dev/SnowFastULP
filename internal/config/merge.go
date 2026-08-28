@@ -53,6 +53,7 @@ type SFUFlags struct {
 	SplitZst                *int64
 	NoTUI, Zst, Del, NoURI  *bool
 	Loose, NoEncodingSniff  *bool
+	NoFastPath              *bool
 	Debug, DebugReject      *bool
 	ParseDelims             *string
 	ParseRules              *string
@@ -136,6 +137,9 @@ func (f File) ApplySFU(v Visited, fl SFUFlags) error {
 	}
 	if !v.set("no-encoding-sniff") && f.SFU.NoEncodingSniff {
 		*fl.NoEncodingSniff = true
+	}
+	if !v.set("no-fast-path") && f.SFU.NoFastPath && fl.NoFastPath != nil {
+		*fl.NoFastPath = true
 	}
 	if !v.set("debug") && f.SFU.Debug {
 		*fl.Debug = true
@@ -225,13 +229,14 @@ type SFLFlags struct {
 	Env                       *bool
 }
 
-// ApplySFL applies unvisited config values to sfl flags. Unlike ApplySFU/
-// ApplySFS, every flag pointer dereference is nil-guarded (e.g. `fl.O != nil`)
-// because sfl callers may pass a partially populated SFLFlags (only the flags
-// relevant to the selected subcommand). SFU/SFS flags are always fully
-// populated by their constructors, so they omit the guards. Visited itself is
-// nil-safe: a nil map makes every v.set(...) return false, so a nil Visited
-// means "nothing was set on the command line" and every config value applies.
+// ApplySFL applies unvisited config values to sfl flags. Every flag pointer
+// dereference is nil-guarded because sfl callers may pass a partially populated
+// SFLFlags (only the flags relevant to the selected subcommand). ApplySFU
+// guards optional custom-parser pointers, while ApplySFS guards stats and
+// secret-related pointers; both real callers fully populate the remaining
+// fields today. Visited itself is nil-safe: a nil map makes every v.set(...)
+// return false, so a nil Visited means "nothing was set on the command line"
+// and every config value applies.
 func (f File) ApplySFL(v Visited, fl SFLFlags) error {
 	// Any CLI output flag (-o/-od/-odr) suppresses the config o/od pull so
 	// CLI wins. When none are on the CLI and the config sets both o and od,
