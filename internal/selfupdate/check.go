@@ -200,6 +200,10 @@ func writeCheckCache(entry cacheEntry) {
 		return
 	}
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("selfupdate: create check cache dir: %v", err)
+		return
+	}
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
 		log.Printf("selfupdate: create check cache temp: %v", err)

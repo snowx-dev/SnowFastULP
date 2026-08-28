@@ -173,6 +173,22 @@ func TestCheckerUpToDateWritesCacheWithoutNotice(t *testing.T) {
 	}
 }
 
+func TestWriteCheckCacheCreatesPrivateParent(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "nested", "snowfast-update-check.json")
+	cachePathHook = func() (string, error) {
+		return cachePath, nil
+	}
+	t.Cleanup(func() { cachePathHook = nil })
+
+	writeCheckCache(cacheEntry{
+		CheckedAt: time.Now().UTC(),
+		Latest:    "0.2.0",
+	})
+	if _, ok := readFreshCache(); !ok {
+		t.Fatal("cache written below a missing parent directory was not readable")
+	}
+}
+
 func TestCheckerDevBuildSeesReleaseAsNewer(t *testing.T) {
 	dir := t.TempDir()
 	cacheFile := filepath.Join(dir, "cache.json")
