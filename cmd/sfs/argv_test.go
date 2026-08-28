@@ -144,3 +144,75 @@ func TestParseSearchArgsTooMany(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestParseSearchArgsFMode(t *testing.T) {
+	dir := t.TempDir()
+	args, err := parseSearchArgsMode(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args.Root != "" || args.Pattern != "" {
+		t.Fatalf("args = %+v, want empty root", args)
+	}
+
+	args, err = parseSearchArgsMode([]string{dir}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args.Root != dir || args.Pattern != "" {
+		t.Fatalf("args = %+v", args)
+	}
+
+	_, err = parseSearchArgsMode([]string{"needle"}, true)
+	if err == nil || !strings.Contains(err.Error(), "must be a directory") {
+		t.Fatalf("err = %v, want directory rejection", err)
+	}
+
+	_, err = parseSearchArgsMode([]string{dir, "needle"}, true)
+	if err == nil || !strings.Contains(err.Error(), "cannot pass a PATTERN") {
+		t.Fatalf("err = %v, want PATTERN rejection", err)
+	}
+
+	_, err = parseSearchArgsMode([]string{dir, "a", "b"}, true)
+	if err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("err = %v, want too many", err)
+	}
+}
+
+func TestApplyFModeRoot(t *testing.T) {
+	if got := applyFModeRoot("/given", "/cfg"); got != "/given" {
+		t.Fatalf("positional should win: %q", got)
+	}
+	if got := applyFModeRoot("", "/cfg"); got != "/cfg" {
+		t.Fatalf("[sfs].dir fallback: %q", got)
+	}
+	if got := applyFModeRoot("", ""); got != "." {
+		t.Fatalf("cwd fallback: %q", got)
+	}
+}
+
+func TestResolveFModeStats(t *testing.T) {
+	tests := []struct {
+		name         string
+		stats        bool
+		statsVisited bool
+		wantStats    bool
+		wantErr      bool
+	}{
+		{name: "unset", wantStats: false},
+		{name: "config stats is disabled for f mode", stats: true, wantStats: false},
+		{name: "explicit stats is rejected", stats: true, statsVisited: true, wantErr: true},
+		{name: "explicit false overrides config", stats: false, statsVisited: true, wantStats: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveFModeStats(tt.stats, tt.statsVisited)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, want error=%v", err, tt.wantErr)
+			}
+			if got != tt.wantStats {
+				t.Fatalf("stats = %v, want %v", got, tt.wantStats)
+			}
+		})
+	}
+}

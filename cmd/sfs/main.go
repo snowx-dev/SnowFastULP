@@ -38,6 +38,10 @@ func main() {
 	// only on a legacy console that can't render ANSI, forcing the silent UI so
 	// escapes never leak as raw text.
 	vtOK := console.EnableVT()
+	// started is the run timestamp, shared by -f per-pattern file naming and
+	// the stats/debug headers; declared up front so the -f resolution block can
+	// stamp the per-pattern output filenames.
+	started := time.Now()
 
 	flag.Usage = func() { printHelp(filepath.Base(os.Args[0]), os.Stderr) }
 
@@ -95,6 +99,7 @@ func main() {
 	sec := flag.Bool("sec", false, "search the secrets DB instead of ULP archives")
 	secPath := flag.String("sec-path", "", "")
 	secretsPathAlias := flag.String("secrets-path", "", "") // sfl spelling
+	patternsFile := flag.String("f", "", "file of search terms (one per line); with -o DIR, write one file per term")
 
 	flagArgs, positional := cliargs.SplitPositional(config.StripConfigArgv(os.Args[1:]), flag.CommandLine)
 	if err := flag.CommandLine.Parse(flagArgs); err != nil {
@@ -111,28 +116,95 @@ func main() {
 		fatal("%v", err)
 	}
 
-	args, err := parseSearchArgs(positional)
+	fMode := *patternsFile != ""
+	if fMode {
+		if *sec || *secPath != "" {
+			usage("-f is not supported with -sec")
+		}
+		var statsErr error
+		*stats, statsErr = resolveFModeStats(*stats, visited["stats"])
+		if statsErr != nil {
+			usage("-f is not supported with -stats; use -o DIR for per-term files")
+		}
+	}
+	args, err := parseSearchArgsMode(positional, fMode)
 	if err != nil {
 		flag.Usage()
 		usage("%v", err)
 	}
-	if len(positional) == 1 && cfg.SFS.Dir != "" {
+	if fMode {
+		var sfsDir string
+		if args.Root == "" && cfg.SFS.Dir != "" {
+			dir, derr := cfg.ResolvedSFSDir()
+			if derr != nil {
+				fatal("%v", derr)
+			}
+			sfsDir = dir
+		}
+		args.Root = applyFModeRoot(args.Root, sfsDir)
+	} else if len(positional) == 1 && cfg.SFS.Dir != "" {
 		dir, err := cfg.ResolvedSFSDir()
 		if err != nil {
 			fatal("%v", err)
 		}
 		args.Root = dir
 	}
-	pattern := args.Pattern
-	matchAll := pattern == "*"
-	if pattern == "" {
-		fatal("empty pattern")
+
+	// Resolve the effective pattern set: a single CLI PATTERN, or the terms
+	// loaded from -f. matcher stays nil for single-pattern (BMH hot path).
+	var (
+		patterns   []string
+		matcher    *search.MultiMatcher
+		multiSink  *dispatchSink
+		multiPaths []string
+	)
+	if fMode {
+		patterns, err = loadPatternsFile(*patternsFile)
+		if err != nil {
+			fatal("%v", err)
+		}
+		// -o in -f mode must be a directory (one file per term).
+		if *outFile != "" {
+			abs, derr := validateFileOutputDir(*outFile)
+			if derr != nil {
+				usage("%v", derr)
+			}
+			// Per-pattern files are created before discovery, so an -o dir
+			// under the search root would itself be discovered and (in -txt
+			// mode) scanned mid-write. Reject the nesting up front.
+			if outputDirUnderRoot(abs, args.Root) {
+				usage("-f -o must be outside the search root (got %s under %s)", abs, args.Root)
+			}
+			files, paths, ferr := allocatePatternFiles(abs, patterns, started)
+			if ferr != nil {
+				fatal("%v", ferr)
+			}
+			multiSink = newDispatchSink(files, *clean)
+			multiPaths = paths
+			// Signal run() to use the dispatchSink instead of a single -o file.
+			*outFile = ""
+		}
+		// Build the multi-pattern matcher (one pass over archives).
+		patBytes := make([][]byte, len(patterns))
+		for i, p := range patterns {
+			patBytes[i] = []byte(p)
+		}
+		matcher = search.NewMultiMatcher(patBytes)
 	}
+
+	pattern := args.Pattern
+	if !fMode {
+		if pattern == "" {
+			fatal("empty pattern")
+		}
+		patterns = []string{pattern}
+	}
+	matchAll := !fMode && pattern == "*"
 	// -sec (or -sec-path) skips archive discovery/indexing.
 	if *sec || *secPath != "" {
 		warns, err := checkSecretsFlags(secretsFlagCheck{
-			Stats:           visited["stats"] && *stats,
-			Txt:             visited["txt"] && *txtMode,
+			Stats:           *stats,
+			Txt:             *txtMode,
 			WorkersSet:      visited["j"] || visited["workers"],
 			DecodeStepSet:   visited["decode-step"],
 			MaxHitsChunkSet: visited["max-hits-per-chunk"],
@@ -211,7 +283,6 @@ func main() {
 		}
 	}
 
-	started := time.Now()
 	cwd, err := os.Getwd()
 	if err != nil {
 		fatal("getwd: %v", err)
@@ -314,6 +385,8 @@ func main() {
 		stdout:          os.Stdout,
 		indexBytesTotal: debugInfo.indexBytesTotal,
 		uiMode:          uiMode,
+		matcher:         matcher,
+		multiSink:       multiSink,
 	})
 	wall := time.Since(started)
 
@@ -329,6 +402,12 @@ func main() {
 	}
 	if dbg != nil {
 		dbg.logCompletion(metrics, wall, debugInfo)
+	}
+	if multiSink != nil {
+		// -f -o DIR: one summary line per pattern file, mirroring the
+		// secrets-summary style ("N hits → path"). Hits are already flushed
+		// and files closed by run(); we just report.
+		printMultiPatternSummary(metrics.Hits.Load(), multiPaths)
 	}
 	if statsMode {
 		// A generated-default output with zero hits would leave a 0-byte
@@ -368,12 +447,20 @@ type runConfig struct {
 	// stdout is the hit stream sink for stream/tee mode. Defaults to os.Stdout
 	// in main; tests inject a buffer so they never mutate the process-global
 	// os.Stdout (which would race with t.Parallel).
-	stdout          io.Writer
+	stdout io.Writer
 	// indexBytesTotal and uiMode are resolved by the caller (main) since it
 	// already computes them for the debug header; run() consumes them instead
 	// of re-statting every archive and re-resolving the UI mode.
 	indexBytesTotal int64
 	uiMode          uiMode
+	// matcher enables multi-pattern (-f) mode when non-nil. Each line is
+	// matched against every pattern in one pass; hits carry PatternIdx for
+	// per-file routing. nil = single-pattern (cfg.pattern via BMH).
+	matcher *search.MultiMatcher
+	// multiSink is the per-pattern file sink used only in -f + -o DIR mode.
+	// When non-nil, cfg.outFile is "" and the single-file path is skipped.
+	// nil for single-pattern and -f-without-o (stream to stdout).
+	multiSink *dispatchSink
 }
 
 func run(ctx context.Context, cfg runConfig) error {
@@ -387,38 +474,66 @@ func run(ctx context.Context, cfg runConfig) error {
 		archiveOrd[a] = i
 	}
 
-	var out *os.File
-	if cfg.outFile != "" {
-		dir := filepath.Dir(cfg.outFile)
-		if dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return fmt.Errorf("create output dir: %w", err)
-			}
-		}
-		f, err := os.Create(cfg.outFile)
-		if err != nil {
-			return fmt.Errorf("open output: %w", err)
-		}
-		defer f.Close()
-		out = f
-	}
-
-	uiMode := cfg.uiMode
-
-	// Hit sink: stats → file only; stream → stdout; stream+-o → tee both.
-	// The live status frame (stderr) shows a hit counter and progress; results
-	// themselves are never painted into the alt-screen.
+	// Hit sink selection. Three shapes:
+	//   - single-pattern: one search.Writer over stdout / -o file / tee.
+	//   - multi-pattern (-f) without -o: one search.Writer over stdout (all
+	//     hits interleaved).
+	//   - multi-pattern (-f) + -o DIR: a dispatchSink over one file per pattern
+	//     (cfg.multiSink, set by main; no stdout, no single cfg.outFile).
+	// stdoutIsTheSink drives per-hit flush (pipe-fix): only when the sink
+	// wraps stdout do we flush every hit so piped output isn't block-buffered.
 	stdout := cfg.stdout
 	if stdout == nil {
 		stdout = os.Stdout
 	}
-	var resultWriter io.Writer = stdout
-	switch {
-	case cfg.stream && out != nil:
-		resultWriter = io.MultiWriter(stdout, out)
-	case out != nil:
-		resultWriter = out
+
+	var sink hitSink
+	var stdoutIsTheSink bool
+	// out is the single-pattern -o file (nil in -f -o DIR mode, where the
+	// dispatchSink owns its own files). Kept at function scope so the
+	// interrupted-output defer can discard it.
+	var out *os.File
+
+	if cfg.multiSink != nil {
+		// -f -o DIR: per-pattern files, no stdout. cfg.outFile is "" by
+		// construction; the single-file open block below is skipped.
+		sink = cfg.multiSink
+		stdoutIsTheSink = false
+		// Always close the per-pattern files on return. The interrupted-output
+		// defer (registered below) handles Close+Remove on a signal; this
+		// defer runs last (registered first) and is a no-op then (Close is
+		// idempotent). On a clean return it closes so a flush error or a
+		// searchErr return path can't strand the files open.
+		defer cfg.multiSink.Close()
+	} else {
+		if cfg.outFile != "" {
+			dir := filepath.Dir(cfg.outFile)
+			if dir != "." {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					return fmt.Errorf("create output dir: %w", err)
+				}
+			}
+			f, err := os.Create(cfg.outFile)
+			if err != nil {
+				return fmt.Errorf("open output: %w", err)
+			}
+			defer f.Close()
+			out = f
+		}
+		var resultWriter io.Writer = stdout
+		switch {
+		case cfg.stream && out != nil:
+			resultWriter = io.MultiWriter(stdout, out)
+		case out != nil:
+			resultWriter = out
+		}
+		sink = search.NewWriter(resultWriter, cfg.clean)
+		// Per-hit flush only when stdout is part of the sink (stream or tee);
+		// file-only (stats) buffers for throughput.
+		stdoutIsTheSink = cfg.stream
 	}
+
+	uiMode := cfg.uiMode
 
 	metrics := cfg.metrics
 	if metrics == nil {
@@ -503,13 +618,15 @@ func run(ctx context.Context, cfg runConfig) error {
 	}
 
 	hitCh := make(chan search.Hit, 4096)
-	sink := search.NewWriter(resultWriter, cfg.clean)
 	// Ordered archive grouping only in stats (file-only) mode; stream/tee stay
-	// unordered for live throughput like the old -s path.
+	// unordered for live throughput like the old -s path. -f mode is always
+	// stream (stats rejected), so it stays unordered too.
 	orderedOutput := !cfg.stream
-	// Flush each hit when streaming to an interactive stdout so the user sees
-	// results live; piped/file-only runs buffer for throughput.
-	streamFlush := cfg.stream && stdoutIsTTY()
+	// Per-hit flush when the sink wraps stdout, so piped output isn't
+	// block-buffered (1 MiB) and sparse-hit queries over huge archives surface
+	// live instead of appearing stuck. File-only and per-pattern-file modes
+	// keep end-of-run flush for throughput.
+	streamFlush := cfg.stream && stdoutIsTheSink
 
 	var printer *search.OrderedPrinter
 	writeHit := func(h search.Hit) error {
@@ -556,15 +673,16 @@ func run(ctx context.Context, cfg runConfig) error {
 		// (early advance strands late hits)
 		if cfg.txtMode {
 			searchErr = search.RunTxt(search.TxtConfig{
-				Ctx:        ctx,
-				MatchAll:   cfg.matchAll,
-				Pattern:    []byte(cfg.pattern),
-				Workers:    cfg.workers,
-				Files:      cfg.archives,
-				Metrics:    metrics,
-				Hits:       hitCh,
-				ArchiveOrd: archiveOrd,
-				OnFileDone: onArchiveDone,
+				Ctx:          ctx,
+				MatchAll:     cfg.matchAll,
+				Pattern:      []byte(cfg.pattern),
+				MultiMatcher: cfg.matcher,
+				Workers:      cfg.workers,
+				Files:        cfg.archives,
+				Metrics:      metrics,
+				Hits:         hitCh,
+				ArchiveOrd:   archiveOrd,
+				OnFileDone:   onArchiveDone,
 				OnFileError: func(path string, err error) {
 					if cfg.debug != nil {
 						cfg.debug.Event("file error path=%s err=%v", filepath.Base(path), err)
@@ -578,6 +696,7 @@ func run(ctx context.Context, cfg runConfig) error {
 				MaxHitsPerChunk: cfg.maxHitsPerChunk,
 				MatchAll:        cfg.matchAll,
 				Pattern:         []byte(cfg.pattern),
+				MultiMatcher:    cfg.matcher,
 				Workers:         cfg.workers,
 				Archives:        cfg.archives,
 				Sidecars:        sidecars,
@@ -605,8 +724,25 @@ func run(ctx context.Context, cfg runConfig) error {
 	var emitted int
 	limitReached := false
 	defer func() {
-		if ctx.Err() != nil && !limitReached && cfg.outFile != "" {
-			discardInterruptedOutput(cfg.outFile, out)
+		if ctx.Err() != nil && !limitReached {
+			if cfg.multiSink != nil {
+				// -f -o DIR: discard every per-pattern file so an interrupted
+				// run leaves no half-written splits behind. Close is
+				// idempotent and nils the file slots, so the always-close
+				// defer registered at sink selection is a clean no-op after.
+				_ = cfg.multiSink.Flush()
+				for i, f := range cfg.multiSink.files {
+					if f != nil {
+						_ = f.Close()
+						_ = os.Remove(f.Name())
+						cfg.multiSink.files[i] = nil
+					}
+				}
+				return
+			}
+			if cfg.outFile != "" {
+				discardInterruptedOutput(cfg.outFile, out)
+			}
 		}
 	}()
 
@@ -709,6 +845,8 @@ drainHits:
 	if err := sink.Flush(); err != nil {
 		return fmt.Errorf("flush output: %w", err)
 	}
+	// -f -o DIR: per-pattern files are closed by the deferred Close registered
+	// at sink selection (idempotent w/ the interrupt defer's Close+Remove).
 	if searchErr != nil && !limitReached {
 		return searchErr
 	}
@@ -795,4 +933,14 @@ func fatal(format string, args ...any) {
 func usage(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "sfs: "+format+"\n", args...)
 	reg.ExitWithCode(2)
+}
+
+// resolveFModeStats applies the -f mode policy to the effective stats value.
+// An explicitly supplied -stats is a usage error; stats inherited from config
+// is disabled silently because -f has its own stream/per-term output modes.
+func resolveFModeStats(stats, statsVisited bool) (bool, error) {
+	if stats && statsVisited {
+		return false, errors.New("explicit -stats is incompatible with -f")
+	}
+	return false, nil
 }

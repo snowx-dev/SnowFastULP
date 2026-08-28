@@ -12,22 +12,24 @@ import (
 
 // TxtConfig holds plain-text search parameters.
 type TxtConfig struct {
-	Ctx         context.Context
-	MatchAll    bool
-	Pattern     []byte
-	Workers     int
-	Files       []string
-	Metrics     *Metrics
-	Hits        chan<- Hit
-	ArchiveOrd  map[string]int
-	OnFileError func(path string, err error)
-	OnFileDone  func(ord int)
+	Ctx      context.Context
+	MatchAll bool
+	Pattern  []byte
+	// MultiMatcher, when non-nil, enables multi-pattern mode (see Config).
+	MultiMatcher *MultiMatcher
+	Workers      int
+	Files        []string
+	Metrics      *Metrics
+	Hits         chan<- Hit
+	ArchiveOrd   map[string]int
+	OnFileError  func(path string, err error)
+	OnFileDone   func(ord int)
 }
 
 // RunTxt searches plain .txt files via worker pool (no index/sidecar).
 // caller sets headline counters (ChunksTotal etc), RunTxt updates only progress
 func RunTxt(cfg TxtConfig) error {
-	if !cfg.MatchAll && len(cfg.Pattern) == 0 {
+	if !cfg.MatchAll && cfg.MultiMatcher == nil && len(cfg.Pattern) == 0 {
 		return fmt.Errorf("empty pattern")
 	}
 	ctx := cfg.Ctx
@@ -86,6 +88,7 @@ func RunTxt(cfg TxtConfig) error {
 					ChunkID:    0,
 					Offset:     h.offset,
 					Line:       h.line,
+					PatternIdx: h.patternIdx,
 				}
 				select {
 				case cfg.Hits <- hit:
@@ -97,7 +100,7 @@ func RunTxt(cfg TxtConfig) error {
 					return ctx.Err()
 				}
 			}
-			err = searchTxtFile(ctx, f, cfg.Pattern, cfg.MatchAll, cfg.Metrics, emit)
+			err = searchTxtFile(ctx, f, cfg.Pattern, cfg.MatchAll, cfg.MultiMatcher, cfg.Metrics, emit)
 			if unreg != nil {
 				unreg()
 			}
@@ -142,13 +145,16 @@ func RunTxt(cfg TxtConfig) error {
 // complete lines across read seams via lineAssembler so a matched line is never
 // truncated at a buffer boundary — no overlap window or on-disk backref needed,
 // and pattern/match-all share one path.
-func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll bool, metrics *Metrics, emit func(localHit) error) error {
+func searchTxtFile(ctx context.Context, f *os.File, pattern []byte, matchAll bool, matcher *MultiMatcher, metrics *Metrics, emit func(localHit) error) error {
 	var process processFn
-	if matchAll {
+	switch {
+	case matchAll:
 		process = matchAllRegion
-	} else {
-		matcher := newPatternMatcher(pattern)
-		process = patternRegion(&matcher)
+	case matcher != nil:
+		process = multiPatternRegion(matcher)
+	default:
+		pm := newPatternMatcher(pattern)
+		process = patternRegion(&pm)
 	}
 
 	buf := make([]byte, outWin)

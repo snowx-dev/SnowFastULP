@@ -47,6 +47,10 @@ type Hit struct {
 	ChunkID    int
 	Offset     int64
 	Line       string
+	// PatternIdx identifies which input pattern matched, for routing hits to
+	// per-pattern output files in multi-pattern (-f) mode. Zero in single-pattern
+	// and match-all modes (the first/only pattern), so existing callers ignore it.
+	PatternIdx int
 }
 
 // Metrics tracks progress for the TUI.
@@ -84,14 +88,19 @@ type Config struct {
 	MaxHitsPerChunk int
 	MatchAll        bool // pattern "*" — emit every non-empty line
 	Pattern         []byte
-	Workers         int
-	Archives        []string
-	Sidecars        map[string]*index.Sidecar
-	Metrics         *Metrics
-	Hits            chan<- Hit
-	ArchiveOrd      map[string]int
-	OnChunkError    func(archive string, chunkID int, err error)
-	OnArchiveDone   func(ord int)
+	// MultiMatcher, when non-nil, enables multi-pattern mode: each line is
+	// matched against every pattern in one pass and hits carry PatternIdx.
+	// When nil, the single Pattern above is used via a BMH matcher. Mutually
+	// exclusive with MatchAll.
+	MultiMatcher  *MultiMatcher
+	Workers       int
+	Archives      []string
+	Sidecars      map[string]*index.Sidecar
+	Metrics       *Metrics
+	Hits          chan<- Hit
+	ArchiveOrd    map[string]int
+	OnChunkError  func(archive string, chunkID int, err error)
+	OnArchiveDone func(ord int)
 	// fires at most once per capped chunk. nil = silent truncation
 	OnChunkCapped func(archive string, chunkID int, emitted int)
 }
@@ -112,7 +121,7 @@ func resolveDecodeStep(req int) int {
 
 // Run searches all archives using a worker pool over chunks.
 func Run(cfg Config) error {
-	if !cfg.MatchAll && len(cfg.Pattern) == 0 {
+	if !cfg.MatchAll && cfg.MultiMatcher == nil && len(cfg.Pattern) == 0 {
 		return fmt.Errorf("empty pattern")
 	}
 	ctx := cfg.Ctx
@@ -241,6 +250,7 @@ func Run(cfg Config) error {
 						ChunkID:    t.chunk.ChunkID,
 						Offset:     batch[i].offset,
 						Line:       batch[i].line,
+						PatternIdx: batch[i].patternIdx,
 					}:
 						if cfg.Metrics != nil {
 							cfg.Metrics.Hits.Add(1)
@@ -251,7 +261,7 @@ func Run(cfg Config) error {
 				}
 				return nil
 			}
-			emitted, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.MatchAll, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk, emit)
+			emitted, capped, err := searchChunk(ctx, file, dec, t.chunk, cfg.Pattern, cfg.MatchAll, cfg.MultiMatcher, cfg.Metrics, *hitsP, decodeStep, cfg.MaxHitsPerChunk, emit)
 			if err != nil {
 				if cfg.OnChunkError != nil {
 					cfg.OnChunkError(t.archive, t.chunk.ChunkID, err)
@@ -301,8 +311,9 @@ func Run(cfg Config) error {
 }
 
 type localHit struct {
-	offset int64
-	line   string
+	offset     int64
+	line       string
+	patternIdx int // which input pattern matched; 0 for single-pattern / match-all
 }
 
 // searchChunk decodes the chunk in decodeStep reads and, after each read,
@@ -314,13 +325,16 @@ type localHit struct {
 // flush. Returns the number of hits emitted, whether the per-chunk cap (maxHits)
 // truncated the chunk, and any decode/emit error (hits found before an error are
 // still emitted).
-func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, matchAll bool, metrics *Metrics, scratch []localHit, decodeStep, maxHits int, emit func([]localHit) error) (int, bool, error) {
+func searchChunk(ctx context.Context, f *os.File, dec *zstd.Decoder, chunk index.Chunk, pattern []byte, matchAll bool, matcher *MultiMatcher, metrics *Metrics, scratch []localHit, decodeStep, maxHits int, emit func([]localHit) error) (int, bool, error) {
 	var process processFn
-	if matchAll {
+	switch {
+	case matchAll:
 		process = matchAllRegion
-	} else {
-		matcher := newPatternMatcher(pattern)
-		process = patternRegion(&matcher)
+	case matcher != nil:
+		process = multiPatternRegion(matcher)
+	default:
+		pm := newPatternMatcher(pattern)
+		process = patternRegion(&pm)
 	}
 
 	buf := make([]byte, outWin)

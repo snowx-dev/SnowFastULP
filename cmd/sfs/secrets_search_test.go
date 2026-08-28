@@ -60,17 +60,16 @@ func TestCheckSecretsFlagsRejectsStatsAndTxt(t *testing.T) {
 	}
 }
 
-// Config-derived flag values must not trip -sec: when [sfs].stats=true or
-// [sfs].workers=4 are in the config but the user did not pass -stats/-j on the
-// CLI, visited[...] is false and checkSecretsFlags stays silent. Only an
-// explicit CLI flag is treated as user intent.
-func TestCheckSecretsFlagsSilentOnConfigDerivedValues(t *testing.T) {
-	warns, err := checkSecretsFlags(secretsFlagCheck{})
-	if err != nil {
-		t.Fatalf("config-only values must not hard-error: %v", err)
-	}
-	if len(warns) != 0 {
-		t.Fatalf("config-only values must not warn, got %v", warns)
+// Effective config-derived modes are incompatible with -sec just like the
+// same values supplied explicitly on the CLI.
+func TestCheckSecretsFlagsRejectsEffectiveConfigModes(t *testing.T) {
+	for _, check := range []secretsFlagCheck{
+		{Stats: true},
+		{Txt: true},
+	} {
+		if _, err := checkSecretsFlags(check); err == nil {
+			t.Fatalf("expected effective mode to be rejected: %+v", check)
+		}
 	}
 }
 

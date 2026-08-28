@@ -250,6 +250,14 @@ func TestRunMatchAllEmptyPatternGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MatchAll without pattern should run: %v", err)
 	}
+	err = Run(Config{MultiMatcher: NewMultiMatcher([][]byte{[]byte("foo")})})
+	if err != nil {
+		t.Fatalf("MultiMatcher with empty Pattern should run: %v", err)
+	}
+	err = RunTxt(TxtConfig{MultiMatcher: NewMultiMatcher([][]byte{[]byte("foo")})})
+	if err != nil {
+		t.Fatalf("RunTxt MultiMatcher with empty Pattern should run: %v", err)
+	}
 }
 
 func runTxtMatchAllCollect(t *testing.T, path string) []Hit {
@@ -272,4 +280,48 @@ func runTxtMatchAllCollect(t *testing.T, path string) []Hit {
 		hits = append(hits, h)
 	}
 	return hits
+}
+
+func TestMultiPatternRegionEmitsPerPatternOccurrence(t *testing.T) {
+	m := NewMultiMatcher([][]byte{[]byte("foo"), []byte("bar")})
+	proc := multiPatternRegion(m)
+	region := []byte("xfoo ybar fooz\n")
+	hits := proc(nil, region, 0)
+	// "foo" at 1 (idx0), "bar" at 6 (idx1), "foo" at 10 (idx0)
+	if len(hits) != 3 {
+		t.Fatalf("hits = %d, want 3: %+v", len(hits), hits)
+	}
+	want := []struct {
+		offset int64
+		idx    int
+		line   string
+	}{{1, 0, "xfoo ybar fooz"}, {6, 1, "xfoo ybar fooz"}, {10, 0, "xfoo ybar fooz"}}
+	for i, w := range want {
+		if hits[i].offset != w.offset || hits[i].patternIdx != w.idx || hits[i].line != w.line {
+			t.Fatalf("hit %d = %+v, want %+v", i, hits[i], w)
+		}
+	}
+}
+
+func TestMultiPatternRegionEmptyRegion(t *testing.T) {
+	m := NewMultiMatcher([][]byte{[]byte("foo")})
+	proc := multiPatternRegion(m)
+	hits := proc(nil, []byte(""), 0)
+	if len(hits) != 0 {
+		t.Fatalf("expected 0 hits, got %d", len(hits))
+	}
+}
+
+func TestMultiPatternRegionLineSpansSeam(t *testing.T) {
+	m := NewMultiMatcher([][]byte{[]byte("needle")})
+	proc := multiPatternRegion(m)
+	var a lineAssembler
+	hits := a.feed(nil, []byte("alpha nee"), 0, proc)
+	hits = a.feed(hits, []byte("dle beta\n"), 9, proc)
+	if len(hits) != 1 {
+		t.Fatalf("hits = %d, want 1 (line assembled across seam)", len(hits))
+	}
+	if hits[0].patternIdx != 0 || hits[0].line != "alpha needle beta" {
+		t.Fatalf("hit = %+v", hits[0])
+	}
 }

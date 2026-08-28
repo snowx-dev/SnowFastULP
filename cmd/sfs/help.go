@@ -39,6 +39,7 @@ func renderHelp(bin string) string {
 		{"-clean", "", "Strip URL schemes from output lines."},
 		{"-l", "N", "Stop after N total hits, then exit (0 = unlimited)."},
 		{"-since", "DUR", "Only search archives modified within DUR, e.g. 7d, 12h, 90m."},
+		{"-f", "FILE", "Search every term in FILE (one per line) in a single pass. With -o DIR, write one file per term."},
 		{"-sec", "", "Search the secrets DB (from `sfl -secrets`); PATTERN filters by type ('*' = all)."},
 		{"-sec-path", "PATH", "Secrets DB path (default: <root>/sfl-secrets.sqlite). Implies -sec."},
 	}
@@ -76,14 +77,18 @@ func renderHelp(bin string) string {
 	b.WriteString(labelStyle.Render("Usage:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " " +
 		byteStyle.Render("PATTERN") + " " +
-		mutedStyle.Render("[-o FILE] [-stats]") + "\n")
+		mutedStyle.Render("[-o FILE] [-stats] [-f FILE]") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " " +
 		byteStyle.Render("DIR") + " " +
 		byteStyle.Render("PATTERN") + " " +
-		mutedStyle.Render("[-o FILE] [-stats]") + "\n")
+		mutedStyle.Render("[-o FILE] [-stats] [-f FILE]") + "\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " " +
+		mutedStyle.Render("-f ") + byteStyle.Render("TERMS") + " " +
+		mutedStyle.Render("[-o DIR]") + "\n")
 	b.WriteString(mutedStyle.Render("    Flags may appear before or after the pattern. More flags below: Args for nerds, then Args for devs.") + "\n")
 	b.WriteString(mutedStyle.Render("    Optional config: "+config.DefaultPathHint()+" (override: -config, SNOWFAST_CONFIG; [sfs].dir for PATTERN-only; relative paths resolve against process CWD, like flags)") + "\n")
-	b.WriteString(mutedStyle.Render("    PATTERN '*' exports every line (quote it in the shell).") + "\n\n")
+	b.WriteString(mutedStyle.Render("    PATTERN '*' exports every line (quote it in the shell).") + "\n")
+	b.WriteString(mutedStyle.Render("    -f FILE: one search term per line; '*' is not allowed in file mode.") + "\n\n")
 
 	b.WriteString(labelStyle.Render("Commands:") + "\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " update   " +
@@ -100,6 +105,8 @@ func renderHelp(bin string) string {
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'pattern' -o out.txt -clean\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " 'aws' -sec -since 1h\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " '*' -sec -l 10\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " -f terms.txt ./library\n")
+	b.WriteString("    " + phaseStyle.Render(bin) + " -f terms.txt ./library -o results/\n")
 	b.WriteString("    " + phaseStyle.Render(bin) + " ./library 'pattern' -debug\n\n")
 
 	b.WriteString(labelStyle.Render("Args:") + "\n")

@@ -165,3 +165,29 @@ func patternRegion(matcher *patternMatcher) processFn {
 		return dst
 	}
 }
+
+// multiPatternRegion returns a processFn that runs a MultiMatcher over each
+// assembled line and emits one localHit per (pattern, occurrence), tagged with
+// patternIdx so the drain loop can route hits to per-pattern output files. A
+// line matching N patterns (or one pattern N times) produces N hits, mirroring
+// patternRegion's per-occurrence semantics so single-pattern behavior is
+// preserved when the matcher holds exactly one pattern. The line is extracted
+// once per match position (extractLine is cheap: two byte scans of one line).
+func multiPatternRegion(matcher *MultiMatcher) processFn {
+	return func(dst []localHit, region []byte, regionOff int64) []localHit {
+		rlen := len(region)
+		if rlen == 0 {
+			return dst
+		}
+		matcher.EachMatch(region, func(pIdx, pos int) {
+			if line := extractLine(region, rlen, pos); line != "" {
+				dst = append(dst, localHit{
+					offset:     regionOff + int64(pos),
+					line:       line,
+					patternIdx: pIdx,
+				})
+			}
+		})
+		return dst
+	}
+}
