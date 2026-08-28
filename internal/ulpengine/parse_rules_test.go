@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -63,6 +64,21 @@ func TestRegexRulesFirstMatchWins(t *testing.T) {
 	}
 }
 
+func TestRegexRulesDuplicateNamedAlternativesKeepCapture(t *testing.T) {
+	path := writeRules(t, `^(?P<url>[^|]+)\|(?:(?P<login>a)|(?P<login>b))\|(?P<password>[^|]+)$`)
+	p, _, err := NewRegexRulesParser(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, login, _, ok := p.Parse("example.com|a|pw")
+	if !ok {
+		t.Fatal("alternating duplicate named group was rejected")
+	}
+	if login != "a" {
+		t.Fatalf("login = %q, want participating capture %q", login, "a")
+	}
+}
+
 func TestRegexRulesSkipsCommentsAndBlanks(t *testing.T) {
 	path := writeRules(t, "# comment\n\n^(?P<url>\\S+);(?P<login>[^;]+);(?P<password>.+)$\n\n")
 	_, n, err := NewRegexRulesParser(path)
@@ -71,6 +87,20 @@ func TestRegexRulesSkipsCommentsAndBlanks(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("rule count = %d, want 1", n)
+	}
+}
+
+func TestRegexRulesStripsUTF8BOM(t *testing.T) {
+	path := writeRules(t, "\ufeff^(?P<url>\\S+)\\|(?P<login>[^|]+)\\|(?P<password>.+)$\r\n")
+	p, n, err := NewRegexRulesParser(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("rule count = %d, want 1", n)
+	}
+	if _, _, _, _, ok := p.Parse("example.com|user|password"); !ok {
+		t.Fatal("rule prefixed with UTF-8 BOM did not match")
 	}
 }
 
@@ -125,4 +155,78 @@ func TestDedupKeyWithRules(t *testing.T) {
 	if !okA || !okB || ka != kb {
 		t.Fatalf("key mismatch: %#x/%v vs %#x/%v", ka, okA, kb, okB)
 	}
+}
+
+func TestRegexRulesParserConcurrentUse(t *testing.T) {
+	path := writeRules(t, strings.Join([]string{
+		`^CSV:(?P<host>[^,]+),(?P<login>[^,]+),(?P<password>.+)$`,
+		`^PIPE:(?P<url>[^|]+)\|(?P<login>[^|]+)\|(?P<password>.+)$`,
+	}, "\n"))
+	p, _, err := NewRegexRulesParser(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		"CSV:example.com,bob,pw1",
+		"PIPE:https://other.org/x|alice|pw2",
+		"PIPE:https://third.net/x|123|a:b",
+		"malformed",
+	}
+	type result struct {
+		host, url, login, password string
+		ok                         bool
+	}
+	want := make([]result, len(lines))
+	for i, line := range lines {
+		want[i].host, want[i].url, want[i].login, want[i].password, want[i].ok = p.Parse(line)
+	}
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 32; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for round := 0; round < 1000; round++ {
+				for i, line := range lines {
+					h, u, l, pw, ok := p.Parse(line)
+					if got := (result{h, u, l, pw, ok}); got != want[i] {
+						t.Errorf("concurrent parse changed for %q: got=%+v want=%+v", line, got, want[i])
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func FuzzRegexRulesParserNeverPanics(f *testing.F) {
+	path := filepath.Join(f.TempDir(), "rules.txt")
+	if err := os.WriteFile(path, []byte(`^(?P<url>[^|]+)\|(?P<login>[^|]+)\|(?P<password>.*)$`), 0o600); err != nil {
+		f.Fatal(err)
+	}
+	p, _, err := NewRegexRulesParser(path)
+	if err != nil {
+		f.Fatal(err)
+	}
+	for _, seed := range []string{
+		"",
+		"example.com|user|password",
+		"example.com||password",
+		"example.com|user|",
+		"\x00\xff|user|password",
+		"example.com|user|" + strings.Repeat("x", maxParsedLineLen+1),
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		host, url, login, password, ok := p.Parse(line)
+		if !ok {
+			return
+		}
+		if host == "" || url == "" || login == "" || password == "" {
+			t.Fatalf("successful parse returned empty field: host=%q url=%q login=%q password=%q",
+				host, url, login, password)
+		}
+	})
 }

@@ -115,6 +115,9 @@ func NewRegexRulesParser(path string) (LineParser, int, error) {
 	for sc.Scan() {
 		lineNo++
 		text := strings.TrimSpace(sc.Text())
+		if lineNo == 1 {
+			text = strings.TrimPrefix(text, "\ufeff")
+		}
 		if text == "" || strings.HasPrefix(text, "#") {
 			continue
 		}
@@ -169,13 +172,21 @@ func (p *RegexRulesParser) Parse(line string) (host, url, login, password string
 			}
 			switch name {
 			case "url":
-				u = m[i]
+				if u == "" && m[i] != "" {
+					u = m[i]
+				}
 			case "host":
-				h = m[i]
+				if h == "" && m[i] != "" {
+					h = m[i]
+				}
 			case "login":
-				l = m[i]
+				if l == "" && m[i] != "" {
+					l = m[i]
+				}
 			case "password":
-				pw = m[i]
+				if pw == "" && m[i] != "" {
+					pw = m[i]
+				}
 			}
 		}
 		if u == "" && h != "" {
