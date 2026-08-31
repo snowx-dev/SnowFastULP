@@ -28,7 +28,7 @@ func TestRenderPhase0LinesIsPrimary(t *testing.T) {
 	if strings.Contains(joined, "chunks ") || strings.Contains(joined, "shard ") {
 		t.Errorf("shard panel leaked into phase 0:\n%s", joined)
 	}
-	if !strings.Contains(joined, "Destination dedup") {
+	if !strings.Contains(joined, "preparing library") {
 		t.Errorf("missing OD frame:\n%s", joined)
 	}
 }

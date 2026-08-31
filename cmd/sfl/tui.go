@@ -142,6 +142,48 @@ func dryRunSuffix(prog *sflog.Progress) string {
 	return " " + sflWarnStyle.Render("DRY RUN")
 }
 
+// liveHeaderTag appends DRY RUN, the sfu-matching "vs library" antipublic
+// hint, and (on extract/finalize) the go-regex matcher nudge. Matcher drops
+// first on a narrow terminal so the clock never wraps.
+func liveHeaderTag(prog *sflog.Progress, tag string, width int, withMatcher bool) string {
+	extras := dryRunSuffix(prog)
+	extras += libraryBadge(prog, ingestViewForBadge(prog), tag+extras, width)
+	if withMatcher {
+		extras += matcherBadge(prog != nil && prog.SecretsEnabled(), tag+extras, width)
+	}
+	return tag + extras
+}
+
+func ingestViewForBadge(prog *sflog.Progress) sflog.IngestView {
+	if prog == nil {
+		return sflog.IngestView{}
+	}
+	iv, ok := prog.IngestSnapshot()
+	if !ok {
+		return sflog.IngestView{}
+	}
+	return iv
+}
+
+// libraryBadge is sfu's muted "· vs library" / "· vs 3.29B library" hint,
+// shown whenever the run targets -od/-odr. Dropped on terminals too narrow
+// to keep the elapsed clock.
+func libraryBadge(prog *sflog.Progress, iv sflog.IngestView, baseTagStyled string, width int) string {
+	if prog == nil || !prog.LibraryEnabled() {
+		return ""
+	}
+	label := "vs library"
+	if iv.LibraryKeys > 0 {
+		label = "vs " + formatLibraryCount(iv.LibraryKeys) + " library"
+	}
+	badge := sflMutedStyle.Render(" · " + label)
+	free := width - sflLeftPad - 1 - 2 - lipgloss.Width(baseTagStyled) - 8
+	if free < lipgloss.Width(badge) {
+		return ""
+	}
+	return badge
+}
+
 // matcherBadge appends a tasteful amber warning to the live header tag when
 // -secrets is running on titus's pure-Go regex matcher (the slow, lib-free
 // fallback) — nudging the user toward the libhs build instead of letting them
@@ -411,6 +453,41 @@ func gradientBar(percent float64, width int) string {
 	return b.String()
 }
 
+// sflMiniGradientBar is the per-worker ingest regen bar: ▆ fill on the frost
+// footer palette so it does not compete with the plum-red █ ingest bar above,
+// and no embedded percent (the caller owns a fixed pct column).
+func sflMiniGradientBar(percent float64, width int, start, end colorful.Color) string {
+	if width < 1 {
+		return ""
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 1 {
+		percent = 1
+	}
+	fill := int(math.Round(float64(width) * percent))
+	if fill > width {
+		fill = width
+	}
+	if fill < 0 {
+		fill = 0
+	}
+	var b strings.Builder
+	for i := 0; i < fill; i++ {
+		t := 0.0
+		if width > 1 {
+			t = float64(i) / float64(width-1)
+		}
+		c := start.BlendLuv(end, t)
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Render("▆"))
+	}
+	if rem := width - fill; rem > 0 {
+		b.WriteString(sflEmptyStyle.Render(strings.Repeat("░", rem)))
+	}
+	return b.String()
+}
+
 // stderrFrame is a fixed alt-screen block redrawn in place each tick. Falls
 // back to nothing on a non-TTY so piped runs stay clean. Draw and close are
 // serialized so a force-exit (second Ctrl+C / cleanup timeout) can never
@@ -618,7 +695,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 	// stats rows (mirroring extract) plus optional regen worker rows.
 	if prog.Phase() == phaseIngestVal {
 		iv, _ := prog.IngestSnapshot()
-		header := headerLine(sflSpinnerStyle.Render(spinner), sflOkStyle.Render("[sfl] INGESTING")+dryRunSuffix(prog), elapsed, width)
+		header := headerLine(sflSpinnerStyle.Render(spinner), liveHeaderTag(prog, sflOkStyle.Render("[sfl] INGESTING"), width, false), elapsed, width)
 		bar := gradientBar(iv.Fraction, inner)
 		body := append([]string{bar}, renderIngestStatsRows(iv, inner)...)
 		if iv.Status != "" {
@@ -635,7 +712,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 	// never reads as a frozen 100%.
 	if prog.Phase() == phaseSecretsFinalizeVal {
 		tag := sflOkStyle.Render("[sfl] FINALIZING SECRETS")
-		header := headerLine(sflSpinnerStyle.Render(spinner), tag+matcherBadge(prog.SecretsEnabled(), tag, width)+dryRunSuffix(prog), elapsed, width)
+		header := headerLine(sflSpinnerStyle.Render(spinner), liveHeaderTag(prog, tag, width, true), elapsed, width)
 		box := sflGradientBox([]string{
 			recapRow("Secrets", sflUniqueStyle.Render(formatInt(int(prog.SecretsFound())))+sflMutedStyle.Render(" found")),
 			sflMutedStyle.Render("writing to store…"),
@@ -664,9 +741,7 @@ func renderProgress(elapsed time.Duration, prog *sflog.Progress, byteRate, scanF
 	}
 
 	tag := sflOkStyle.Render("[sfl] " + phase)
-	header := headerLine(sflSpinnerStyle.Render(spinner),
-		tag+matcherBadge(prog.SecretsEnabled(), tag, width)+dryRunSuffix(prog),
-		elapsed, width)
+	header := headerLine(sflSpinnerStyle.Render(spinner), liveHeaderTag(prog, tag, width, true), elapsed, width)
 
 	if scanning {
 		// During discovery the total weight is unknown, so show a live "found"
@@ -1037,7 +1112,17 @@ func renderIngestLibraryValue(iv sflog.IngestView) string {
 const (
 	sflIngestReservedRows = 18
 	sflIngestMaxRegenRows = 8
+	// per-worker ingest regen row: bars share one column so mixed-length
+	// archive names don't stair-step. 22-cell ▆ bar matches sfu's OD workers
+	// (distinct from the main █ ingest bar above them).
+	sflIngestWorkerBarW    = 22
+	sflIngestWorkerPctW    = 4 // " 50%" / "  ?%"
+	sflIngestWorkerByteW   = 8 // "999.9 GB" / sfl's "1023.9GB"
+	sflIngestWorkerBarMin  = 4
+	sflIngestWorkerNameMin = 12
 )
+
+// sflIngestRegenRowCap limits regen worker rows shown during ingest.
 
 // sflIngestRegenRowCap limits regen worker rows shown during ingest.
 func sflIngestRegenRowCap(termHeight, totalWorkers int) int {
@@ -1063,17 +1148,66 @@ func renderIngestRegenPanel(workers []sflog.IngestWorker, inner, tick int) []str
 	if len(workers) >= 2 {
 		out = append(out, sflLabelStyle.Render(fmt.Sprintf("%d workers active", len(workers))))
 	}
+	idxW := lipgloss.Width(fmt.Sprintf("[%d]", len(workers)))
+	cols := ingestRegenColumns(inner, idxW)
 	for i, w := range workers {
-		out = append(out, renderIngestRegenRow(w, inner, tick, i))
+		out = append(out, renderIngestRegenRow(w, cols, tick, i))
 	}
 	return out
 }
 
-func renderIngestRegenRow(w sflog.IngestWorker, inner, tick, idx int) string {
-	name := compactIngestArchiveName(w.Archive)
+// ingestRegenCols is the shared column budget for every regen worker row.
+// Computed once per panel so name length cannot move the bar, and always
+// <= inner so sflPadOrTrim cannot chop the bar off the right.
+type ingestRegenCols struct {
+	idxW, leftW, barW int
+	showBytes         bool
+}
+
+func (c ingestRegenCols) width() int {
+	n := c.idxW + 3 + c.leftW + 2 + c.barW + 1 + sflIngestWorkerPctW
+	if c.showBytes {
+		n += 2 + sflIngestWorkerByteW + 3 + sflIngestWorkerByteW
+	}
+	return n
+}
+
+func ingestRegenColumns(inner, idxW int) ingestRegenCols {
+	if idxW < 1 {
+		idxW = 1
+	}
+	c := ingestRegenCols{
+		idxW: idxW, leftW: sflIngestWorkerNameMin,
+		barW: sflIngestWorkerBarW, showBytes: true,
+	}
+	for c.width() > inner {
+		switch {
+		case c.showBytes && c.barW > sflIngestWorkerBarMin:
+			c.barW--
+		case c.showBytes:
+			c.showBytes = false
+			c.barW = sflIngestWorkerBarW
+		case c.barW > sflIngestWorkerBarMin:
+			c.barW--
+		case c.leftW > 1:
+			c.leftW--
+		case c.barW > 1:
+			c.barW--
+		default:
+			return c
+		}
+	}
+	if extra := inner - c.width(); extra > 0 {
+		c.leftW += extra
+	}
+	return c
+}
+
+func renderIngestRegenRow(w sflog.IngestWorker, cols ingestRegenCols, tick, idx int) string {
+	displayName := compactIngestArchiveName(w.Archive)
 	partAnnot := ""
 	if w.PartsTotal > 1 {
-		partAnnot = fmt.Sprintf(" (%d/%d)", w.PartIdx, w.PartsTotal)
+		partAnnot = fmt.Sprintf("(%d/%d)", w.PartIdx, w.PartsTotal)
 	}
 	var pct float64
 	if w.BytesTotal > 0 {
@@ -1082,33 +1216,45 @@ func renderIngestRegenRow(w sflog.IngestWorker, inner, tick, idx int) string {
 			pct = 1
 		}
 	}
-	barW := 12
-	if barW+40 > inner {
-		barW = inner - 40
-		if barW < 6 {
-			barW = 6
-		}
-	}
-	bar := gradientBar(pct, barW)
 	var pctText string
 	if w.BytesTotal > 0 {
 		pctText = fmt.Sprintf("%3d%%", int(pct*100))
 	} else {
 		pctText = "  ?%"
 	}
-	bytesText := ""
-	if w.BytesTotal > 0 {
-		bytesText = formatBytes(w.BytesDone) + " / " + formatBytes(w.BytesTotal)
+
+	leftW := cols.leftW
+	displayName, partAnnot = fitIngestLeft(displayName, partAnnot, leftW)
+	leftPlain := displayName
+	if partAnnot != "" {
+		leftPlain += " " + partAnnot
 	}
-	// spinner + name + part + bar + pct + bytes
-	nameW := inner - barW - lipgloss.Width(partAnnot) - lipgloss.Width(pctText) - 12
-	if nameW < 8 {
-		nameW = 8
+
+	var styledLeft strings.Builder
+	styledLeft.WriteString(sflCountStyle.Render(displayName))
+	if partAnnot != "" {
+		styledLeft.WriteString(" ")
+		styledLeft.WriteString(sflMutedStyle.Render(partAnnot))
 	}
-	line := sflSpinnerStyle.Render(workerSpinnerFrame(tick, idx)) + " " +
-		sflMutedStyle.Render(tuiframe.TruncatePath(name, nameW)+partAnnot) + "  " +
-		bar + " " + sflCountStyle.Render(pctText)
-	if bytesText != "" {
+	if pad := leftW - lipgloss.Width(leftPlain); pad > 0 {
+		styledLeft.WriteString(strings.Repeat(" ", pad))
+	}
+
+	marker := fmt.Sprintf("[%d]", idx+1)
+	if pad := cols.idxW - lipgloss.Width(marker); pad > 0 {
+		marker += strings.Repeat(" ", pad)
+	}
+	line := sflMutedStyle.Render(marker) + " " +
+		sflSpinnerStyle.Render(workerSpinnerFrame(tick, idx)) + " " +
+		styledLeft.String() + "  " +
+		sflMiniGradientBar(pct, cols.barW, footerGradA, footerGradB) + " " +
+		sflCountStyle.Render(pctText)
+	if cols.showBytes {
+		bytesText := strings.Repeat(" ", sflIngestWorkerByteW+3+sflIngestWorkerByteW)
+		if w.BytesTotal > 0 {
+			bytesText = padLeft(formatBytes(w.BytesDone), sflIngestWorkerByteW) + " / " +
+				padLeft(formatBytes(w.BytesTotal), sflIngestWorkerByteW)
+		}
 		line += "  " + sflByteStyle.Render(bytesText)
 	}
 	return line
@@ -1120,6 +1266,43 @@ func compactIngestArchiveName(path string) string {
 		base = strings.TrimSuffix(strings.TrimPrefix(base, "sfu_"), ".txt.zst")
 	}
 	return base
+}
+
+// fitIngestLeft fits name + optional part annot into a fixed left column.
+// The annot is dropped when it would leave no room for a name, so the cell
+// never exceeds leftW and bars stay column-aligned.
+func fitIngestLeft(name, partAnnot string, leftW int) (string, string) {
+	if leftW < 1 {
+		return "", ""
+	}
+	suffix := ""
+	if partAnnot != "" {
+		suffix = " " + partAnnot
+	}
+	if lipgloss.Width(name)+lipgloss.Width(suffix) <= leftW {
+		return name, partAnnot
+	}
+	if lipgloss.Width(suffix) >= leftW {
+		return fitIngestName(name, leftW), ""
+	}
+	return fitIngestName(name, leftW-lipgloss.Width(suffix)), partAnnot
+}
+
+// fitIngestName head-trims to max display runes, keeping the tail (part ids).
+// Unlike TruncatePath it honors budgets below 8 so a tight regen column
+// cannot overflow and let padOrTrim chop bars off the right edge.
+func fitIngestName(name string, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	r := []rune(name)
+	if len(r) <= max {
+		return name
+	}
+	if max == 1 {
+		return "…"
+	}
+	return "…" + string(r[len(r)-(max-1):])
 }
 
 // sfl worker-panel sizing. A small floor keeps the "many things at once" feel
@@ -1709,4 +1892,37 @@ func formatInt(n int) string {
 	}
 	parts = append([]string{s}, parts...)
 	return strings.Join(parts, ",")
+}
+
+// formatLibraryCount is sfu's compact badge form (3.29B) so the ingest
+// header can show library scale without eating the elapsed clock.
+func formatLibraryCount(n int64) string {
+	if n < 0 {
+		return "0"
+	}
+	if n < 1_000_000 {
+		return formatInt(int(n))
+	}
+	units := []string{"", "K", "M", "B", "T"}
+	v := float64(n)
+	u := 0
+	for v >= 1000 && u < len(units)-1 {
+		v /= 1000
+		u++
+	}
+	if v >= 100 {
+		return fmt.Sprintf("%.0f%s", v, units[u])
+	}
+	if v >= 10 {
+		return fmt.Sprintf("%.1f%s", v, units[u])
+	}
+	return fmt.Sprintf("%.2f%s", v, units[u])
+}
+
+func padLeft(s string, w int) string {
+	n := lipgloss.Width(s)
+	if n >= w {
+		return s
+	}
+	return strings.Repeat(" ", w-n) + s
 }

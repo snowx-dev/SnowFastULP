@@ -56,6 +56,10 @@ type Progress struct {
 	// preview so the user knows nothing will be written to the library.
 	dryRun atomic.Bool
 
+	// libraryOn is set when the run targets an sfu antipublic library (-od/-odr)
+	// so the live header can show the same "vs library" hint sfu uses.
+	libraryOn atomic.Bool
+
 	// workers is the live status registry the TUI reads to render concurrent
 	// activity. Sized once by SetWorkers; guarded by workersMu for the slice
 	// header (resize) and the free-list, slot fields themselves are atomic.
@@ -172,6 +176,11 @@ type IngestView struct {
 	BucketsBytesTotal int64
 
 	Workers []IngestWorker
+
+	// LibraryKeys is the dest-library size estimate (sfu's KeysTotalEstimate),
+	// used for the INGESTING "vs N library" header badge. Zero until phase 0
+	// has counted keys; the badge then falls back to "vs library".
+	LibraryKeys int64
 }
 
 const (
@@ -278,6 +287,16 @@ func (p *Progress) SetDryRun(v bool) {
 	}
 }
 func (p *Progress) DryRun() bool { return p != nil && p.dryRun.Load() }
+
+// SetLibrary flags the run as targeting an sfu antipublic library (-od/-odr)
+// so the live header can show a "vs library" hint, matching sfu's dedup badge.
+func (p *Progress) SetLibrary(v bool) {
+	if p != nil {
+		p.libraryOn.Store(v)
+	}
+}
+func (p *Progress) LibraryEnabled() bool { return p != nil && p.libraryOn.Load() }
+
 func (p *Progress) SecretsFound() int64 {
 	if p == nil {
 		return 0

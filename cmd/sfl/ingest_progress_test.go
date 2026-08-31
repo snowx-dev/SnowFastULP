@@ -183,7 +183,40 @@ func TestIngestProgressBounds(t *testing.T) {
 	}
 }
 
-// TestMonotonicHelper verifies the clamp primitive directly.
+// TestIngestProgressStatusGlossary locks the shared library copy: same engine
+// phase as sfu, same words. sfl-only ULP read stays a credential line.
+func TestIngestProgressStatusGlossary(t *testing.T) {
+	m := &ulpengine.Metrics{}
+	od := &ulpengine.ODMetrics{}
+
+	m.Phase.Store(ulpengine.PhaseInit)
+	if _, s := ingestProgress(m, od, 0); s != "scanning library…" {
+		t.Fatalf("init status = %q, want scanning library…", s)
+	}
+
+	od.Phase.Store(int32(ulpengine.ODPhaseUpgrade))
+	if _, s := ingestProgress(m, od, 0); s != "upgrading library — do not interrupt" {
+		t.Fatalf("upgrade status = %q", s)
+	}
+
+	od.Phase.Store(int32(ulpengine.ODPhaseRegen))
+	od.RegenBytesTotal.Store(1000)
+	od.RegenBytesRead.Store(100)
+	if _, s := ingestProgress(m, od, 100); s != "preparing library…" {
+		t.Fatalf("regen status = %q, want preparing library…", s)
+	}
+
+	od = &ulpengine.ODMetrics{}
+	m.BytesRead.Store(10)
+	if _, s := ingestProgress(m, od, 100); s != "reading extracted credentials…" {
+		t.Fatalf("ulp-read status = %q", s)
+	}
+
+	m.Phase.Store(ulpengine.PhaseDedup)
+	if _, s := ingestProgress(m, od, 100); s != "merging…" {
+		t.Fatalf("dedup status = %q, want merging…", s)
+	}
+}
 func TestMonotonicHelper(t *testing.T) {
 	var last float64
 	in := []float64{0.1, 0.4, 0.2, 0.2, 0.9, 0.5, 1.0}

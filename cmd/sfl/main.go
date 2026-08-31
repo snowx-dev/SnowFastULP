@@ -23,6 +23,7 @@ import (
 	"github.com/snowx-dev/SnowFastULP/internal/selfupdate"
 	"github.com/snowx-dev/SnowFastULP/internal/sflog"
 	"github.com/snowx-dev/SnowFastULP/internal/termctl"
+	"github.com/snowx-dev/SnowFastULP/internal/tuistat"
 	"github.com/snowx-dev/SnowFastULP/internal/ulpengine"
 	"github.com/snowx-dev/SnowFastULP/internal/version"
 )
@@ -302,6 +303,9 @@ func run(cfg runConfig) error {
 
 	prog := sflog.NewProgress()
 	prog.SetDryRun(cfg.DryRun)
+	if cfg.LibraryDir != "" {
+		prog.SetLibrary(true)
+	}
 	tuiOff := cfg.NoTUI || !stderrIsTTY() || cfg.ForcePlainTUI
 	monDone := make(chan struct{})
 	var monWG sync.WaitGroup
@@ -836,6 +840,7 @@ func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int64, r
 		v.PartsRegenTotal = od.PartsRegenTotal.Load()
 		v.RegenBytesRead = od.RegenBytesRead.Load()
 		v.RegenBytesTotal = od.RegenBytesTotal.Load()
+		v.LibraryKeys = od.KeysTotalEstimate.Load()
 		v.Workers = snapshotIngestWorkers(od)
 	}
 	return v
@@ -905,23 +910,30 @@ func ingestProgress(m *ulpengine.Metrics, od *ulpengine.ODMetrics, ulpBytes int6
 		if tot := m.BucketsBytesTotal.Load(); tot > 0 {
 			frac = 0.65 + 0.35*clampFrac(float64(m.BucketsBytesRead.Load())/float64(tot))
 		}
-		return frac, "merging & deduplicating against library…"
+		return frac, tuistat.LibraryMerging
 	default:
 		// PhaseInit / PhasePhase0 / PhaseShard: the concurrent pre-dedup region.
 		// Regen is the long pole on a cold library and runs concurrently with the
 		// quick shard, so prefer it; ignore the shard's fast climb that would
 		// otherwise invert the bar when m.Phase returns to phasePhase0.
 		if od != nil {
+			if ulpengine.ODPhase(od.Phase.Load()) == ulpengine.ODPhaseUpgrade {
+				frac := 0.03
+				if tot := od.PartsRegenTotal.Load(); tot > 0 {
+					frac = 0.03 + 0.62*clampFrac(float64(od.PartsRegenDone.Load())/float64(tot))
+				}
+				return frac, tuistat.LibraryUpgrading
+			}
 			if tot := od.RegenBytesTotal.Load(); tot > 0 {
 				return 0.03 + 0.62*clampFrac(float64(od.RegenBytesRead.Load())/float64(tot)),
-					"rebuilding library index…"
+					tuistat.LibraryPreparing
 			}
 		}
 		if ulpBytes > 0 {
 			return 0.03 + 0.62*clampFrac(float64(m.BytesRead.Load())/float64(ulpBytes)),
 				"reading extracted credentials…"
 		}
-		return 0.03, "scanning library…"
+		return 0.03, tuistat.LibraryScanning
 	}
 }
 

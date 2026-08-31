@@ -1511,7 +1511,7 @@ func renderDoneDeletedFooter(r *ulpengine.Resolved) []string {
 // "[!]" badge on interrupt frame header
 var interruptWarnStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "130", Dark: "214"})
 
-// "Destination dedup" frame stacked under main frame during -od phase 0.
+// "Library" frame stacked under the main frame during -od phase 0.
 // nil when m is nil or phase idle/done.
 // layout: gradient-bordered box w/ 2-3 stat lines + progress bar.
 // frost-blue → icy-white border reads as "background work" vs main's
@@ -1591,17 +1591,14 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 	var phaseDesc string
 	switch phase {
 	case ulpengine.ODPhaseDiscover:
-		phaseDesc = "scanning library"
-		if m.PartsUpgradeTotal.Load() > 0 {
-			phaseDesc = "scanning library · legacy index detected"
-		}
+		phaseDesc = tuistat.LibraryScanning
 	case ulpengine.ODPhaseRegen:
-		phaseDesc = "indexing archives + writing .idx"
+		phaseDesc = tuistat.LibraryPreparing
 	case ulpengine.ODPhaseUpgrade:
-		phaseDesc = "upgrading index format (v2→v3)"
+		phaseDesc = tuistat.LibraryUpgrading
 	}
 
-	headerLine := labelStyle.Render("Destination dedup")
+	headerLine := labelStyle.Render("Library")
 	if phaseDesc != "" {
 		headerLine += " " + mutedStyle.Render("· "+phaseDesc)
 	}
@@ -1629,20 +1626,11 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 		libRow += " " + mutedStyle.Render("·") + " " +
 			warnStyle.Render(fmt.Sprintf("%d skipped", archivesSkipped))
 	}
-	if phase == ulpengine.ODPhaseDiscover && m.PartsUpgradeTotal.Load() > 0 {
-		libRow += " " + mutedStyle.Render("·") + " " +
-			warnStyle.Render("one-time upgrade next")
-	}
 
 	innerLines := []string{headerLine, libRow}
 
 	// phase-specific second row
 	switch phase {
-	case ulpengine.ODPhaseDiscover:
-		if m.PartsUpgradeTotal.Load() > 0 {
-			innerLines = append(innerLines, labelStyle.Render("Note        ")+
-				warnStyle.Render("Legacy index format · in-place upgrade runs once, then skipped"))
-		}
 	case ulpengine.ODPhaseRegen:
 		if regenBytesTotal > 0 {
 			innerLines = append(innerLines, labelStyle.Render("Bytes       ")+
@@ -1662,15 +1650,6 @@ func renderODFrame(m *ulpengine.ODMetrics, regenBPS float64, width int) []string
 			innerLines = append(innerLines, labelStyle.Render("Throughput  ")+
 				byteStyle.Render(formatRate(regenBPS))+eta)
 		}
-	case ulpengine.ODPhaseUpgrade:
-		innerLines = append(innerLines,
-			labelStyle.Render("Important   ")+
-				warnStyle.Render("One-time library upgrade — please wait, do not interrupt (Ctrl+C)"),
-			labelStyle.Render("Mode        ")+
-				mutedStyle.Render("in-place re-sort · archives not read"),
-			labelStyle.Render("Safety      ")+
-				mutedStyle.Render("your .zst archives are safe · only index files are updated"),
-		)
 	}
 
 	box := gradientBox(innerLines, contentWidth(width), frostGradA, frostGradB)

@@ -18,13 +18,20 @@ func TestRenderODFrameDiscoverShowsLegacyHint(t *testing.T) {
 
 	lines := renderODFrame(m, 0, 86)
 	joined := strings.Join(lines, "\n")
-	for _, want := range []string{
+	if !strings.Contains(joined, "Library") {
+		t.Errorf("discover frame missing Library title\nfull:\n%s", joined)
+	}
+	if !strings.Contains(joined, "scanning library") {
+		t.Errorf("discover frame missing scanning status\nfull:\n%s", joined)
+	}
+	for _, stale := range []string{
+		"Destination dedup",
 		"legacy index detected",
 		"one-time upgrade next",
 		"Legacy index format",
 	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("discover legacy hint missing %q\nfull:\n%s", want, joined)
+		if strings.Contains(joined, stale) {
+			t.Errorf("discover should not use stale copy %q\nfull:\n%s", stale, joined)
 		}
 	}
 }
@@ -61,8 +68,8 @@ func TestRenderODFrameRegenContents(t *testing.T) {
 	lines := renderODFrame(m, 0, 86)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
-		"Destination dedup",
-		"indexing archives",
+		"Library",
+		"preparing library",
 		"12 archives",
 		"1 / 3 indexing",
 		"62.0 GB",
@@ -71,6 +78,9 @@ func TestRenderODFrameRegenContents(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("regen frame missing %q\nfull:\n%s", want, joined)
 		}
+	}
+	if strings.Contains(joined, "Destination dedup") || strings.Contains(joined, "indexing archives") {
+		t.Errorf("regen frame still uses old dialect\nfull:\n%s", joined)
 	}
 }
 
@@ -85,12 +95,8 @@ func TestRenderODFrameUpgradeContents(t *testing.T) {
 	lines := renderODFrame(m, 0, 86)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
-		"Destination dedup",
-		"upgrading index format",
-		"One-time library upgrade",
-		"do not interrupt",
-		"your .zst archives are safe",
-		"in-place re-sort",
+		"Library",
+		"upgrading library — do not interrupt",
 		"38 archives",
 		"39 / 56 parts indexed",
 	} {
@@ -98,8 +104,17 @@ func TestRenderODFrameUpgradeContents(t *testing.T) {
 			t.Errorf("upgrade frame missing %q\nfull:\n%s", want, joined)
 		}
 	}
-	if strings.Contains(joined, "indexing archives + writing .idx") {
-		t.Errorf("upgrade frame must not use regen label\nfull:\n%s", joined)
+	for _, stale := range []string{
+		"Destination dedup",
+		"indexing archives + writing .idx",
+		"upgrading index format",
+		"One-time library upgrade",
+		"your .zst archives are safe",
+		"in-place re-sort",
+	} {
+		if strings.Contains(joined, stale) {
+			t.Errorf("upgrade frame still uses stale copy %q\nfull:\n%s", stale, joined)
+		}
 	}
 }
 
@@ -115,7 +130,7 @@ func TestRenderShardLinesIncludesODFrame(t *testing.T) {
 
 	lines := renderShardLines(time.Now(), time.Second, &ulpengine.Metrics{}, r, 100, 100, 1, 1, 0, 86)
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Destination dedup") {
+	if !strings.Contains(joined, "preparing library") {
 		t.Errorf("shard render missing OD frame\nfull:\n%s", joined)
 	}
 }
@@ -128,7 +143,7 @@ func TestRenderShardLinesNoODWhenInactive(t *testing.T) {
 	}
 	lines := renderShardLines(time.Now(), time.Second, &ulpengine.Metrics{}, r, 100, 100, 1, 1, 0, 86)
 	joined := strings.Join(lines, "\n")
-	if strings.Contains(joined, "Destination dedup") {
+	if strings.Contains(joined, "Destination dedup") || strings.Contains(joined, "preparing library") {
 		t.Errorf("non-od run leaked OD frame into TUI\nfull:\n%s", joined)
 	}
 }
@@ -341,8 +356,8 @@ func TestRenderDoneLinesPartitionShares(t *testing.T) {
 	m.LinesRead.Store(200)
 	m.LinesAccepted.Store(100)
 	m.LinesUnique.Store(80)
-	m.LinesRejected.Store(20)       // 20/200 = 10%
-	m.LinesSkippedByDest.Store(15)  // 15/100 = 15%; dups = 100-80-15 = 5 → 5%
+	m.LinesRejected.Store(20)      // 20/200 = 10%
+	m.LinesSkippedByDest.Store(15) // 15/100 = 15%; dups = 100-80-15 = 5 → 5%
 	r := &ulpengine.Resolved{
 		TotalInputs: 1 << 20, InputFileCount: 1, Workers: 1,
 		DedupWorkers: 1, BucketCount: 1,

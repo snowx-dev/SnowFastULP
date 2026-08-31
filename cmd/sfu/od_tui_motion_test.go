@@ -249,14 +249,14 @@ func TestUpgradePassHidesWorkerRowsShowsPartsProgress(t *testing.T) {
 	if strings.Contains(out, "[1]") {
 		t.Errorf("upgrade pass should not render frozen per-worker rows\nout:\n%s", out)
 	}
-	if !strings.Contains(out, "upgrading index format") {
-		t.Errorf("upgrade pass should show v2->v3 label\nout:\n%s", out)
-	}
-	if !strings.Contains(out, "One-time library upgrade") {
-		t.Errorf("upgrade pass should show one-time callout\nout:\n%s", out)
+	if !strings.Contains(out, "upgrading library — do not interrupt") {
+		t.Errorf("upgrade pass should show upgrade status\nout:\n%s", out)
 	}
 	if strings.Contains(out, "indexing archives + writing .idx") {
 		t.Errorf("upgrade pass must not use decompress regen label\nout:\n%s", out)
+	}
+	if strings.Contains(out, "One-time library upgrade") || strings.Contains(out, "upgrading index format") {
+		t.Errorf("upgrade pass still uses old dialect\nout:\n%s", out)
 	}
 	if !strings.Contains(out, "7 / 20 parts indexed") {
 		t.Errorf("upgrade pass should show parts progress\nout:\n%s", out)

@@ -769,6 +769,111 @@ func TestRenderIngestRegenPanel(t *testing.T) {
 	}
 }
 
+// ingest regen rows must share one bar column even when archive names differ
+// in length (and when only some rows have a part annotation). Without a fixed
+// left column the INGESTING worker bars stair-step, which is what users saw
+// rebuilding a library whose part names are not uniform.
+func TestRenderIngestRegenRowsAlignBarsAcrossNameLengths(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	panel := renderIngestRegenPanel([]sflog.IngestWorker{
+		{Archive: "a.zst", BytesDone: 50, BytesTotal: 100},
+		{Archive: "/data/lib/sfu_20260101_120000_part04.txt.zst", PartIdx: 4, PartsTotal: 16, BytesDone: 50, BytesTotal: 100},
+		{Archive: "mid_name.txt.zst", PartIdx: 1, PartsTotal: 2, BytesDone: 1 << 30, BytesTotal: 2 << 30},
+	}, 80, 0)
+	var rows []string
+	for _, ln := range panel {
+		if ingestWorkerBarCol(ln) >= 0 {
+			rows = append(rows, ln)
+		}
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want 3 worker rows with bars, got %d:\n%s", len(rows), strings.Join(panel, "\n"))
+	}
+	want := ingestWorkerBarCol(rows[0])
+	if want < 0 {
+		t.Fatalf("row 0 has no bar: %q", stripANSI(rows[0]))
+	}
+	for i, ln := range rows[1:] {
+		if got := ingestWorkerBarCol(ln); got != want {
+			t.Errorf("row %d bar at col %d; want %d\nrow 0: %q\nrow %d: %q",
+				i+1, got, want, stripANSI(rows[0]), i+1, stripANSI(ln))
+		}
+	}
+	for i, ln := range rows {
+		if w := lipgloss.Width(ln); w > 80 {
+			t.Errorf("row %d visible width %d > inner 80: %q", i, w, stripANSI(ln))
+		}
+	}
+}
+
+// boxed regen rows must never exceed inner: sflPadOrTrim would chop the bar
+// and bytes off the right and break the shared column. Drop the bytes
+// column, then shrink the bar, before overflowing.
+func TestRenderIngestRegenRowsFitNarrowInner(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	workers := []sflog.IngestWorker{
+		{Archive: "a.zst", BytesDone: 50, BytesTotal: 100},
+		{Archive: "/data/lib/sfu_20260101_120000_part04.txt.zst", PartIdx: 4, PartsTotal: 16, BytesDone: 50, BytesTotal: 100},
+	}
+	for _, inner := range []int{24, 40, 48, 66} {
+		panel := renderIngestRegenPanel(workers, inner, 0)
+		var rows []string
+		var barCol = -1
+		for _, ln := range panel {
+			if col := ingestWorkerBarCol(ln); col >= 0 {
+				if w := lipgloss.Width(ln); w > inner {
+					t.Errorf("inner %d: row width %d > inner: %q", inner, w, stripANSI(ln))
+				}
+				if barCol < 0 {
+					barCol = col
+				} else if col != barCol {
+					t.Errorf("inner %d: bar col %d vs %d\n%s", inner, col, barCol, stripANSI(ln))
+				}
+				rows = append(rows, ln)
+			}
+		}
+		if len(rows) != 2 {
+			t.Errorf("inner %d: want 2 bar rows, got %d\n%s", inner, len(rows), strings.Join(panel, "\n"))
+		}
+	}
+	wide := strings.Join(renderIngestRegenPanel(workers, 80, 0), "\n")
+	if !strings.Contains(stripANSI(wide), "/") {
+		t.Fatalf("wide inner should still show the bytes column:\n%s", stripANSI(wide))
+	}
+}
+
+func ingestWorkerBarCol(line string) int {
+	plain := stripANSI(line)
+	idx := strings.IndexAny(plain, "█▆░")
+	if idx < 0 {
+		return -1
+	}
+	return lipgloss.Width(plain[:idx])
+}
+
+func stripANSI(s string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		if i+1 < len(s) && s[i] == 0x1b && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) {
+				c := s[j]
+				if c >= 0x40 && c <= 0x7e {
+					j++
+					break
+				}
+				j++
+			}
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
 func TestCompactIngestArchiveName(t *testing.T) {
 	got := compactIngestArchiveName("/lib/sfu_20260101_120000_part04.txt.zst")
 	if got != "20260101_120000_part04" {
@@ -1370,5 +1475,46 @@ func TestRenderProgressDryRunHeader(t *testing.T) {
 	joined := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
 	if !strings.Contains(joined, "DRY RUN") {
 		t.Fatalf("dry-run live header missing DRY RUN marker:\n%s", joined)
+	}
+}
+
+// -od/-odr must surface sfu's "vs library" hint on the live header during
+// extract and ingest, including a compact key count once ingest knows it.
+func TestRenderProgressLibraryHeaderBadge(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	plain := strings.Join(renderProgress(0, sflog.NewProgress(), 0, 0, 0, 80), "\n")
+	if strings.Contains(plain, "vs library") {
+		t.Fatalf("non-od run must not show a library badge:\n%s", plain)
+	}
+
+	prog := sflog.NewProgress()
+	prog.SetLibrary(true)
+	extract := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
+	if !strings.Contains(extract, "vs library") {
+		t.Fatalf("od extract header missing vs library:\n%s", extract)
+	}
+
+	prog.BeginIngest(func() sflog.IngestView {
+		return sflog.IngestView{LibraryKeys: 3_290_076_168}
+	})
+	ingest := strings.Join(renderProgress(0, prog, 0, 0, 0, 80), "\n")
+	if !strings.Contains(ingest, "INGESTING") {
+		t.Fatalf("ingest frame missing INGESTING:\n%s", ingest)
+	}
+	if !strings.Contains(ingest, "vs 3.29B library") {
+		t.Fatalf("od ingest header missing vs N library:\n%s", ingest)
+	}
+}
+
+func TestLibraryBadgeDroppedOnNarrowTerminal(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	prog := sflog.NewProgress()
+	prog.SetLibrary(true)
+	base := sflOkStyle.Render("[sfl] EXTRACTING")
+	if got := libraryBadge(prog, sflog.IngestView{}, base, 110); !strings.Contains(got, "vs library") {
+		t.Fatalf("wide terminal should show vs library, got %q", got)
+	}
+	if got := libraryBadge(prog, sflog.IngestView{}, base, 40); got != "" {
+		t.Fatalf("narrow terminal should drop the library badge, got %q", got)
 	}
 }

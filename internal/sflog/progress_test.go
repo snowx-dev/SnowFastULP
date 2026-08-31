@@ -61,6 +61,26 @@ func TestScanFractionAndSecretCounters(t *testing.T) {
 	}
 }
 
+func TestLibraryEnabledNilAndToggle(t *testing.T) {
+	var np *Progress
+	np.SetLibrary(true) // must not panic
+	if np.LibraryEnabled() {
+		t.Fatal("nil Progress is never library-enabled")
+	}
+	p := NewProgress()
+	if p.LibraryEnabled() {
+		t.Fatal("library not enabled by default")
+	}
+	p.SetLibrary(true)
+	if !p.LibraryEnabled() {
+		t.Fatal("SetLibrary(true) did not stick")
+	}
+	p.SetLibrary(false)
+	if p.LibraryEnabled() {
+		t.Fatal("SetLibrary(false) did not clear")
+	}
+}
+
 // TestCreditorAddConcurrent hammers creditor.add from many goroutines (as the
 // zip member pool does) and asserts the clamp is atomic: exactly weight is
 // credited, never more (overshoot) and never less (lost CAS retries). Run under
