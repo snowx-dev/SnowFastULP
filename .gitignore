@@ -1,0 +1,48 @@
+# build artifacts
+/sfu
+/sfu.exe
+/sfs
+/sfs.exe
+/sfl
+/sfl.exe
+/bin/
+/release-bins/
+/dist/
+
+# local scratch / test data — never commit (may contain real credential dumps)
+/tmp/
+/demo/
+.DS_Store
+
+# local working notes — not part of the published tree
+/docs/
+/plans/
+
+# default output and shard temp files when running from repo root
+/deduplicated.txt
+/sfu_*.txt
+/sfu_*.txt.zst
+/shard_*.bin
+/done/
+/.sfu-tmp-*/
+/sfu-debug-*.log
+/sfu-rejected-*.txt
+/sfu_dedup_idx/
+/sfu_search_idx/
+*.sfsidx.json
+*.sfsidx.json.tmp
+/sfs-debug-*.log
+/sfs_results_*.txt
+# sfl run artifacts — may contain real credential data; never commit
+/sfl_*.txt
+/sfl-*.sqlite
+/sfl-ingest-*.log
+*.idx
+*.write.*.tmp
+
+# agent scratch (local only)
+/.hermes/
+/Agent/
+/.superpowers/
+/*.log
+__pycache__/

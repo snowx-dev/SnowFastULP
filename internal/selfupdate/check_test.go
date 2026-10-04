@@ -1,0 +1,305 @@
+package selfupdate
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestCheckerFreshCacheRevalidatedWhenAlreadyUpdated(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	// Written while still on 0.1; user updated to 0.2 since.
+	entry := cacheEntry{
+		CheckedAt: time.Now().UTC(),
+		Latest:    "0.2",
+	}
+	writeCacheFile(t, cacheFile, entry)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "should not be called", http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.2", "sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("network hits = %d, want 0", got)
+	}
+	if c.NoticeForSummary() != nil {
+		t.Fatal("expected nil notice when cache is stale but binary is current")
+	}
+}
+
+func TestCheckerFreshCacheSkipsNetwork(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	entry := cacheEntry{
+		CheckedAt: time.Now().UTC(),
+		Latest:    "0.2.0",
+	}
+	writeCacheFile(t, cacheFile, entry)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "should not be called", http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.1.0", "sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("network hits = %d, want 0", got)
+	}
+	n := c.NoticeForSummary()
+	if n == nil || n.Latest != "0.2.0" || n.Command != "sfu update" {
+		t.Fatalf("notice = %#v, want latest 0.2.0", n)
+	}
+}
+
+func TestCheckerStaleCacheRefetches(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	entry := cacheEntry{
+		CheckedAt: time.Now().UTC().Add(-25 * time.Hour),
+		Latest:    "0.1.0",
+	}
+	writeCacheFile(t, cacheFile, entry)
+
+	srv, _ := startMockReleaseServer(t, "0.2.0", mustAssetSuffix(t), []byte("a"), []byte("b"))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.1.0", "sfs", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+
+	n := c.NoticeForSummary()
+	if n == nil || n.Latest != "0.2.0" || n.Command != "sfs update" {
+		t.Fatalf("notice = %#v, want 0.2.0", n)
+	}
+
+	got, ok := readFreshCache()
+	if !ok || got.Latest != "0.2.0" {
+		t.Fatalf("refreshed cache = %#v ok=%v", got, ok)
+	}
+}
+
+func TestCheckerFailedCheckIsNotCachedOrReused(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.1.0", "sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+	c.mu.Lock()
+	done := c.done
+	c.mu.Unlock()
+	<-done
+	if c.NoticeForSummary() != nil {
+		t.Fatal("expected nil notice on failed check")
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("hits = %d, want 1", hits.Load())
+	}
+
+	if _, err := os.Stat(cacheFile); !os.IsNotExist(err) {
+		t.Fatalf("failed check wrote a cache file: err=%v", err)
+	}
+
+	c2 := NewChecker("0.1.0", "sfu", false)
+	c2.hooks = c.hooks
+	c2.Start()
+	c2.mu.Lock()
+	done = c2.done
+	c2.mu.Unlock()
+	<-done
+	if c2.NoticeForSummary() != nil {
+		t.Fatal("expected nil notice from second failed check")
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("hits after second failed check = %d, want 2", hits.Load())
+	}
+}
+
+func TestCheckerUpToDateWritesCacheWithoutNotice(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	srv, _ := startMockReleaseServer(t, "0.1.1", mustAssetSuffix(t), []byte("a"), []byte("b"))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.1.1", "sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+	if c.NoticeForSummary() != nil {
+		t.Fatal("expected nil notice when up to date")
+	}
+
+	got, ok := readFreshCache()
+	if !ok || got.Latest != "0.1.1" {
+		t.Fatalf("cache = %#v ok=%v", got, ok)
+	}
+}
+
+func TestWriteCheckCacheCreatesPrivateParent(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "nested", "snowfast-update-check.json")
+	cachePathHook = func() (string, error) {
+		return cachePath, nil
+	}
+	t.Cleanup(func() { cachePathHook = nil })
+
+	writeCheckCache(cacheEntry{
+		CheckedAt: time.Now().UTC(),
+		Latest:    "0.2.0",
+	})
+	if _, ok := readFreshCache(); !ok {
+		t.Fatal("cache written below a missing parent directory was not readable")
+	}
+}
+
+func TestCheckerDevBuildSeesReleaseAsNewer(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	srv, _ := startMockReleaseServer(t, "0.1.1", mustAssetSuffix(t), []byte("a"), []byte("b"))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.1.1-dev", "sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+	n := c.NoticeForSummary()
+	if n == nil || n.Latest != "0.1.1" {
+		t.Fatalf("notice = %#v, want 0.1.1 for dev build", n)
+	}
+}
+
+func TestCheckerDisabledSkipsCacheAndNetwork(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, "cache.json")
+	cachePathHook = func() (string, error) { return cacheFile, nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	entry := cacheEntry{
+		CheckedAt: time.Now().UTC(),
+		Latest:    "9.9.9",
+	}
+	writeCacheFile(t, cacheFile, entry)
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "nope", http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.1.0", "sfu", true)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+	if c.NoticeForSummary() != nil {
+		t.Fatal("disabled checker must not surface notice")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("hits = %d, want 0", hits.Load())
+	}
+}
+
+func writeCacheFile(t *testing.T, path string, entry cacheEntry) {
+	t.Helper()
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustAssetSuffix(t *testing.T) string {
+	t.Helper()
+	suffix, err := assetSuffix()
+	if err != nil {
+		t.Skip(err)
+	}
+	return suffix
+}
+
+func TestCheckerSendsUserAgent(t *testing.T) {
+	dir := t.TempDir()
+	cachePathHook = func() (string, error) { return filepath.Join(dir, "cache.json"), nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	var gotUA atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA.Store(r.UserAgent())
+		_ = json.NewEncoder(w).Encode(updateManifest{Version: "0.3", Assets: map[string]manifestAsset{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewChecker("0.2", "sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+	c.NoticeForSummary() // waits up to checkSummaryWait for the in-flight check
+
+	if ua, _ := gotUA.Load().(string); ua != "SnowFastULP-selfupdate/0.2 (sfu)" {
+		t.Fatalf("checker User-Agent = %q, want %q", ua, "SnowFastULP-selfupdate/0.2 (sfu)")
+	}
+}
+
+func TestCheckerUserAgentFallsBackToUnknownForBadBinName(t *testing.T) {
+	dir := t.TempDir()
+	cachePathHook = func() (string, error) { return filepath.Join(dir, "cache.json"), nil }
+	t.Cleanup(func() { cachePathHook = nil })
+
+	var gotUA atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA.Store(r.UserAgent())
+		_ = json.NewEncoder(w).Encode(updateManifest{Version: "0.3", Assets: map[string]manifestAsset{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	// A base name that survives NewChecker normalization but fails
+	// validBinName (space in the name itself, not just in a dir component —
+	// a hostile relative os.Args[0] such as "my sfu").
+	c := NewChecker("0.2", "my sfu", false)
+	c.hooks = &testHooks{releaseURL: srv.URL + "/releases/latest"}
+	c.Start()
+	c.NoticeForSummary()
+
+	if ua, _ := gotUA.Load().(string); ua != "SnowFastULP-selfupdate/0.2 (unknown)" {
+		t.Fatalf("checker User-Agent = %q, want %q", ua, "SnowFastULP-selfupdate/0.2 (unknown)")
+	}
+}

@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The heavy e2e fixtures (1.7 GB history prehash, 10M-line force-exit)
+    # keep the suite in the minutes range on 4-vCPU runners; without an
+    # explicit bound a hung e2e would sit in the 360-minute default until a
+    # memory-pressure (systemd-oomd) or other external SIGTERM makes the
+    # failure mode illegible (exit 143 instead of a timeout report).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install archive tools
+        run: sudo apt-get update && sudo apt-get install -y rar p7zip-full
+
+      - name: Vet + gofmt
+        run: make vet
+
+      - name: Test (race)
+        run: make test
+
+      - name: Test (nested yekazip module)
+        working-directory: third_party/yekazip
+        run: go test ./...
+
+      - name: Build (host platform smoke)
+        run: make build
+
+  test-selfupdate-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Self-update package (race)
+        run: go test -race ./internal/selfupdate/...
+
+  build-cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compile-only build
+        run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build ./...
+
+  installer-test:
+    # W8: end-to-end tests for scripts/install.sh against a local fixture
+    # server (scripts/tests/server.py serves manifests, fake release
+    # assets, and per-tag SHA256SUMS).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check (bash -n)
+        run: bash -n scripts/install.sh
+
+      - name: Shellcheck (W2-W11 installer hardening)
+        run: shellcheck -x scripts/install.sh
+
+      - name: Installer test suite (bash)
+        run: bash scripts/tests/test.sh
+
+  installer-test-windows:
+    # W8: end-to-end tests for scripts/install.ps1 against the same
+    # fixture server. Runs on windows-latest; also runnable anywhere pwsh
+    # exists (verified locally on Linux).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer test suite (pwsh)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/tests/install.ps1.tests.ps1

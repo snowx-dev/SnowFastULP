@@ -1,0 +1,6 @@
+# Installer-test fixtures are byte-exact test data: the fake release
+# payloads' digests are asserted against the SHA256SUMS-* fixtures, so a
+# CRLF-rewriting checkout (Windows runners default core.autocrlf=true)
+# changes the digests and fails the installer checksum assertions. Never
+# line-ending-normalize anything under the fixture tree.
+scripts/tests/fixtures/** -text

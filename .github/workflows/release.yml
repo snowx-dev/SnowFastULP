@@ -1,0 +1,94 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string to embed (eg 0.2.1; the Makefile refuses -dev stamps)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${{ github.event.inputs.version }}"
+            v="${v#v}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "Building version: $v"
+
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Build release artifacts (pass 1)
+        run: make release-assets VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Snapshot SHA256SUMS (pass 1)
+        run: cp dist/SHA256SUMS /tmp/SHA256SUMS.pass1
+
+      - name: Rebuild (pass 2, reproducibility check)
+        run: make release-assets VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Verify reproducibility
+        run: |
+          if ! diff -u /tmp/SHA256SUMS.pass1 dist/SHA256SUMS; then
+            echo "::error::reproducibility check failed, two builds produced different hashes"
+            exit 1
+          fi
+          echo "reproducibility ok, both builds matched"
+
+      # Generates dist/update-manifest.json from dist/SHA256SUMS of the exact
+      # build being released and attaches it LAST (after every other asset) so
+      # a published release always has all referenced assets in place before
+      # the manifest can point clients at them. Hosting the manifest at
+      # https://sfu-update.snowx.dev/ remains a manual, post-publish step for
+      # the release owner (mirror the attached file verbatim), who must also
+      # mirror update-notes-<version>.md to the same host alongside
+      # update-manifest.json — clients fetch it via the manifest's notes_url;
+      # a missing notes file is non-fatal for clients (`release notes
+      # unavailable`) but expected.
+      - name: Generate update manifest
+        run: make manifest VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --draft \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --generate-notes \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-linux-amd64" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-macos-arm64" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-windows-amd64.exe" \
+            "dist/SnowFastSearch-${{ steps.ver.outputs.version }}-linux-amd64" \
+            "dist/SnowFastSearch-${{ steps.ver.outputs.version }}-macos-arm64" \
+            "dist/SnowFastSearch-${{ steps.ver.outputs.version }}-windows-amd64.exe" \
+            "dist/SnowFastLog-${{ steps.ver.outputs.version }}-linux-amd64" \
+            "dist/SnowFastLog-${{ steps.ver.outputs.version }}-macos-arm64" \
+            "dist/SnowFastLog-${{ steps.ver.outputs.version }}-windows-amd64.exe" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-android-arm64" \
+            "dist/SnowFastSearch-${{ steps.ver.outputs.version }}-android-arm64" \
+            "dist/SnowFastLog-${{ steps.ver.outputs.version }}-android-arm64" \
+            "dist/SnowFastULP-${{ steps.ver.outputs.version }}-binaries.zip" \
+            "dist/SHA256SUMS" \
+            "dist/update-manifest.json"

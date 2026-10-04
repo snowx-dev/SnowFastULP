@@ -1,0 +1,125 @@
+# TL;DR — copy this file to your SnowFast config path:
+#   Linux/macOS:  ~/.config/snowfast/config.toml
+#                 (or $XDG_CONFIG_HOME/snowfast/config.toml when XDG_CONFIG_HOME is set)
+#   Windows:      %AppData%\snowfast\config.toml
+# Override: -config PATH, --config PATH, or SNOWFAST_CONFIG env var (must exist).
+# Default path may be absent (no config loaded); explicit overrides must exist.
+#
+# Optional defaults for sfu, sfs, and sfl. CLI flags always override these values.
+# Relative paths resolve against the process CWD (same as CLI flags), not the
+# config file directory. Leading ~/ expands to home. Use absolute or ~/… paths
+# when the location must not depend on where you run the tool.
+#
+# Full docs: https://snowfast.snowx.dev/docs/guides/configuration
+
+# ---- shared source history --------------------------------------------------
+[history]
+# enabled = false            # skip sources already completed by sfu or sfl.
+# path = ""                  # empty = SnowFast data dir/history.sqlite3.
+# Shared across sfu and sfl; one entry per source. Full docs online.
+
+# ---- sfu (parser + dedup + antipublic library) ---------------------------------------------------
+[sfu]
+# I/O — pair these three for bare `./sfu` invocation:
+# input = "./dumps/raw/"      # fills the positional INPUT_PATH when no argv;
+                               # CLI positional wins when both are set.
+# o     = "./out/"            # single-run output dir. May coexist with od:
+                               # with no CLI flag, od wins (library mode) and o
+                               # is ignored. Any CLI -o/-od/-odr overrides both.
+# od    = "./library/"        # incremental dedup against past sfu_*.txt.zst in
+                               # this dir; auto-enables zst.
+# odr   = false               # dry-run: like od but write nothing (reuses od path).
+# del   = true                # after success ONLY, delete parsed inputs (irreversible).
+
+# Output format
+# zst        = true           # zstd-compress the merged output (searchable by sfs).
+# split_zst  = 100000000      # with zst: new part every N unique lines (0 = single
+                               # archive). Default ~1.5 GB/part on typical ULP data.
+# no_uri     = false          # emit host:login:password (drop URL path/query).
+
+# Parser modes
+# loose             = false   # high-recall parser: also accepts bare host/IP
+                               # forms and other less precise shapes.
+# no_encoding_sniff = false   # skip BOM detection; treat all inputs as UTF-8.
+# no_fast_path      = false   # disable the single-goroutine fast path (debugging).
+
+# parse_delims = ""  # split lines as url<sep>login<sep>password; set at most ONE of parse_delims/parse_rules.
+# parse_rules = ""   # regex rules file (one Go RE2 pattern per line); see docs.
+
+# Concurrency / tuning (0 = auto for all three)
+# workers  = 0                # phase-1 parser goroutines.
+# dedup    = 0                # phase-2 dedup goroutines.
+# buckets  = 0                # override adaptive shard bucket count.
+# temp_dir = "/var/tmp/sfu"   # shard temp files location (default: same dir as -o).
+
+# UX / diagnostics
+# no_tui       = false        # disable live TUI; print plain summary at end.
+# debug        = false        # write structured job debug log in CWD.
+# debug_reject = false        # append parser-rejected lines to a file in CWD.
+# no_update_check = false     # disable update availability checks.
+# bell         = false        # play a short sound when the run finishes.
+# json_out     = "-"          # stream live stats as NDJSON: "-" = stdout, path = file.
+# json_every   = "800ms"      # update interval for json_out (floor 200ms).
+
+# ---- sfs (txt & zst archive search) ----------------------------------------------
+[sfs]
+# I/O
+# dir    = "./library/"       # default search dir when no positional given.
+# o      = "./results.txt"    # also write results to this file (tees with default
+                               # stream; file-only when stats = true).
+# stats  = false              # live progress screen + auto sfs_results_*.txt
+                               # (or o). Default is stream hits to stdout.
+# txt    = false              # search plain .txt files instead of .zst archives
+                               # (skips the index path; slower but no preindex needed).
+# clean  = false              # strip URL scheme prefixes from output lines.
+# combo  = false              # write only login:password per hit (L:P from U:L:P);
+                               # lines that are not U:L:P are skipped.
+# l      = 0                  # stop after N total hits, then exit (0 = unlimited).
+# since  = "7d"               # only search archives modified within this window
+                               # (mtime-based; e.g. 7d, 12h, 90m). Default: all.
+# json_out = "-"              # stream live stats as NDJSON: "-" = stdout, path = file.
+                               # Requires o: hits go to o (-o FILE or [sfs] o); stdout carries the stream.
+# json_every = "800ms"        # update interval for json_out (floor 200ms).
+
+# Concurrency
+# j = 0                       # worker goroutines (0 = GOMAXPROCS).
+
+# Advanced tuning
+# decode_step = 1048576       # per dec.Read byte budget. Default 1 MiB.
+# max_hits_per_chunk = 0      # truncate hits per chunk at N (0 = unbounded).
+                               # Safety valve for pathological 1-byte queries.
+
+# Diagnostics
+# debug = false               # write structured job debug log in CWD.
+# no_update_check = false     # disable update availability checks.
+# bell = false                # play a short sound when the run finishes.
+
+# ---- sfl (stealer log extraction) ------------------------------------------
+[sfl]
+# I/O — pair these for bare `./sfl` invocation:
+# input = "./logs/"           # extracted log, folder of logs, archive, or archive dir.
+# o     = "./ulp/"            # classic ULP output dir. May coexist with od:
+                               # with no CLI flag, od wins and o is ignored.
+# od    = "./library/"        # ingest extracted ULPs into an existing sfu library.
+# odr   = false               # dry-run: like od but write nothing (reuses od).
+# p     = "passwords.txt"     # archive password or password-list file.
+# del   = false               # after success, delete parsed source archives/files.
+
+# Output format
+# zst    = false              # zstd-compress classic output. od auto-enables zst.
+# no_uri = false              # emit host:login:password (drop URL path/query).
+# loose  = false              # accept loosely-formatted ULP lines.
+
+# Concurrency / tuning
+# workers  = 0                # parser/archive worker count (0 = auto).
+# temp_dir = "/var/tmp/sfl"   # temp files for archive fallback / od adapter.
+
+# UX / diagnostics
+# no_tui          = false     # disable live TUI; print plain summary at end.
+# debug           = false     # write structured job debug log in CWD.
+# debug_reject    = false     # append library-ingest rejected lines to a file next to the ingest debug log.
+# no_update_check = false     # disable update availability checks.
+# bell            = false     # play a short sound when the run finishes.
+# env             = false     # copy env/key files flat into <out>/sfl_<timestamp>_secrets/.
+# json_out        = "-"       # stream live stats as NDJSON: "-" = stdout, path = file.
+# json_every      = "800ms"   # update interval for json_out (floor 200ms).
