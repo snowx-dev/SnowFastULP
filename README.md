@@ -40,19 +40,6 @@ irm https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install
 sfu .\dump.txt -o .\cleaned\
 ```
 
-**Android (Termux) / linux arm64:** the installer works on-device too
-(Termux, proot-distro, `adb shell`):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/snowx-dev/SnowFastULP/main/scripts/install.sh | bash
-sfu ./dump.txt -o ./cleaned/
-```
-
-Or download the `SnowFastULP-<version>-android-arm64` assets (plus
-`-Search-`/`-Log-`) straight from the Releases page — they are static
-binaries, no dependencies. In Termux, install them into
-`$HOME/.local/bin` or `$PREFIX/bin`.
-
 After installing, open a new terminal so PATH is updated. Point `sfu` at a file or folder, keep the result somewhere useful. That is the whole first run.
 
 ```bash
