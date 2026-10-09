@@ -831,6 +831,7 @@ func run(cfg runConfig) (runErr error) {
 		}
 	}
 
+	var deletedPaths []string
 	if cfg.DeleteSources && !cfg.DryRun && historyNotRecordedMsg == "" {
 		// Deletion is globally suppressed when history was not recorded: the
 		// run's state is incomplete, so the sources must stay untouched.
@@ -854,7 +855,9 @@ func run(cfg runConfig) (runErr error) {
 		}
 		// -del transparency: the summary must say what was destroyed. Failed
 		// sources are kept by design; count them so "Preserved" shows why
-		// inputs survived a -del run.
+		// inputs survived a -del run. Path list is kept for the all-history-
+		// skip one-liner path, which has no recap Deleted row (sfu parity).
+		deletedPaths = deleted
 		stats.DeletedSources = len(deleted)
 		preserved := 0
 		for _, r := range results {
@@ -890,6 +893,9 @@ func run(cfg runConfig) (runErr error) {
 	// sfu's history-only summary exactly (cmd/sfu/history.go): one ✓ line to
 	// stderr, no recap box, no update banner/tagline. -odr previews keep the
 	// box: the dry-run recap carries preview info the one-liner would hide.
+	// When -del removed sources, the path list is printed after the ✓ line
+	// (same shape as sfu's history-only -del report); the recap Deleted row
+	// is unavailable on this path.
 	case !cfg.DryRun && historyCommitErr == nil && historyAllSkipped(stats):
 		summary = []string{historySkipSummaryLine(stats.HistorySkipped)}
 	case cfg.LibraryDir != "" && libEmpty:
@@ -924,9 +930,10 @@ func run(cfg runConfig) (runErr error) {
 	}
 	// The automatic issue log replaces the old encrypted-archive warning box:
 	// when issues were captured and the log closed cleanly, one muted path
-	// footer points at the full, untruncated TSV (no paths, prose, or red
-	// block in the summary itself); when it could not be written, one plain
-	// diagnostic line replaces it. Both print after the live monitor stopped.
+	// footer points at the full, untruncated TSV (optionally annotating how
+	// many top-level archives had no matching password; no archive paths or
+	// red block in the summary itself); when it could not be written, one
+	// plain diagnostic line replaces it. Both print after the live monitor stopped.
 	if line := issueFailureLine(issueRes); line != "" {
 		fmt.Fprintln(os.Stderr, line)
 	} else if block := issueFooterBlock(issueRes); block != nil {
@@ -934,6 +941,11 @@ func run(cfg runConfig) (runErr error) {
 	}
 	for _, ln := range summary {
 		fmt.Fprintln(os.Stderr, ln)
+	}
+	// All-history-skip has no recap box, so -del transparency rides here —
+	// same "history: deleted N source(s):" block sfu prints after its ✓ line.
+	if !cfg.DryRun && historyCommitErr == nil && historyAllSkipped(stats) && len(deletedPaths) > 0 {
+		reportHistoryDeleted(os.Stderr, deletedPaths)
 	}
 	// A failed history write keeps its full error detail out of the box (the
 	// box stays terse); one plain diagnostic line after the summary carries it,
@@ -983,11 +995,22 @@ func run(cfg runConfig) (runErr error) {
 // issueFooterBlock returns the muted Issues path footer for a successful log
 // close that captured issues, or nil when there is nothing to show (zero
 // issues, or a failed close — the caller prints issueFailureLine instead).
+// When any top-level archive had no matching password, the label carries that
+// count (singular/plural) so the summary stays minimal while still flagging
+// the decrypt misses; nested password misses stay in the log only.
 func issueFooterBlock(res issueLogResult) []string {
 	if res.Err != nil || res.Count == 0 {
 		return nil
 	}
-	return renderSflPathFooter("Issues   ", []string{res.Path}, sflMutedStyle)
+	label := "Issues   "
+	if n := res.TopLevelPasswordNotFound; n > 0 {
+		noun := "archives"
+		if n == 1 {
+			noun = "archive"
+		}
+		label = fmt.Sprintf("Issues (%d %s had no correct passwords given) ", n, noun)
+	}
+	return renderSflPathFooter(label, []string{res.Path}, sflMutedStyle)
 }
 
 // historyAllSkipped reports whether the run was a pure all-history-skip:
@@ -1018,6 +1041,19 @@ func historySkipSummaryLine(n int) string {
 		sflOkStyle.Render("history:"),
 		sflCountStyle.Render(fmt.Sprintf("%d", n)),
 		sflMutedStyle.Render(fmt.Sprintf("%s already completed · nothing to process", noun)))
+}
+
+// reportHistoryDeleted mirrors sfu's history-only -del report
+// (cmd/sfu/main.go): "history: deleted N source(s):" plus one indented path
+// per removed source. Paths are printed as returned by deleteParsedSources.
+func reportHistoryDeleted(w io.Writer, deleted []string) {
+	if w == nil || len(deleted) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "history: deleted %d source(s):\n", len(deleted))
+	for _, path := range deleted {
+		fmt.Fprintln(w, "    "+path)
+	}
 }
 
 // issueFailureLine returns the plain one-line diagnostic for a failed issue
@@ -1316,6 +1352,8 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 	var lastFrac float64
 	var prevRegenAt time.Time
 	var prevRegenBytes int64
+	var prevWrittenAt time.Time
+	var prevWrittenBytes int64
 	prog.BeginIngest(func() sflog.IngestView {
 		ingestViewMu.Lock()
 		defer ingestViewMu.Unlock()
@@ -1331,7 +1369,18 @@ func ingestToLibrary(ctx context.Context, cfg runConfig, ulpPath string, prog *s
 			}
 			prevRegenAt, prevRegenBytes = now, cur
 		}
-		v := ingestView(m, odSnap, resolvedP.Load(), ulpBytes, regenBPS)
+		writeBPS := 0.0
+		{
+			wr := m.BytesWritten.Load()
+			now := time.Now()
+			if !prevWrittenAt.IsZero() {
+				if dt := now.Sub(prevWrittenAt).Seconds(); dt >= 0.05 {
+					writeBPS = float64(wr-prevWrittenBytes) / dt
+				}
+			}
+			prevWrittenAt, prevWrittenBytes = now, wr
+		}
+		v := ingestView(m, odSnap, resolvedP.Load(), ulpBytes, regenBPS, writeBPS)
 		v.Fraction = monotonic(v.Fraction, &lastFrac)
 		return v
 	})
@@ -1492,7 +1541,7 @@ func ingestRejectBreakdown(m *ulpengine.Metrics) string {
 }
 
 // ingestView snapshots the dedup engine's atomics into the icy INGESTING frame.
-func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, res *ulpengine.Resolved, ulpBytes int64, regenBPS float64) sflog.IngestView {
+func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, res *ulpengine.Resolved, ulpBytes int64, regenBPS, writeBPS float64) sflog.IngestView {
 	frac, status := ingestProgress(m, od, ulpBytes)
 	v := sflog.IngestView{
 		Fraction:          frac,
@@ -1510,6 +1559,7 @@ func ingestView(m *ulpengine.Metrics, od *ulpengine.ODMetrics, res *ulpengine.Re
 		BucketsBytesTotal: m.BucketsBytesTotal.Load(),
 		BusyWorkers:       m.BusyWorkers.Load(),
 		RegenBPS:          regenBPS,
+		WriteBPS:          writeBPS,
 	}
 	if res != nil {
 		v.DedupWorkers = int32(res.DedupWorkers)

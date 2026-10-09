@@ -672,27 +672,25 @@ func renderStatRow(label, inline string, stats []lineStat, innerW int) []string 
 		return []string{inline}
 	}
 	maxValW := 0
-	maxSubW := 0
 	for _, s := range stats {
 		if w := tuiVisibleWidth(s.value); w > maxValW {
 			maxValW = w
-		}
-		if w := tuiVisibleWidth(s.sublabel); w > maxSubW {
-			maxSubW = w
 		}
 	}
 	header := statLabel(label)
 	blank := strings.Repeat(" ", statLabelColWidth)
 
+	// value-first stacked layout (2026-10-08, user): mirrors the inline
+	// form's value-before-label reading order.
 	out := make([]string, 0, len(stats))
 	for i, s := range stats {
 		prefix := blank
 		if i == 0 {
 			prefix = header
 		}
-		sub := mutedStyle.Render(padRight(s.sublabel, maxSubW))
 		val := s.style.Render(padLeft(s.value, maxValW))
-		out = append(out, prefix+sub+"  "+val)
+		sub := mutedStyle.Render(s.sublabel)
+		out = append(out, prefix+val+" "+sub)
 	}
 	return out
 }
@@ -1126,7 +1124,7 @@ func renderShardLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	return out
 }
 
-func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, regenBPS float64, width int) []string {
+func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.Resolved, ramMB float64, cpuPct float64, writeBPS, regenBPS float64, width int) []string {
 	bd := m.BucketsDone.Load()
 	bt := m.BucketsTotal.Load()
 	pct2 := 0.0
@@ -1171,7 +1169,12 @@ func renderDedupLines(now time.Time, elapsed time.Duration, m *ulpengine.Metrics
 	systemRow := renderSystemRow(ramMB, cpuPct)
 
 	innerW := boxInnerWidth(width)
-	innerLines := renderLinesRow(linesInline, linesStats, innerW)
+	// Output row (v0.2 shape, relabeled from "Throughput"): first row of the
+	// dedup box so the Lines/unique-so-far row keeps its pre-v0.3 position.
+	outputRow := labelStyle.Render("Output") + strings.Repeat(" ", statLabelColWidth-6) +
+		"write " + byteStyle.Render(padRight(formatRate(writeBPS), rateColWidth))
+	innerLines := []string{outputRow}
+	innerLines = append(innerLines, renderLinesRow(linesInline, linesStats, innerW)...)
 	innerLines = append(innerLines, renderStatRow("Progress", progressInline, progressStats, innerW)...)
 	innerLines = append(innerLines, systemRow)
 	// -od: live library index scan while each bucket's dest set is loaded
@@ -1315,10 +1318,10 @@ func renderDoneLines(elapsed time.Duration, m *ulpengine.Metrics, r *ulpengine.R
 		"  " + mutedStyle.Render("across") + "  " +
 		countStyle.Render(fmt.Sprintf("%d", r.InputFileCount)) + " " + mutedStyle.Render(plural.Noun(r.InputFileCount, "file", "files"))
 	if r.HistorySkipped > 0 {
-		// skips are NOT in the totals above; this segment says how many
-		// discovered files were history-skipped
+		// skips are NOT in the totals above; "more" makes that explicit so
+		// the count isn't read as a subset of the accepted files
 		inputRow += mutedStyle.Render(",  ") +
-			countStyle.Render(fmt.Sprintf("%d", r.HistorySkipped)) + " " + mutedStyle.Render("skipped")
+			countStyle.Render(fmt.Sprintf("%d", r.HistorySkipped)) + " " + mutedStyle.Render("more skipped")
 	}
 	innerLines := []string{inputRow}
 	innerLines = append(innerLines,

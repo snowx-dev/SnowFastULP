@@ -544,8 +544,8 @@ func TestHistoryE2E_DryRunConsultsExistingHistoryWithoutRecording(t *testing.T) 
 	}
 	library := filepath.Join(dir, "preview-library")
 	output := runSFUE2E(t, bin, dir, inputsDir, "-odr", library, "-history", "-history-path", db, "-del")
-	// Input row reports accepted only: 1 file ingested, 1 skipped.
-	if !strings.Contains(output, "1 skipped") || !strings.Contains(output, "1 file") {
+	// Input row reports accepted only: 1 file ingested, 1 more skipped.
+	if !strings.Contains(output, "1 more skipped") || !strings.Contains(output, "1 file") {
 		t.Fatalf("dry-run did not report consulted hit:\n%s", output)
 	}
 	for _, input := range []string{hit, miss} {

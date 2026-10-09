@@ -1309,6 +1309,10 @@ func TestDispatchUpdateHelp(t *testing.T) {
 }
 
 func TestUserAgent(t *testing.T) {
+	// Pin the plain (no-marker) shape a real binary sends by stubbing the
+	// test-binary probe off.
+	inTest = func() bool { return false }
+	t.Cleanup(func() { inTest = testing.Testing })
 	cases := []struct {
 		bin, version, want string
 	}{
@@ -1325,6 +1329,12 @@ func TestUserAgent(t *testing.T) {
 		if got := userAgent(tc.bin, tc.version); got != tc.want {
 			t.Errorf("userAgent(%q, %q) = %q, want %q", tc.bin, tc.version, got, tc.want)
 		}
+	}
+
+	// Default under a go test binary: "; gotest" inside the parenthetical.
+	inTest = testing.Testing
+	if got := userAgent("sfu", "0.3"); got != "SnowFastULP-selfupdate/0.3 (sfu; gotest)" {
+		t.Errorf("userAgent(sfu, 0.3) = %q, want marker shape", got)
 	}
 }
 
@@ -1370,7 +1380,7 @@ func TestRunUpdateSendsUserAgentOnManifestAndAsset(t *testing.T) {
 	}
 
 	// invokedBin comes from productBasename(hooks.executablePath) = "sfu".
-	want := "SnowFastULP-selfupdate/0.1.1 (sfu)"
+	want := "SnowFastULP-selfupdate/0.1.1 (sfu; gotest)"
 	for _, path := range []string{"/releases/latest", "/asset/sfu", "/asset/sfs"} {
 		if got := ua[path]; got != want {
 			t.Errorf("User-Agent for %s = %q, want %q", path, got, want)

@@ -74,9 +74,14 @@ func TestIssueLoggerStablePlacementAndTSVContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if res.TopLevelPasswordNotFound != 1 {
+		t.Fatalf("TopLevelPasswordNotFound = %d, want 1", res.TopLevelPasswordNotFound)
+	}
 	got := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	want := []string{
 		"# sfl issues — " + startedOrNow(cfg).Format("2006-01-02 15:04:05"),
+		"# top-level archives with no correct password:",
+		"#   /data/locked.zip",
 		"# kind\tpath\tdetail",
 		"password-not-found\t/data/locked.zip\tnone of the candidate passwords worked",
 		"mixed-format\t/data/mixed.txt\tlabeled blocks kept; valid label-less URL/login/password lines discarded",
@@ -90,6 +95,38 @@ func TestIssueLoggerStablePlacementAndTSVContent(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("line %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// Nested password-not-found paths must not enter the top-level preamble or
+// the Issues footer count; only archives without a "!" nest marker count.
+func TestIssueLoggerTopLevelPasswordPreambleOmitsNested(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := runConfig{RunStamp: "20260920_test06b", OutputDir: tmp}
+	l := newIssueLogger(cfg)
+	l.Record("/data/outer.zip!inner.zip", sflog.IssuePasswordNotFound, nil)
+	l.Record("/data/locked.zip", sflog.IssuePasswordNotFound, nil)
+	l.Record("/data/locked.zip", sflog.IssuePasswordNotFound, nil) // dedupe
+	res := l.Close()
+	if res.Err != nil {
+		t.Fatalf("close err: %v", res.Err)
+	}
+	if res.TopLevelPasswordNotFound != 1 {
+		t.Fatalf("TopLevelPasswordNotFound = %d, want 1 (nested + dup ignored)", res.TopLevelPasswordNotFound)
+	}
+	data, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "#   /data/locked.zip\n") {
+		t.Fatalf("preamble missing top-level path:\n%s", body)
+	}
+	if strings.Contains(body, "#   /data/outer.zip!inner.zip") {
+		t.Fatalf("preamble must not list nested path:\n%s", body)
+	}
+	if strings.Count(body, "#   /data/locked.zip") != 1 {
+		t.Fatalf("top-level path must be listed once:\n%s", body)
 	}
 }
 
@@ -269,8 +306,34 @@ func TestIssueFooterBlockPresenceAndAbsence(t *testing.T) {
 	if !strings.Contains(joined, "Issues") {
 		t.Fatalf("footer missing Issues label:\n%s", joined)
 	}
+	if strings.Contains(joined, "no correct passwords") {
+		t.Fatalf("plain Issues label when TopLevelPasswordNotFound is 0:\n%s", joined)
+	}
 	if got := issueFooterBlock(issueLogResult{Count: 0}); got != nil {
 		t.Fatalf("zero issues must produce no footer, got %v", got)
+	}
+}
+
+// The Issues footer annotates only top-level decrypt misses, with
+// singular/plural "archive(s)".
+func TestIssueFooterBlockTopLevelPasswordCount(t *testing.T) {
+	one := issueFooterBlock(issueLogResult{
+		Path: "/tmp/iss.log", Count: 2, TopLevelPasswordNotFound: 1,
+	})
+	joined := strings.Join(one, "\n")
+	if !strings.Contains(joined, "Issues (1 archive had no correct passwords given)") {
+		t.Fatalf("singular label missing:\n%s", joined)
+	}
+	if strings.Contains(joined, "1 archives") {
+		t.Fatalf("singular must not use plural noun:\n%s", joined)
+	}
+
+	many := issueFooterBlock(issueLogResult{
+		Path: "/tmp/iss.log", Count: 5, TopLevelPasswordNotFound: 3,
+	})
+	joined = strings.Join(many, "\n")
+	if !strings.Contains(joined, "Issues (3 archives had no correct passwords given)") {
+		t.Fatalf("plural label missing:\n%s", joined)
 	}
 }
 

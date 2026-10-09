@@ -142,6 +142,7 @@ type IngestView struct {
 	RegenBytesRead    int64
 	RegenBytesTotal   int64
 	RegenBPS          float64
+	WriteBPS          float64
 	KeysLoaded        int64
 
 	// ULP read (shard)

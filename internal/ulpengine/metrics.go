@@ -31,10 +31,6 @@ type Metrics struct {
 	// already-in-library credentials (-od P2). 0 when -od off.
 	// sums into "Removed" alongside dups and rejects.
 	LinesSkippedByDest atomic.Int64
-	// records that reached the dedup lookup path (dest-set Contains +
-	// in-run seen-map scan). dest hits, in-run dupes and uniques all count;
-	// n==0 empty-header records don't (they continue before any lookup).
-	LinesScanned atomic.Int64
 
 	ChunksTotal atomic.Int64
 	ChunksDone  atomic.Int64

@@ -389,3 +389,59 @@ func TestHistoryE2E_AllSkippedOneLineSummary(t *testing.T) {
 		}
 	}
 }
+
+// All-history-skip + -del must report the irreversible removals after the ✓
+// line (sfu parity). Without this, the one-liner path hides Deleted entirely.
+func TestHistoryE2E_AllSkippedReportsDeletion(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "Passwords.txt")
+	if err := os.WriteFile(input, []byte("URL: a.com\nUSER: u\nPASS: p\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(dir, "history.sqlite3")
+	if err := run(historyRunConfig(input, filepath.Join(dir, "out1"), db)); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	cfg := historyRunConfig(input, filepath.Join(dir, "out2"), db)
+	cfg.DeleteSources = true
+	runErr := run(cfg)
+	os.Stderr = old
+	w.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if runErr != nil {
+		t.Fatalf("rerun err = %v, want clean", runErr)
+	}
+	if _, err := os.Stat(input); !os.IsNotExist(err) {
+		t.Fatalf("history hit not deleted: %v", err)
+	}
+	got := stripANSI(buf.String())
+	if !strings.Contains(got, "✓ history: 1 source already completed · nothing to process") {
+		t.Fatalf("missing all-skip ✓ line:\n%s", got)
+	}
+	wantHeader := "history: deleted 1 source(s):"
+	if !strings.Contains(got, wantHeader) {
+		t.Fatalf("missing deletion report %q:\n%s", wantHeader, got)
+	}
+	abs, err := filepath.Abs(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, abs) {
+		t.Fatalf("deletion report missing source path %q:\n%s", abs, got)
+	}
+	for _, bad := range []string{"Input ", "Lines ", "Unique", "Update available"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("all-skip -del summary must not contain %q:\n%s", bad, got)
+		}
+	}
+}

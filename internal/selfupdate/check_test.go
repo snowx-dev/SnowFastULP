@@ -274,8 +274,8 @@ func TestCheckerSendsUserAgent(t *testing.T) {
 	c.Start()
 	c.NoticeForSummary() // waits up to checkSummaryWait for the in-flight check
 
-	if ua, _ := gotUA.Load().(string); ua != "SnowFastULP-selfupdate/0.2 (sfu)" {
-		t.Fatalf("checker User-Agent = %q, want %q", ua, "SnowFastULP-selfupdate/0.2 (sfu)")
+	if ua, _ := gotUA.Load().(string); ua != "SnowFastULP-selfupdate/0.2 (sfu; gotest)" {
+		t.Fatalf("checker User-Agent = %q, want %q", ua, "SnowFastULP-selfupdate/0.2 (sfu; gotest)")
 	}
 }
 
@@ -299,7 +299,7 @@ func TestCheckerUserAgentFallsBackToUnknownForBadBinName(t *testing.T) {
 	c.Start()
 	c.NoticeForSummary()
 
-	if ua, _ := gotUA.Load().(string); ua != "SnowFastULP-selfupdate/0.2 (unknown)" {
-		t.Fatalf("checker User-Agent = %q, want %q", ua, "SnowFastULP-selfupdate/0.2 (unknown)")
+	if ua, _ := gotUA.Load().(string); ua != "SnowFastULP-selfupdate/0.2 (unknown; gotest)" {
+		t.Fatalf("checker User-Agent = %q, want %q", ua, "SnowFastULP-selfupdate/0.2 (unknown; gotest)")
 	}
 }

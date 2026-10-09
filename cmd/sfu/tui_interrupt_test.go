@@ -52,9 +52,10 @@ func TestRenderLinesRowStacksWhenTooWide(t *testing.T) {
 	if !strings.Contains(got[2], "1,345,678") {
 		t.Errorf("row 2 missing rejected: %q", got[2])
 	}
-	// numeric values right-padded to widest, 10 chars w/ commas
+	// value-first stacked layout: prefix(13) + value(widest, 10) + " " + sublabel
 	for i, row := range got {
-		if tuiVisibleWidth(row) < statLabelColWidth+len("accepted")+2+10 {
+		want := statLabelColWidth + 10 + 1 + tuiVisibleWidth(stats[i].sublabel)
+		if tuiVisibleWidth(row) < want {
 			t.Errorf("row %d narrower than expected alignment: visible width %d, content %q",
 				i, tuiVisibleWidth(row), row)
 		}

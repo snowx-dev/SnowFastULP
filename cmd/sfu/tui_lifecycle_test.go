@@ -236,7 +236,7 @@ func TestRenderDedupLinesODBlockCollapsesOn24Rows(t *testing.T) {
 
 	met := &ulpengine.Metrics{}
 	met.BucketsTotal.Store(64)
-	lines := renderDedupLines(time.Now(), time.Second, met, r, 100, 100, 320e6, 86)
+	lines := renderDedupLines(time.Now(), time.Second, met, r, 100, 100, 0, 320e6, 86)
 	if len(lines) > 23 {
 		t.Fatalf("frame grew past termHeight-1 (24): %d lines", len(lines))
 	}

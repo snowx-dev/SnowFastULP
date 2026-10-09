@@ -1109,7 +1109,7 @@ func monitor(done <-chan struct{}, started time.Time, eng *tuiEngine, signaled f
 
 	var prevAt time.Time
 	var prevNormPhase int32 = -2 // sentinel, no prior sample
-	var prevRead, prevShard int64
+	var prevRead, prevShard, prevWritten int64
 	// separate prev-state for OD regen bytes so the OD frame's
 	// rate row ticks every redraw regardless of main frame state
 	var prevRegenAt time.Time
@@ -1146,13 +1146,15 @@ func monitor(done <-chan struct{}, started time.Time, eng *tuiEngine, signaled f
 
 		read := m.BytesRead.Load()
 		sh := m.BytesShard.Load()
+		wr := m.BytesWritten.Load()
 
-		var readBPS, shardBPS float64
+		var readBPS, shardBPS, writeBPS float64
 		if !prevAt.IsZero() && normPhase == prevNormPhase {
 			dt := now.Sub(prevAt).Seconds()
 			if dt >= 0.05 {
 				readBPS = float64(read-prevRead) / dt
 				shardBPS = float64(sh-prevShard) / dt
+				writeBPS = float64(wr-prevWritten) / dt
 			}
 		}
 
@@ -1184,7 +1186,7 @@ func monitor(done <-chan struct{}, started time.Time, eng *tuiEngine, signaled f
 		case ulpengine.PhaseInit, ulpengine.PhaseShard:
 			lines = renderShardLines(now, elapsed, m, r, ramMB, cpuPct, readBPS, shardBPS, regenBPS, w)
 		case ulpengine.PhaseDedup:
-			lines = renderDedupLines(now, elapsed, m, r, ramMB, cpuPct, regenBPS, w)
+			lines = renderDedupLines(now, elapsed, m, r, ramMB, cpuPct, writeBPS, regenBPS, w)
 		case ulpengine.PhaseDone:
 			// DONE is drawn to regular screen in main after alt-screen
 			// leave so it sticks in scrollback. drawing here would

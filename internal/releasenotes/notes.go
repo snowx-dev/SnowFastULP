@@ -20,6 +20,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
@@ -63,11 +64,15 @@ func notesClient() *http.Client { return &http.Client{Timeout: notesTimeout} }
 // uaTokenRe accepts the build-identifier shapes we ship ("0.2", "0.2-dev",
 // "0.3.1+build5"); binNameRe the valid lowercase binary names. Both mirror
 // internal/selfupdate's userAgent validation so the notes request carries
-// the same "SnowFastULP-selfupdate/<version> (<bin>)" header discipline.
+// the same "SnowFastULP-selfupdate/<version> (<bin>)" header discipline —
+// including selfupdate's "; gotest" marker under a go test binary (inTest is
+// duplicated alongside it; importing selfupdate here would cycle).
 var (
 	uaTokenRe = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._\-+~]{0,63}$`)
 	binNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 )
+
+var inTest = testing.Testing // package var so tests can pin both UA shapes
 
 func notesUserAgent(bin, version string) string {
 	if !binNameRe.MatchString(bin) {
@@ -76,7 +81,11 @@ func notesUserAgent(bin, version string) string {
 	if !uaTokenRe.MatchString(version) {
 		version = "unknown"
 	}
-	return repoName + "-selfupdate/" + version + " (" + bin + ")"
+	ua := repoName + "-selfupdate/" + version + " (" + bin
+	if inTest() {
+		ua += "; gotest"
+	}
+	return ua + ")"
 }
 
 // requireTransportSecurity rejects notes_url values that would fetch the

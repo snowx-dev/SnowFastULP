@@ -100,7 +100,7 @@ func TestRenderPhaseTagCounts(t *testing.T) {
 	if !strings.Contains(noOD, "[1/2 PARSING]") {
 		t.Errorf("non-od shard: want [1/2 PARSING]\n%s", noOD)
 	}
-	noODDedup := strings.Join(renderDedupLines(now, time.Second, m, base, 0, 0, 0, 86), "\n")
+	noODDedup := strings.Join(renderDedupLines(now, time.Second, m, base, 0, 0, 0, 0, 86), "\n")
 	if !strings.Contains(noODDedup, "[2/2 DEDUPING]") {
 		t.Errorf("non-od dedup: want [2/2 DEDUPING]\n%s", noODDedup)
 	}
@@ -121,7 +121,7 @@ func TestRenderPhaseTagCounts(t *testing.T) {
 	if !strings.Contains(p1, "[1/2 PARSING]") {
 		t.Errorf("od shard: want [1/2 PARSING]\n%s", p1)
 	}
-	p2 := strings.Join(renderDedupLines(now, time.Second, m, &withOD, 0, 0, 0, 86), "\n")
+	p2 := strings.Join(renderDedupLines(now, time.Second, m, &withOD, 0, 0, 0, 0, 86), "\n")
 	if !strings.Contains(p2, "[2/2 DEDUPING]") {
 		t.Errorf("od dedup: want [2/2 DEDUPING]\n%s", p2)
 	}
@@ -542,7 +542,7 @@ func TestRenderMainProgressBarsShowPhaseLabels(t *testing.T) {
 	m.BucketsTotal.Store(8)
 	m.BucketsBytesTotal.Store(1000)
 	m.BucketsBytesRead.Store(500)
-	dedupLines := renderDedupLines(time.Now(), time.Second, m, r, 100, 100, 0, 80)
+	dedupLines := renderDedupLines(time.Now(), time.Second, m, r, 100, 100, 0, 0, 80)
 	dedupJoined := strings.Join(dedupLines, "\n")
 	for _, want := range []string{"Parsing", "Deduping", "█", "░", "%"} {
 		if !strings.Contains(dedupJoined, want) {
@@ -603,7 +603,7 @@ func TestRenderDedupAndDoneFitsWidth(t *testing.T) {
 	}
 	for _, w := range []int{80, 60} {
 		now := time.Now()
-		ded := renderDedupLines(now, 48*time.Second, m, r, 290.1, 410.0, 0, w)
+		ded := renderDedupLines(now, 48*time.Second, m, r, 290.1, 410.0, 0, 0, w)
 		done := renderFinalStdoutSummary(131*time.Second, m, r, w, nil)
 		for _, ln := range append(ded, done...) {
 			if vw := tuiVisibleWidth(ln); vw > w {
@@ -663,7 +663,7 @@ func TestRenderDoneInputRowReportsAcceptedOnly(t *testing.T) {
 		HistorySkipped: 1,
 	}
 	joined := strings.Join(renderDoneLines(time.Second, m, r, 80), "\n")
-	for _, want := range []string{"20 B", "2 files", "1 skipped"} {
+	for _, want := range []string{"20 B", "2 files", "1 more skipped"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("Input row missing %q:\n%s", want, joined)
 		}
@@ -702,7 +702,7 @@ func TestRenderShardHistorySkipSubtitle(t *testing.T) {
 	if !strings.Contains(header, "30 skipped") {
 		t.Fatalf("skip badge must sit on the header line:\n%s", header)
 	}
-	dedup := strings.Join(renderDedupLines(time.Now(), time.Second, &ulpengine.Metrics{}, r, 100, 100, 0, 86), "\n")
+	dedup := strings.Join(renderDedupLines(time.Now(), time.Second, &ulpengine.Metrics{}, r, 100, 100, 0, 0, 86), "\n")
 	if strings.Contains(dedup, "30 skipped") {
 		t.Fatalf("dedup header must not carry the skip badge:\n%s", dedup)
 	}
@@ -840,7 +840,7 @@ func TestRenderDedupBarUsesByteProgress(t *testing.T) {
 		DedupWorkers: 2,
 		BucketCount:  8,
 	}
-	lines := renderDedupLines(time.Now(), time.Second, m, r, 100, 100, 0, 80)
+	lines := renderDedupLines(time.Now(), time.Second, m, r, 100, 100, 0, 0, 80)
 
 	// dedup bar is the only partially-filled one
 	var bar string
@@ -884,7 +884,7 @@ func TestRenderDedupHeaderDropsNarrationBadges(t *testing.T) {
 			BucketCount:  256,
 		}
 		now := time.Date(2026, 5, 9, 22, 30, 0, 0, time.UTC)
-		lines := renderDedupLines(now, 90*time.Second, m, r, 200, 100, 0, 80)
+		lines := renderDedupLines(now, 90*time.Second, m, r, 200, 100, 0, 0, 80)
 		joined := strings.Join(lines, "\n")
 		if strings.Contains(joined, "compressing") {
 			t.Errorf("compress=%v: narration badge must not render:\n%s", compress, joined)
@@ -908,7 +908,7 @@ func TestRenderDedupHeaderDropsLibraryNarration(t *testing.T) {
 	r.OdMetrics = &ulpengine.ODMetrics{}
 	r.OdMetrics.KeysTotalEstimate.Store(3_290_076_168)
 
-	lines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, 86)
+	lines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, 0, 86)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"[2/2 DEDUPING]", "DRY RUN"} {
 		if !strings.Contains(joined, want) {
@@ -938,7 +938,7 @@ func TestRenderDedupHeaderClockAlignsWithOtherPhases(t *testing.T) {
 	r.OdMetrics.KeysTotalEstimate.Store(3_290_076_168)
 
 	const width = 86
-	dedupLines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, width)
+	dedupLines := renderDedupLines(time.Now(), time.Minute, m, r, 0, 0, 0, 0, width)
 	// renderDedupLines emits {"", header, ...}; the header is lines[1].
 	if got := tuiVisibleWidth(dedupLines[1]); got != width-leftPad {
 		t.Errorf("dedup header visible width = %d, want %d (clock must align with renderHeader)\n%s",
@@ -1171,7 +1171,7 @@ func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
 	r.OdMetrics.KeysTotalEstimate.Store(1000)
 	r.OdMetrics.KeysLoaded.Store(250)
 
-	out := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 86), "\n")
+	out := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n")
 	if !strings.Contains(out, "matching") || !strings.Contains(out, "loaded") {
 		t.Fatalf("dedup frame missing library matching indicator:\n%s", out)
 	}
@@ -1182,7 +1182,7 @@ func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
 	// large libraries use full comma counts, not compact B suffix
 	r.OdMetrics.KeysTotalEstimate.Store(3_320_076_168)
 	r.OdMetrics.KeysLoaded.Store(2_370_000_000)
-	outLarge := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 86), "\n")
+	outLarge := strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n")
 	for _, want := range []string{"2,370,000,000", "3,320,076,168"} {
 		if !strings.Contains(outLarge, want) {
 			t.Fatalf("dedup frame missing full count %q:\n%s", want, outLarge)
@@ -1198,14 +1198,15 @@ func TestRenderDedupShowsLibraryReadProgress(t *testing.T) {
 	}
 
 	// non-od dedup must NOT show the library row
-	plain := strings.Join(renderDedupLines(time.Now(), time.Second, m, &ulpengine.Resolved{TotalInputs: 1, Workers: 1, DedupWorkers: 1, BucketCount: 4}, 0, 0, 0, 86), "\n")
+	plain := strings.Join(renderDedupLines(time.Now(), time.Second, m, &ulpengine.Resolved{TotalInputs: 1, Workers: 1, DedupWorkers: 1, BucketCount: 4}, 0, 0, 0, 0, 86), "\n")
 	if strings.Contains(plain, "Library") {
 		t.Fatalf("non-od dedup should not show Library row:\n%s", plain)
 	}
 }
 
-// Dedup box no longer shows a Hash lookup / Throughput rate row.
-func TestRenderDedupOmitsLookupAndThroughputRows(t *testing.T) {
+// Dedup box shows the relabeled Output rate row (v0.2 shape, 2026-10-08)
+// and no Hash lookup / Throughput rows.
+func TestRenderDedupShowsOutputNotLookupOrThroughputRows(t *testing.T) {
 	prev := lipgloss.DefaultRenderer().ColorProfile()
 	lipgloss.DefaultRenderer().SetColorProfile(termenv.Ascii)
 	defer lipgloss.DefaultRenderer().SetColorProfile(prev)
@@ -1213,11 +1214,14 @@ func TestRenderDedupOmitsLookupAndThroughputRows(t *testing.T) {
 	m.BucketsTotal.Store(4)
 	r := &ulpengine.Resolved{TotalInputs: 1, Workers: 1, DedupWorkers: 1, BucketCount: 4}
 
-	out := stripANSI(strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 86), "\n"))
-	for _, bad := range []string{"Hash lookup", "lines/s", "Throughput", "write"} {
+	out := stripANSI(strings.Join(renderDedupLines(time.Now(), time.Second, m, r, 0, 0, 0, 0, 86), "\n"))
+	for _, bad := range []string{"Hash lookup", "Throughput"} {
 		if strings.Contains(out, bad) {
 			t.Fatalf("dedup frame must not show %q:\n%s", bad, out)
 		}
+	}
+	if !strings.Contains(out, "Output") || !strings.Contains(out, "write") {
+		t.Fatalf("dedup frame missing Output write row:\n%s", out)
 	}
 	if !strings.Contains(out, "Lines") || !strings.Contains(out, "Progress") {
 		t.Fatalf("dedup frame missing Lines/Progress rows:\n%s", out)
@@ -1271,7 +1275,7 @@ func TestRenderDedupLibraryRowFitsWidthWithOD(t *testing.T) {
 	r.OdMetrics.KeysTotalEstimate.Store(3_320_076_168)
 	r.OdMetrics.KeysLoaded.Store(2_370_000_000)
 	for _, w := range []int{86, 60} {
-		lines := renderDedupLines(time.Now(), 48*time.Second, m, r, 290.1, 410.0, 0, w)
+		lines := renderDedupLines(time.Now(), 48*time.Second, m, r, 290.1, 410.0, 0, 0, w)
 		for _, ln := range lines {
 			// header badges can exceed width at 60 cols; box + bars must fit
 			if !strings.Contains(ln, "│") && !strings.Contains(ln, "Parsing") && !strings.Contains(ln, "Deduping") {
@@ -1281,5 +1285,29 @@ func TestRenderDedupLibraryRowFitsWidthWithOD(t *testing.T) {
 				t.Errorf("width=%d line visible width %d > %d: %q", w, vw, w, ln)
 			}
 		}
+	}
+}
+
+// Stacked stat rows read value-first (2026-10-08, user), mirroring the
+// inline form's "N unique so far" order.
+func TestRenderStatRowStacksValueFirst(t *testing.T) {
+	prev := lipgloss.DefaultRenderer().ColorProfile()
+	lipgloss.DefaultRenderer().SetColorProfile(termenv.Ascii)
+	defer lipgloss.DefaultRenderer().SetColorProfile(prev)
+	inline := statLabel("Lines") + "11 unique so far · 22 rejected (final)"
+	stats := []lineStat{
+		{"unique so far", "11", uniqueStyle},
+		{"rejected (final)", "22", mutedStyle},
+	}
+	rows := renderStatRow("Lines", inline, stats, 20)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 stacked rows, got %d:\n%s", len(rows), strings.Join(rows, "\n"))
+	}
+	plain := stripANSI(strings.Join(rows, "\n"))
+	if !strings.Contains(plain, "unique so far 11") && !strings.Contains(plain, "11 unique so far") {
+		t.Fatalf("stacked rows must pair value with its sublabel:\n%s", plain)
+	}
+	if strings.Contains(plain, "unique so far  11") { // label-first (old layout)
+		t.Fatalf("stacked rows must be value-first:\n%s", plain)
 	}
 }

@@ -932,7 +932,12 @@ func sflRenderDedupBlock(iv sflog.IngestView, inner, width int) []string {
 		"workers " + sflCountStyle.Render(sflIngestNumber(int64(iv.BusyWorkers), workersDigits)+" / "+formatInt(int(iv.DedupWorkers))+" busy")
 	systemRow := sflSystemRow(iv.RAMMB, iv.CPUPct)
 
-	innerLines := sflIngestStatRow("Lines", linesInline, inner)
+	// Output row (sfu parity, 2026-10-08): first row of the dedup block so the
+	// Lines/unique-so-far row keeps its position across both CLIs.
+	outputRow := sflStatLabel("Output") + "write " +
+		sflByteStyle.Render(formatRate(iv.WriteBPS))
+	innerLines := []string{outputRow}
+	innerLines = append(innerLines, sflIngestStatRow("Lines", linesInline, inner)...)
 	innerLines = append(innerLines, sflIngestStatRow("Progress", progressInline, inner)...)
 	innerLines = append(innerLines, systemRow)
 

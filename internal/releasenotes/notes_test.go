@@ -212,7 +212,7 @@ func TestFetchNotesHeaders(t *testing.T) {
 	if _, err := fetchNotes(srv.URL, "sfu", "0.2.0"); err != nil {
 		t.Fatalf("fetchNotes: %v", err)
 	}
-	if want := "SnowFastULP-selfupdate/0.2.0 (sfu)"; gotUA != want {
+	if want := "SnowFastULP-selfupdate/0.2.0 (sfu; gotest)"; gotUA != want {
 		t.Errorf("User-Agent = %q, want %q", gotUA, want)
 	}
 	if want := notesAccept; gotAccept != want {

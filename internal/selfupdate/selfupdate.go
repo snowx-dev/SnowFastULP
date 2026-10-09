@@ -33,6 +33,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"testing"
 	"time"
 
 	"debug/buildinfo"
@@ -106,7 +107,11 @@ var uaTokenRe = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z._\-+~]{0,63}$`)
 // "SnowFastULP-selfupdate/0.2.0 (sfu)". A bin name that is not a valid
 // lowercase token (empty, spaces, "." stem) or a version that is empty or
 // not a token falls back to "unknown", so the header is always a single,
-// parseable line.
+// parseable line. Under a go test binary the parenthetical gains a "; gotest"
+// marker (e.g. "(sfu; gotest)") so server-side metrics can tell test traffic
+// from real client pings; real binaries never send it.
+var inTest = testing.Testing // package var so tests can pin both UA shapes
+
 func userAgent(bin, version string) string {
 	if !validBinName(bin) {
 		bin = "unknown"
@@ -114,7 +119,11 @@ func userAgent(bin, version string) string {
 	if !uaTokenRe.MatchString(version) {
 		version = "unknown"
 	}
-	return repoName + "-selfupdate/" + version + " (" + bin + ")"
+	ua := repoName + "-selfupdate/" + version + " (" + bin
+	if inTest() {
+		ua += "; gotest"
+	}
+	return ua + ")"
 }
 
 // product maps an on-disk binary name to its release asset prefix.

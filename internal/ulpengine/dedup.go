@@ -802,14 +802,6 @@ func dedupBucket(ctx context.Context, ws *dedupWorkState, inputPath string, buck
 		if m != nil {
 			m.BucketsBytesRead.Add(int64(n))
 		}
-		// every record that reaches the lookup path counts as scanned —
-		// dest hits, in-run dupes and uniques alike. per-record atomic Add
-		// (chosen over per-flush batching) matches the existing per-record
-		// BucketsBytesRead/LinesSkippedByDest adds; the loop already pays a
-		// SHA-256 per record, so one more add is noise.
-		if m != nil {
-			m.LinesScanned.Add(1)
-		}
 		// dest check first so library hits skip the seen map entirely.
 		// Residual risk (review C-02): dest keys come from library sidecars,
 		// which persist only the 64-bit key — no record lines or preimages —

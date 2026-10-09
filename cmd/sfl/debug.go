@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,12 +134,14 @@ func (d *debugLogger) Close() {
 
 // issueLogResult reports the outcome of the automatic issue log: where the
 // temp file landed (Path, empty unless issues were recorded and the close
-// succeeded), how many issues were seen (Count), and the first
-// create/write/close error (Err).
+// succeeded), how many issues were seen (Count), how many of those were
+// top-level archives with no matching password (TopLevelPasswordNotFound),
+// and the first create/write/close error (Err).
 type issueLogResult struct {
-	Path  string
-	Count int
-	Err   error
+	Path                     string
+	Count                    int
+	TopLevelPasswordNotFound int
+	Err                      error
 }
 
 // issueLogDir returns the stable directory for the automatic issue log. For a
@@ -172,14 +175,16 @@ var createIssueTemp = func(pattern string) (*os.File, error) {
 // Mode is 0600 where permissions are supported. nil remains a safe no-op for
 // all methods.
 type issueLogger struct {
-	mu     sync.Mutex
-	cfg    runConfig
-	dir    string
-	f      *os.File
-	count  int
-	err    error // first create/write/close error; sticky
-	closed bool
-	res    issueLogResult
+	mu           sync.Mutex
+	cfg          runConfig
+	dir          string
+	f            *os.File
+	count        int
+	topLevelNoPW []string // first-seen top-level password-not-found paths
+	topLevelSeen map[string]struct{}
+	err          error // first create/write/close error; sticky
+	closed       bool
+	res          issueLogResult
 }
 
 // newIssueLogger returns an always-wired lazy logger. No file is created here;
@@ -206,6 +211,8 @@ func (l *issueLogger) create(pattern string) (*os.File, error) {
 // Safe for concurrent worker calls; the mutex only guards this file, never the
 // extraction path. After a create/write failure the error is stored once and
 // writes stop retrying, while incoming events keep being counted.
+// Top-level password-not-found paths (no "!" nest marker) are remembered for
+// the close-time preamble and the Issues footer count.
 func (l *issueLogger) Record(path string, kind sflog.IssueKind, err error) {
 	if l == nil {
 		return
@@ -217,6 +224,15 @@ func (l *issueLogger) Record(path string, kind sflog.IssueKind, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.count++
+	if kind == sflog.IssuePasswordNotFound && !strings.Contains(path, "!") {
+		if l.topLevelSeen == nil {
+			l.topLevelSeen = make(map[string]struct{})
+		}
+		if _, dup := l.topLevelSeen[path]; !dup {
+			l.topLevelSeen[path] = struct{}{}
+			l.topLevelNoPW = append(l.topLevelNoPW, path)
+		}
+	}
 	if l.err != nil {
 		return
 	}
@@ -240,9 +256,10 @@ func (l *issueLogger) Record(path string, kind sflog.IssueKind, err error) {
 	}
 }
 
-// Close flushes the total footer and closes the file, returning the stored
-// result. Idempotent: repeated closes return the same result. A run with zero
-// issues never created a file and closes to a zero result.
+// Close flushes the total footer, prepends any top-level password-miss list,
+// and closes the file, returning the stored result. Idempotent: repeated
+// closes return the same result. A run with zero issues never created a file
+// and closes to a zero result.
 func (l *issueLogger) Close() issueLogResult {
 	if l == nil {
 		return issueLogResult{}
@@ -254,6 +271,7 @@ func (l *issueLogger) Close() issueLogResult {
 	}
 	l.closed = true
 	l.res.Count = l.count
+	l.res.TopLevelPasswordNotFound = len(l.topLevelNoPW)
 	if l.err != nil {
 		l.res.Err = l.err
 		if l.f != nil {
@@ -273,8 +291,37 @@ func (l *issueLogger) Close() issueLogResult {
 		l.res.Err = cerr
 	}
 	l.f = nil
+	if l.res.Err == nil && len(l.topLevelNoPW) > 0 {
+		l.res.Err = rewriteIssueLogWithTopLevel(name, l.topLevelNoPW)
+	}
 	if l.res.Err == nil {
 		l.res.Path = name
 	}
 	return l.res
+}
+
+// rewriteIssueLogWithTopLevel inserts a commented list of top-level archives
+// that had no matching password immediately under the stamp header so the
+// analyst can find them without scanning the TSV body.
+func rewriteIssueLogWithTopLevel(path string, topLevel []string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(data)
+	nl := strings.IndexByte(text, '\n')
+	if nl < 0 {
+		return fmt.Errorf("issue log missing header newline")
+	}
+	var b strings.Builder
+	b.Grow(len(text) + 64*len(topLevel))
+	b.WriteString(text[:nl+1])
+	b.WriteString("# top-level archives with no correct password:\n")
+	for _, p := range topLevel {
+		b.WriteString("#   ")
+		b.WriteString(p)
+		b.WriteByte('\n')
+	}
+	b.WriteString(text[nl+1:])
+	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
