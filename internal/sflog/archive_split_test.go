@@ -43,6 +43,34 @@ func splitBlob(t *testing.T, dir, logical string, blob []byte, n int) []string {
 	return parts
 }
 
+// splitBlobPart writes blob into dir as "<logical>.part.00", ".part.01", ...
+// in n roughly equal parts, reproducing the Telegram-style 0-based ".part.NN"
+// byte-split naming.
+func splitBlobPart(t *testing.T, dir, logical string, blob []byte, n int) []string {
+	t.Helper()
+	if n < 1 {
+		n = 1
+	}
+	chunk := (len(blob) + n - 1) / n
+	var parts []string
+	for i := 0; ; i++ {
+		start := i * chunk
+		end := start + chunk
+		if end > len(blob) {
+			end = len(blob)
+		}
+		p := filepath.Join(dir, fmt.Sprintf("%s.part.%02d", logical, i))
+		if err := os.WriteFile(p, blob[start:end], 0o644); err != nil {
+			t.Fatal(err)
+		}
+		parts = append(parts, p)
+		if end >= len(blob) {
+			break
+		}
+	}
+	return parts
+}
+
 // collectCtx returns an extractCtx that gathers emitted creds and captures debug
 // lines, with no Progress (creditor is nil-safe).
 func collectCtx(t *testing.T, passwords []string, display string) (*extractCtx, *[]Credential, *[]string) {
@@ -82,6 +110,35 @@ func TestReadSplitArchivePlainZip(t *testing.T) {
 		t.Fatalf("cred URL = %q", (*creds)[0].URL)
 	}
 	if !anyContains(*dbg, "opening split set (3 parts, .zip") {
+		t.Fatalf("missing split-set debug line: %v", *dbg)
+	}
+}
+
+// TestReadSplitArchiveUserStyleParts drives the Telegram-style 0-based
+// ".part.NN" naming: the logical name derivation must strip ".part.NN", not
+// just ".NNN", or the reader sees a ".part" extension and bails.
+func TestReadSplitArchiveUserStyleParts(t *testing.T) {
+	blob := zipBytes(t, map[string][]byte{
+		"victim/Passwords.txt": []byte("URL: https://userparts.example/login\nUSER: a\nPASS: p\n"),
+	})
+	dir := t.TempDir()
+	parts := splitBlobPart(t, dir, "x.zip", blob, 2)
+	if len(parts) < 2 {
+		t.Fatalf("expected a multi-part split, got %d parts", len(parts))
+	}
+
+	ec, creds, dbg := collectCtx(t, []string{""}, parts[0])
+	scan, err := readSplitArchive(context.Background(), parts, *ec, 300)
+	if err != nil {
+		t.Fatalf("readSplitArchive: %v", err)
+	}
+	if scan.files != 1 || len(*creds) != 1 {
+		t.Fatalf("scan=%+v creds=%v, want 1 file / 1 cred", scan, *creds)
+	}
+	if !strings.Contains((*creds)[0].URL, "userparts.example") {
+		t.Fatalf("cred URL = %q", (*creds)[0].URL)
+	}
+	if !anyContains(*dbg, "opening split set (2 parts, .zip") {
 		t.Fatalf("missing split-set debug line: %v", *dbg)
 	}
 }

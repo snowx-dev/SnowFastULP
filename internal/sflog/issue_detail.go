@@ -24,7 +24,7 @@ func IssueDetail(is Issue) string {
 	case IssuePasswordNotFound:
 		return "none of the candidate passwords worked"
 	case IssueMissingVolume:
-		return "first volume of the set is missing"
+		return "first part of the set is missing"
 	case IssueEnvCopy:
 		if is.Err != nil {
 			return is.Err.Error()

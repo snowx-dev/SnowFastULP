@@ -116,12 +116,13 @@ func rarVolumeRole(path string) (isVolume, isFirst bool, setKey string) {
 	return true, n == 1, filepath.Join(filepath.Dir(path), m[1])
 }
 
-// splitPartName matches a raw byte-split archive part of the form
-// "<logical>.<zip|7z>.NNN" (case-insensitive, 2-3 digit index). Group 1 is the
-// logical archive name (e.g. "foo.zip"), group 2 the part number. These are
-// produced by 7z's -v split and the `split` tool: concatenating the parts in
-// order reproduces the original single archive.
-var splitPartName = regexp.MustCompile(`(?i)^(.*\.(?:zip|7z))\.(\d{2,3})$`)
+// splitPartName matches a raw byte-split archive part, either 1-based
+// "<logical>.<zip|7z>.NNN" (7z -v / split tool) or 0-based
+// "<logical>.<zip|7z>.part.NN" (Telegram-style splitters). Group 1 is the
+// logical archive name (e.g. "foo.zip"), group 2 the captured ".part" infix
+// ("" for 1-based), group 3 the part number. Concatenating the parts in order
+// reproduces the original single archive.
+var splitPartName = regexp.MustCompile(`(?i)^(.*\.(?:zip|7z))(\.part)?\.(\d{2,3})$`)
 
 // isSplitArchivePart reports whether path is any part of a raw byte-split
 // archive set. Used by discovery so split parts (whose extension is .NNN, not a
@@ -131,19 +132,24 @@ func isSplitArchivePart(path string) bool {
 	return isPart
 }
 
-// splitPartRole classifies a path within a raw byte-split archive set, mirroring
-// rarVolumeRole: isPart when it matches the ".NNN" scheme, isFirst when the
-// index is 1, and setKey = directory + logical name so sibling parts group.
+// splitPartRole classifies a path within a raw byte-split archive set:
+// isPart when it matches either scheme, isFirst when the index is 1 (1-based
+// ".NNN" sets start at .001) or 0 (".part." sets start at .part.00), and
+// setKey = directory + logical name + infix so sibling parts group — the infix
+// stays in the key so a bare set and a ".part." set of the same logical name
+// never merge.
 func splitPartRole(path string) (isPart, isFirst bool, setKey string) {
 	m := splitPartName.FindStringSubmatch(filepath.Base(path))
 	if m == nil {
 		return false, false, ""
 	}
-	n, err := strconv.Atoi(m[2])
+	n, err := strconv.Atoi(m[3])
 	if err != nil {
 		return false, false, ""
 	}
-	return true, n == 1, filepath.Join(filepath.Dir(path), m[1])
+	infix := strings.ToLower(m[2])
+	isFirst = (infix == "" && n == 1) || (infix != "" && n == 0)
+	return true, isFirst, filepath.Join(filepath.Dir(path), m[1]+infix)
 }
 
 // rarVolumeSet returns the ordered on-disk volumes of the set that `first`
@@ -219,7 +225,7 @@ func splitPartSet(first string) (parts []string, complete bool) {
 			continue
 		}
 		m := splitPartName.FindStringSubmatch(e.Name())
-		n, _ := strconv.Atoi(m[2])
+		n, _ := strconv.Atoi(m[3])
 		got = append(got, part{n: n, p: p})
 	}
 	if len(got) == 0 {
@@ -228,8 +234,9 @@ func splitPartSet(first string) (parts []string, complete bool) {
 	sort.Slice(got, func(i, j int) bool { return got[i].n < got[j].n })
 	out := make([]string, len(got))
 	complete = true
+	base := got[0].n
 	for i, v := range got {
-		if v.n != i+1 { // gap in the 1..N sequence
+		if v.n != base+i { // gap in the base..base+N-1 sequence
 			complete = false
 		}
 		out[i] = v.p
@@ -284,7 +291,7 @@ func groupArchiveVolumes(archives []string, weightOf func(string) int64, keyOf f
 		}
 		if isPart, isFirst, key := splitPartRole(a); isPart {
 			m := splitPartName.FindStringSubmatch(filepath.Base(a))
-			n, _ := strconv.Atoi(m[2])
+			n, _ := strconv.Atoi(m[3])
 			splitSets[key] = append(splitSets[key], numbered{n, a})
 			if isFirst {
 				splitFirst[key] = true
@@ -324,11 +331,13 @@ func groupArchiveVolumes(archives []string, weightOf func(string) int64, keyOf f
 		}
 		return out
 	}
-	// contiguous reports whether the ordered parts cover 1..N with no gap, so an
-	// incomplete split set (a hole in the concatenated reader) can be skipped.
+	// contiguous reports whether the ordered parts run base..base+N-1 with no
+	// gap (1-based sets: 1..N; ".part." sets: 0..N-1), so an incomplete split
+	// set (a hole in the concatenated reader) can be skipped.
 	contiguous := func(v []numbered) bool {
+		base := v[0].n
 		for i := range v {
-			if v[i].n != i+1 {
+			if v[i].n != base+i {
 				return false
 			}
 		}

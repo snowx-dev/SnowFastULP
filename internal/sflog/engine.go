@@ -23,9 +23,9 @@ import (
 // errPasswordNotFound marks an archive that no password candidate could open.
 var errPasswordNotFound = errors.New("password not found")
 
-// errMissingFirstVolume marks an orphaned multi-volume RAR continuation part
-// (e.g. a stray name.part2.rar with no name.part1.rar present).
-var errMissingFirstVolume = errors.New("first volume of the set not found (name.part1.rar / .part01.rar)")
+// errMissingFirstVolume marks an orphaned multi-volume part (a RAR continuation
+// or a raw byte-split ".NNN"/".part.NN" part) whose set head is absent.
+var errMissingFirstVolume = errors.New("first part of the set not found (.zip/.7z .001 or .part.00 head / name.part1.rar)")
 
 // callbackGuard converts a panic inside an integration callback (Engine Debug,
 // Engine OnIssue, EnvCopier error handler) into a run error. Untrusted hooks

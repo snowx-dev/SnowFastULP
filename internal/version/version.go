@@ -6,7 +6,7 @@ package version
 import "strings"
 
 // String is the version banner. edit only on a real source bump.
-var String = "0.3"
+var String = "0.4"
 
 // Compare returns -1, 0, or 1 if a is older, equal, or newer than b.
 // Versions are dotted-numeric (e.g. "0.1.1"); missing trailing components count

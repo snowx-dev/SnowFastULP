@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/demo/windows-vm/shared"
 BIN="$OUT/bin"
-VERSION="${VERSION:-0.3}"
+VERSION="${VERSION:-0.4}"
 
 mkdir -p "$BIN"
 

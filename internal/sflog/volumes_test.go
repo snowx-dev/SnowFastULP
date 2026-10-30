@@ -31,6 +31,11 @@ func TestSplitPartRole(t *testing.T) {
 		{"/d/movie.mp4.001", false, false, ""}, // not a zip/7z logical name
 		{"/d/foo.rar.001", false, false, ""},   // rar split not in scope
 		{"/d/foo.zip.1", false, false, ""},     // single digit not matched
+		{"/d/23-24 OCTOBER - 17900PCS.zip.part.00", true, true, "23-24 OCTOBER - 17900PCS.zip.part"},
+		{"/d/x.7z.part.07", true, false, "x.7z.part"},
+		{"/d/x.part.00", false, false, ""},         // no .zip/.7z logical name
+		{"/d/backup.zip.part", false, false, ""},   // infix without index
+		{"/d/foo.zip.part.0000", false, false, ""}, // 4+ digit index: documented ceiling
 	}
 	for _, tc := range cases {
 		isPart, isFirst, key := splitPartRole(tc.path)
@@ -77,6 +82,34 @@ func TestSplitPartSetContiguity(t *testing.T) {
 	// A continuation part (not first) is never treated as a set head.
 	if _, complete := splitPartSet(filepath.Join(dir, "big.zip.002")); complete {
 		t.Fatal("non-first part should not report complete")
+	}
+
+	// 0-based ".part.NN" set: complete 00..02.
+	partDir := t.TempDir()
+	for _, n := range []string{"big.zip.part.00", "big.zip.part.01", "big.zip.part.02"} {
+		touch(t, filepath.Join(partDir, n))
+	}
+	parts, complete = splitPartSet(filepath.Join(partDir, "big.zip.part.00"))
+	if !complete || len(parts) != 3 {
+		t.Fatalf("complete .part. set: parts=%v complete=%v", parts, complete)
+	}
+	for i, want := range []string{"big.zip.part.00", "big.zip.part.01", "big.zip.part.02"} {
+		if parts[i] != filepath.Join(partDir, want) {
+			t.Fatalf(".part. part[%d] = %q, want %q", i, parts[i], filepath.Join(partDir, want))
+		}
+	}
+
+	// Gap in a .part. set (missing .part.01) => incomplete.
+	partGap := t.TempDir()
+	touch(t, filepath.Join(partGap, "y.zip.part.00"))
+	touch(t, filepath.Join(partGap, "y.zip.part.02"))
+	if parts, complete := splitPartSet(filepath.Join(partGap, "y.zip.part.00")); complete {
+		t.Fatalf(".part. gap set should be incomplete: parts=%v", parts)
+	}
+
+	// A .part. continuation (not the .part.00 head) is never a set head.
+	if _, complete := splitPartSet(filepath.Join(partDir, "big.zip.part.02")); complete {
+		t.Fatal(".part. non-first part should not report complete")
 	}
 }
 
@@ -146,6 +179,45 @@ func TestGroupArchiveVolumesSplitOrphanAndGap(t *testing.T) {
 	}
 	if items[0].volumes != nil {
 		t.Fatalf("incomplete set must not carry volumes (would read a hole): %+v", items[0])
+	}
+}
+
+func TestGroupArchiveVolumesUserStyleSplitParts(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for _, n := range []string{"a.zip.part.00", "a.zip.part.01", "a.zip.part.02"} {
+		paths = append(paths, touch(t, filepath.Join(dir, n)))
+	}
+	items := groupArchiveVolumes(sortPaths(paths), fixedWeight, idKey)
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1: %+v", len(items), items)
+	}
+	it := items[0]
+	if it.path != filepath.Join(dir, "a.zip.part.00") || it.assembly != assemblySplitParts {
+		t.Fatalf("item = %+v, want .part.00 head split item", it)
+	}
+	want := []string{
+		filepath.Join(dir, "a.zip.part.00"),
+		filepath.Join(dir, "a.zip.part.01"),
+		filepath.Join(dir, "a.zip.part.02"),
+	}
+	if len(it.volumes) != 3 {
+		t.Fatalf("volumes = %v, want 3 in order", it.volumes)
+	}
+	for i := range want {
+		if it.volumes[i] != want[i] {
+			t.Fatalf("volumes[%d] = %q, want %q", i, it.volumes[i], want[i])
+		}
+	}
+	if it.weight != 300 || it.missingFirstVolume {
+		t.Fatalf("weight=%d missingFirst=%v, want 300 / false", it.weight, it.missingFirstVolume)
+	}
+
+	// Orphan infix continuation: only b.zip.part.01 → one missing-first skip.
+	orphan := touch(t, filepath.Join(t.TempDir(), "b.zip.part.01"))
+	items = groupArchiveVolumes([]string{orphan}, fixedWeight, idKey)
+	if len(items) != 1 || !items[0].missingFirstVolume || items[0].volumes != nil {
+		t.Fatalf("orphan: items=%+v, want 1 missing-first skip", items)
 	}
 }
 

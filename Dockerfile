@@ -16,7 +16,7 @@
 
 # ─── 1. builder ─────────────────────────────────────────────────────────────
 FROM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS builder
-ARG VERSION=0.3
+ARG VERSION=0.4
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 WORKDIR /src

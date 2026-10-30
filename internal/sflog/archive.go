@@ -2863,7 +2863,10 @@ func readSplitArchive(ctx context.Context, parts []string, ec extractCtx, weight
 	}
 	defer ra.Close()
 
-	logical := strings.TrimSuffix(parts[0], filepath.Ext(parts[0])) // drop ".NNN"
+	logical := parts[0]
+	if m := splitPartName.FindStringSubmatch(filepath.Base(parts[0])); m != nil {
+		logical = m[1] // drop ".NNN" or ".part.NN"
+	}
 	ext := strings.ToLower(filepath.Ext(logical))
 	ec.debugf("archive %s: opening split set (%d parts, %s, weight=%dB)",
 		ec.display, len(parts), ext, weight)
